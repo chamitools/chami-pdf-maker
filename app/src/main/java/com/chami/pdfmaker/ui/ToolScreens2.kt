@@ -32,6 +32,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -606,12 +607,22 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
         Spacer(Modifier.height(Ds.s16))
         SectionText("Target size", color = theme.text)
         Spacer(Modifier.height(Ds.s8))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          listOf(100 to "Under 100 KB", 200 to "Under 200 KB", 500 to "Under 500 KB", 1024 to "Under 1 MB").forEach { (kb, label) ->
-            ChamiChip(label, targetKb == kb, { vibrate(); targetKb = kb; customInput = "" })
+        // Compact 2x2 grid (8dp gaps) — the old single Row was ~545dp
+        // wide on a ~360dp screen, so chips ran off-screen and the
+        // block looked spaced out. Same options, same behaviour.
+        Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
+          listOf(
+            listOf(100 to "Under 100 KB", 200 to "Under 200 KB"),
+            listOf(500 to "Under 500 KB", 1024 to "Under 1 MB")
+          ).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+              row.forEach { (kb, label) ->
+                ChamiChip(label, targetKb == kb, { vibrate(); targetKb = kb; customInput = "" }, modifier = Modifier.weight(1f))
+              }
+            }
           }
         }
-        Spacer(Modifier.height(Ds.s12))
+        Spacer(Modifier.height(Ds.s8))
         DebouncedTextField(
           value = customInput,
           onValueChange = {
@@ -1069,24 +1080,30 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
       Spacer(Modifier.height(Ds.s16))
       SectionText("Presets", color = theme.text)
       Spacer(Modifier.height(Ds.s8))
-      Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+      // Compact 2-row grid (8dp gaps) — the old single Row was ~600dp
+      // wide on a ~360dp screen, so presets ran off-screen. Same
+      // presets, same behaviour. (Same screen as Image Resizer.)
+      Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
         listOf(
-          "WhatsApp" to ("1080" to "1080"),
-          "Instagram post" to ("1080" to "1350"),
-          "Instagram story" to ("1080" to "1920"),
-          "Passport" to ("413" to "531"),
-          "A4" to ("1240" to "1754")
-        ).forEach { (label, wh) ->
-          val isSel = widthStr == wh.first && heightStr == wh.second
-          ChamiChip(label, isSel, {
-            vibrate()
-            widthStr = wh.first
-            heightStr = wh.second
-          })
+          listOf("WhatsApp" to ("1080" to "1080"), "Instagram post" to ("1080" to "1350"), "Instagram story" to ("1080" to "1920")),
+          listOf("Passport" to ("413" to "531"), "A4" to ("1240" to "1754"))
+        ).forEach { row ->
+          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+            row.forEach { (label, wh) ->
+              val isSel = widthStr == wh.first && heightStr == wh.second
+              ChamiChip(label, isSel, {
+                vibrate()
+                widthStr = wh.first
+                heightStr = wh.second
+              }, modifier = Modifier.weight(1f))
+            }
+            // Keep both rows the same width: pad the short row.
+            if (row.size < 3) Spacer(Modifier.weight(1f))
+          }
         }
       }
 
-      Spacer(Modifier.height(Ds.s16))
+      Spacer(Modifier.height(Ds.s8))
       Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
         Text("Lock aspect ratio", fontSize = Ds.BODY_SP.sp, color = theme.text)
         Switch(checked = lockRatio, onCheckedChange = { lockRatio = it })
@@ -1116,8 +1133,8 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
         Spacer(Modifier.height(Ds.s4))
         Text("Enter a width and height above 0.", fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
       }
-      Spacer(Modifier.height(Ds.s12))
-      Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+      Spacer(Modifier.height(Ds.s8))
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
         listOf("25%" to 0.25f, "50%" to 0.5f, "75%" to 0.75f, "Original" to 1f).forEach { (label, pct) ->
           ChamiChip(label, false, {
             vibrate()
@@ -1125,7 +1142,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
               widthStr = (ow * pct).toInt().coerceAtLeast(1).toString()
               heightStr = (oh * pct).toInt().coerceAtLeast(1).toString()
             }
-          })
+          }, modifier = Modifier.weight(1f))
         }
       }
       if (upscaleWarning) {
@@ -1145,7 +1162,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
       Spacer(Modifier.height(Ds.s8))
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
         listOf("JPG", "PNG", "WEBP").forEach { fmt ->
-          ChamiChip(fmt, formatChoice == fmt, { vibrate(); formatChoice = fmt })
+          ChamiChip(fmt, formatChoice == fmt, { vibrate(); formatChoice = fmt }, modifier = Modifier.weight(1f))
         }
       }
       if (formatChoice != "PNG") {
@@ -1472,11 +1489,13 @@ fun PdfReaderScreen(
   var scale by remember { mutableStateOf(2.0f) }
   var isNightMode by remember { mutableStateOf(false) }
   var pageInput by remember { mutableStateOf("1") }
-  var currentBitmap by remember { mutableStateOf<Bitmap?>(null) }
-  var isLoadingPage by remember { mutableStateOf(false) }
   var zoom by remember { mutableStateOf(1f) }
-  var pan by remember { mutableStateOf(Offset.Zero) }
   val pageBitmapCache = remember { mutableStateMapOf<Int, Bitmap>() }
+  // Continuous scroll (Google Drive style): the reader is one vertical
+  // list of pages; the current page follows the first visible page.
+  val listState = rememberLazyListState()
+  var showSearchBar by remember { mutableStateOf(false) }
+  var showBookmarksDialog by remember { mutableStateOf(false) }
   var searchQuery by remember { mutableStateOf("") }
   var searchPages by remember { mutableStateOf<List<Int>>(emptyList()) }
   var searchIndex by remember { mutableStateOf(0) }
@@ -1500,6 +1519,9 @@ fun PdfReaderScreen(
     if (page1Based in 1..totalPages) {
       currentPage = page1Based - 1
       pageInput = "$page1Based"
+      scope.launch {
+        try { listState.scrollToItem(page1Based - 1) } catch (_: Exception) {}
+      }
     }
   }
 
@@ -1580,12 +1602,12 @@ fun PdfReaderScreen(
     if (selected != null) {
       pageBitmapCache.values.forEach { try { it.recycle() } catch (_: Exception) {} }
       pageBitmapCache.clear()
-      currentBitmap = null
       totalPages = 0
       currentPage = 0
       pageInput = "1"
       searchPages = emptyList()
       bookmarks.clear()
+      scope.launch { try { listState.scrollToItem(0) } catch (_: Exception) {} }
     }
   }
 
@@ -1597,7 +1619,14 @@ fun PdfReaderScreen(
     loadBookmarks()
   }
 
-  LaunchedEffect(currentPage) { zoom = 1f; pan = Offset.Zero }
+  // The current page follows the first visible page in the scroll.
+  val firstVisiblePage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+  LaunchedEffect(firstVisiblePage) {
+    if (totalPages > 0) {
+      currentPage = firstVisiblePage.coerceIn(0, totalPages - 1)
+      pageInput = "${currentPage + 1}"
+    }
+  }
 
   // Re-render sharper after the pinch ends (debounced): render scale
   // follows the display zoom, up to 5x.
@@ -1610,33 +1639,6 @@ fun PdfReaderScreen(
     onDispose {
       pageBitmapCache.values.forEach { try { it.recycle() } catch (_: Exception) {} }
       pageBitmapCache.clear()
-    }
-  }
-
-  LaunchedEffect(pdfUri, currentPage, scale) {
-    val u = pdfUri ?: return@LaunchedEffect
-    if (scale <= 2.0f) {
-      pageBitmapCache[currentPage]?.let { cached ->
-        currentBitmap = cached
-        isLoadingPage = false
-        return@LaunchedEffect
-      }
-    }
-    isLoadingPage = true
-    withContext(Dispatchers.IO) {
-      val bmp = PdfReader.renderPageBitmap(ctx, u, currentPage, scale)
-      withContext(Dispatchers.Main) {
-        if (bmp != null && scale <= 2.0f) {
-          pageBitmapCache[currentPage] = bmp
-          val keep = (currentPage - 1)..(currentPage + 1)
-          val evict = pageBitmapCache.keys.filter { it !in keep }
-          for (k in evict) {
-            pageBitmapCache.remove(k)?.let { try { it.recycle() } catch (_: Exception) {} }
-          }
-        }
-        currentBitmap = bmp
-        isLoadingPage = false
-      }
     }
   }
 
@@ -1667,6 +1669,38 @@ fun PdfReaderScreen(
     )
   }
 
+  // Bookmarks dialog (opened from the three-dot menu): tap a page to
+  // jump to it, X to delete the bookmark.
+  if (showBookmarksDialog) {
+    AlertDialog(
+      onDismissRequest = { showBookmarksDialog = false },
+      title = { Text("Bookmarks", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
+      text = {
+        if (bookmarks.isEmpty()) {
+          Text("No bookmarks yet — open the ⋮ menu on any page and tap \"Bookmark this page\".", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
+        } else {
+          Column {
+            bookmarks.sorted().forEach { b ->
+              Row(
+                Modifier.fillMaxWidth().clickable { showBookmarksDialog = false; jumpToPage(b) }.padding(vertical = Ds.s8),
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                Text("Page $b", fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text, modifier = Modifier.weight(1f))
+                ChamiIconButton(
+                  icon = Icons.Filled.Close, description = "Delete bookmark",
+                  onClick = { vibrate(); bookmarks.remove(b); removeBookmark(ctx, fileName, b) }
+                )
+              }
+            }
+          }
+        }
+      },
+      confirmButton = {
+        TextButton(onClick = { showBookmarksDialog = false }) { Text("Close", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
+      }
+    )
+  }
+
   ToolScreenContainer("PDF Reader", theme, onBack) {
     if (pdfUri == null) {
       Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1676,10 +1710,10 @@ fun PdfReaderScreen(
       }
     } else {
       Column(Modifier.fillMaxSize()) {
-        // Controls row: page indicator (tap to go to page), zoom, night
-        // mode, overflow menu.
+        // Slim top bar (Google Drive style): page indicator + the
+        // three-dot menu only. Nothing else clutters the reading view.
         Row(
-          Modifier.fillMaxWidth().clip(RoundedCornerShape(Ds.s8)).background(theme.card).padding(Ds.s8),
+          Modifier.fillMaxWidth(),
           verticalAlignment = Alignment.CenterVertically,
           horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -1692,275 +1726,253 @@ fun PdfReaderScreen(
               fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text
             )
           }
-          Row(verticalAlignment = Alignment.CenterVertically) {
+          Box {
             ChamiIconButton(
-              icon = Icons.Filled.Remove, description = "Zoom out",
-              onClick = { vibrate(); zoom = (zoom - 0.25f).coerceIn(1f, 5f); if (zoom == 1f) pan = Offset.Zero }
+              icon = Icons.Filled.MoreVert, description = "Reader options",
+              onClick = { vibrate(); showOverflow = true }
             )
-            Text("${(zoom * 100).toInt()}%", fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.text)
-            ChamiIconButton(
-              icon = Icons.Filled.Add, description = "Zoom in",
-              onClick = { vibrate(); zoom = (zoom + 0.25f).coerceIn(1f, 5f) }
-            )
-            ChamiIconButton(
-              icon = if (isNightMode) Icons.Filled.LightMode else Icons.Filled.DarkMode,
-              description = if (isNightMode) "Day mode" else "Night mode",
-              onClick = { vibrate(); isNightMode = !isNightMode }
-            )
-            Box {
-              ChamiIconButton(
-                icon = Icons.Filled.MoreVert, description = "More actions",
-                onClick = { showOverflow = true }
+            DropdownMenu(expanded = showOverflow, onDismissRequest = { showOverflow = false }) {
+              DropdownMenuItem(
+                text = { Text("Search in PDF", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; showSearchBar = true }
               )
-              DropdownMenu(expanded = showOverflow, onDismissRequest = { showOverflow = false }) {
-                // NOTE: the file is passed by opening the tool; the
-                // target screen picks its own file in v1.2 (passing
-                // the Uri through needs a MainActivity change, which
-                // is outside this file).
-                DropdownMenuItem(
-                  text = { Text("Open in Split", fontSize = Ds.BODY_SP.sp) },
-                  onClick = { showOverflow = false; onOpenTool?.invoke("split") }
-                )
-                DropdownMenuItem(
-                  text = { Text("Open in Merge", fontSize = Ds.BODY_SP.sp) },
-                  onClick = { showOverflow = false; onOpenTool?.invoke("merge") }
-                )
-                DropdownMenuItem(
-                  text = { Text("Open in Compress", fontSize = Ds.BODY_SP.sp) },
-                  onClick = { showOverflow = false; onOpenTool?.invoke("compress") }
-                )
-              }
+              DropdownMenuItem(
+                text = { Text(if (bookmarks.contains(currentPage + 1)) "Remove bookmark" else "Bookmark this page", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; vibrate(); toggleBookmark(currentPage + 1) }
+              )
+              DropdownMenuItem(
+                text = { Text("Bookmarks…", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; showBookmarksDialog = true }
+              )
+              DropdownMenuItem(
+                text = { Text("Go to page…", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; goToInput = "${currentPage + 1}"; showGoToPage = true }
+              )
+              DropdownMenuItem(
+                text = { Text("Zoom in", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; vibrate(); zoom = (zoom + 0.25f).coerceIn(1f, 5f) }
+              )
+              DropdownMenuItem(
+                text = { Text("Zoom out", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; vibrate(); zoom = (zoom - 0.25f).coerceIn(1f, 5f) }
+              )
+              DropdownMenuItem(
+                text = { Text("Fit to page", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; vibrate(); zoom = 1f }
+              )
+              DropdownMenuItem(
+                text = { Text(if (isNightMode) "Day mode" else "Night mode", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; vibrate(); isNightMode = !isNightMode }
+              )
+              DropdownMenuItem(
+                text = { Text("Open in Split", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; onOpenTool?.invoke("split") }
+              )
+              DropdownMenuItem(
+                text = { Text("Open in Merge", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; onOpenTool?.invoke("merge") }
+              )
+              DropdownMenuItem(
+                text = { Text("Open in Compress", fontSize = Ds.BODY_SP.sp) },
+                onClick = { showOverflow = false; onOpenTool?.invoke("compress") }
+              )
             }
           }
         }
 
-        Spacer(Modifier.height(Ds.s8))
-        Row(
-          Modifier.fillMaxWidth(),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(Ds.s8)
-        ) {
-          OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            label = { Text("Search text in PDF", fontSize = Ds.HINT_SP.sp) },
-            singleLine = true,
-            modifier = Modifier.weight(1f).height(52.dp),
-            shape = RoundedCornerShape(Ds.s8)
-          )
-          ChamiIconButton(
-            icon = Icons.Filled.Search, description = "Search",
-            onClick = { vibrate(); runSearch() }
-          )
-        }
-        if (searching) {
-          Spacer(Modifier.height(Ds.s4))
-          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(searchProgress, fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
-            TextButton(onClick = { searchJob?.cancel(); searching = false }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Cancel", color = ChamiColors.errorRed, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
-            }
-          }
-          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        } else if (searchPages.isNotEmpty()) {
-          Spacer(Modifier.height(Ds.s4))
+        // Search bar — only when opened from the ⋮ menu.
+        if (showSearchBar) {
+          Spacer(Modifier.height(Ds.s8))
           Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(Ds.s8)
           ) {
-            Text(
-              "Found on pages: ${searchPages.joinToString(", ")}",
-              fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold
+            OutlinedTextField(
+              value = searchQuery,
+              onValueChange = { searchQuery = it },
+              label = { Text("Search text in PDF", fontSize = Ds.HINT_SP.sp) },
+              singleLine = true,
+              modifier = Modifier.weight(1f).height(52.dp),
+              shape = RoundedCornerShape(Ds.s8)
             )
-            TextButton(
-              onClick = {
-                vibrate()
-                val next = (searchIndex + 1) % searchPages.size
-                searchIndex = next
-                jumpToPage(searchPages[next])
-              },
-              modifier = Modifier.height(Ds.minTouch)
+            ChamiIconButton(
+              icon = Icons.Filled.Search, description = "Search",
+              onClick = { vibrate(); runSearch() }
+            )
+            ChamiIconButton(
+              icon = Icons.Filled.Close, description = "Close search",
+              onClick = { showSearchBar = false }
+            )
+          }
+          if (searching) {
+            Spacer(Modifier.height(Ds.s4))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+              Text(searchProgress, fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+              TextButton(onClick = { searchJob?.cancel(); searching = false }, modifier = Modifier.height(Ds.minTouch)) {
+                Text("Cancel", color = ChamiColors.errorRed, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              }
+            }
+            LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
+          } else if (searchPages.isNotEmpty()) {
+            Spacer(Modifier.height(Ds.s4))
+            Row(
+              Modifier.fillMaxWidth(),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.SpaceBetween
             ) {
-              Text("Next match", fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.primary)
-            }
-          }
-        }
-
-        Spacer(Modifier.height(Ds.s8))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-          Text("Zoom", fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.textSecondary)
-          Slider(
-            value = zoom,
-            onValueChange = { zoom = it; if (zoom == 1f) pan = Offset.Zero },
-            valueRange = 1f..5f,
-            modifier = Modifier.weight(1f),
-            colors = SliderDefaults.colors(thumbColor = theme.primary, activeTrackColor = theme.primary)
-          )
-          TextButton(onClick = { zoom = 1f; pan = Offset.Zero }, modifier = Modifier.height(Ds.minTouch)) {
-            Text("Fit", fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.primary)
-          }
-        }
-
-        Spacer(Modifier.height(Ds.s8))
-        if (isLoadingPage) {
-          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        }
-
-        Box(
-          Modifier
-            .weight(1f)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Ds.s8))
-            .background(Color(0xFF121212)),
-          contentAlignment = Alignment.Center
-        ) {
-          currentBitmap?.let { bmp ->
-            val nightFilter = if (isNightMode) {
-              androidx.compose.ui.graphics.ColorFilter.colorMatrix(
-                androidx.compose.ui.graphics.ColorMatrix(
-                  floatArrayOf(
-                    -1f, 0f, 0f, 0f, 255f,
-                    0f, -1f, 0f, 0f, 255f,
-                    0f, 0f, -1f, 0f, 255f,
-                    0f, 0f, 0f, 1f, 0f
-                  )
-                )
+              Text(
+                "Found on pages: ${searchPages.joinToString(", ")}",
+                fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold
               )
-            } else null
-            Image(
-              bitmap = bmp.asImageBitmap(),
-              contentDescription = "Page ${currentPage + 1}",
-              colorFilter = nightFilter,
-              modifier = Modifier
-                .fillMaxSize()
-                .padding(Ds.s8)
-                .graphicsLayer(
-                  scaleX = zoom,
-                  scaleY = zoom,
-                  translationX = pan.x,
-                  translationY = pan.y
-                )
-                .pointerInput(Unit) {
-                  detectTransformGestures { _, panChange, zoomChange, _ ->
-                    zoom = (zoom * zoomChange).coerceIn(1f, 5f)
-                    pan += panChange
-                    if (zoom == 1f) pan = Offset.Zero
-                  }
-                }
-                .pointerInput(Unit) {
-                  detectTapGestures(
-                    onDoubleTap = {
-                      if (zoom > 1f) { zoom = 1f; pan = Offset.Zero }
-                      else zoom = 2.5f
-                    }
-                  )
+              TextButton(
+                onClick = {
+                  vibrate()
+                  val next = (searchIndex + 1) % searchPages.size
+                  searchIndex = next
+                  jumpToPage(searchPages[next])
                 },
-              contentScale = ContentScale.Fit
-            )
+                modifier = Modifier.height(Ds.minTouch)
+              ) {
+                Text("Next match", fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.primary)
+              }
+            }
           }
         }
 
-        Spacer(Modifier.height(Ds.s8))
-        Row(
-          Modifier.fillMaxWidth(),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(Ds.s8)
-        ) {
-          ChamiIconButton(
-            icon = if (bookmarks.contains(currentPage + 1)) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-            description = if (bookmarks.contains(currentPage + 1)) "Remove bookmark" else "Bookmark this page",
-            onClick = { vibrate(); toggleBookmark(currentPage + 1) }
-          )
-          if (bookmarks.isNotEmpty()) {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(Ds.s8), modifier = Modifier.weight(1f)) {
-              items(bookmarks.sorted()) { b ->
-                Row(
-                  Modifier
-                    .height(Ds.minTouch)
-                    .clip(RoundedCornerShape(50))
-                    .background(theme.primary.copy(alpha = 0.15f))
-                    .border(1.dp, theme.primary, RoundedCornerShape(50))
-                    .clickable { vibrate(); jumpToPage(b) }
-                    .padding(start = Ds.s12),
-                  verticalAlignment = Alignment.CenterVertically
-                ) {
-                  Text("Page $b", fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.primaryDark)
-                  ChamiIconButton(
-                    icon = Icons.Filled.Close, description = "Delete bookmark",
-                    onClick = {
-                      vibrate()
-                      bookmarks.remove(b)
-                      removeBookmark(ctx, fileName, b)
-                    }
-                  )
-                }
-              }
-            }
-          } else {
-            Text("Tap the bookmark icon to save this page.", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+        // FULL SCROLL (Google Drive style): one continuous vertical
+        // list, page after page — no page-by-page flipping, no Prev /
+        // Next buttons, no page-number strip.
+        if (totalPages == 0) {
+          Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = theme.primary)
           }
-        }
-        Spacer(Modifier.height(Ds.s8))
-        if (totalPages > 1) {
-          LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(Ds.s8),
-            modifier = Modifier.fillMaxWidth()
+        } else {
+          LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(Ds.s12),
+            contentPadding = PaddingValues(vertical = Ds.s8)
           ) {
-            items((1..totalPages).toList()) { p ->
-              val isSel = p - 1 == currentPage
-              Box(
-                Modifier
-                  .size(Ds.minTouch)
-                  .clip(RoundedCornerShape(Ds.s8))
-                  .background(if (isSel) theme.primary else theme.card)
-                  .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s8))
-                  .clickable {
-                    vibrate()
-                    currentPage = p - 1
-                    pageInput = "$p"
-                  },
-                contentAlignment = Alignment.Center
-              ) {
-                Text(
-                  "$p",
-                  fontSize = Ds.BODY_SP.sp,
-                  fontWeight = FontWeight.Bold,
-                  color = if (isSel) theme.textOnPrimary else theme.text
-                )
-              }
+            items(totalPages) { idx ->
+              ReaderPageView(
+                theme = theme,
+                uri = pdfUri!!,
+                pageIndex = idx,
+                scale = scale,
+                zoom = zoom,
+                onZoomChange = { zoom = it },
+                isNightMode = isNightMode,
+                cache = pageBitmapCache
+              )
             }
           }
-          Spacer(Modifier.height(Ds.s8))
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          ChamiSecondaryButton(
-            text = "Prev",
-            onClick = {
-              vibrate()
-              if (currentPage > 0) {
-                currentPage--
-                pageInput = "${currentPage + 1}"
-              }
-            },
-            modifier = Modifier.weight(1f)
-          )
-          ChamiSecondaryButton(
-            text = "Next",
-            onClick = {
-              vibrate()
-              if (currentPage < totalPages - 1) {
-                currentPage++
-                pageInput = "${currentPage + 1}"
-              }
-            },
-            modifier = Modifier.weight(1f)
-          )
         }
       }
     }
   }
 }
+
+// One page of the continuous reader: renders lazily at the given
+// scale and caches the bitmap (at most 12 pages kept, farthest from
+// the viewed page evicted first). Pinch-zoom only engages while the
+// page is already zoomed, so vertical scrolling works at 100%;
+// double-tap toggles zoom, Fit in the ⋮ menu resets it.
+@Composable
+private fun ReaderPageView(
+  theme: ChamiTheme,
+  uri: Uri,
+  pageIndex: Int,
+  scale: Float,
+  zoom: Float,
+  onZoomChange: (Float) -> Unit,
+  isNightMode: Boolean,
+  cache: MutableMap<Int, Bitmap>
+) {
+  val ctx = LocalContext.current
+  var bmp by remember(uri, pageIndex) { mutableStateOf<Bitmap?>(cache[pageIndex]) }
+  var pan by remember { mutableStateOf(Offset.Zero) }
+  LaunchedEffect(uri, pageIndex, scale) {
+    cache[pageIndex]?.let { bmp = it; return@LaunchedEffect }
+    val rendered = withContext(Dispatchers.IO) { PdfReader.renderPageBitmap(ctx, uri, pageIndex, scale) }
+    if (rendered != null) {
+      cache[pageIndex] = rendered
+      bmp = rendered
+      if (cache.size > 12) {
+        val farthest = cache.keys.maxByOrNull { kotlin.math.abs(it - pageIndex) }
+        if (farthest != null && farthest != pageIndex) {
+          cache.remove(farthest)?.let { try { it.recycle() } catch (_: Exception) {} }
+        }
+      }
+    }
+  }
+  LaunchedEffect(zoom) { if (zoom == 1f) pan = Offset.Zero }
+  Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+    Box(
+      Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(Ds.s8))
+        .background(Color(0xFF121212)),
+      contentAlignment = Alignment.Center
+    ) {
+      val shown = bmp
+      if (shown == null) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f / 1.414f), contentAlignment = Alignment.Center) {
+          CircularProgressIndicator(color = theme.primary)
+        }
+      } else {
+        val nightFilter = if (isNightMode) {
+          androidx.compose.ui.graphics.ColorFilter.colorMatrix(
+            androidx.compose.ui.graphics.ColorMatrix(
+              floatArrayOf(
+                -1f, 0f, 0f, 0f, 255f,
+                0f, -1f, 0f, 0f, 255f,
+                0f, 0f, -1f, 0f, 255f,
+                0f, 0f, 0f, 1f, 0f
+              )
+            )
+          )
+        } else null
+        Image(
+          bitmap = shown.asImageBitmap(),
+          contentDescription = "Page ${pageIndex + 1}",
+          colorFilter = nightFilter,
+          modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(shown.width.toFloat() / shown.height.toFloat())
+            .graphicsLayer(
+              scaleX = zoom,
+              scaleY = zoom,
+              translationX = pan.x,
+              translationY = pan.y
+            )
+            .pointerInput(zoom > 1f) {
+              if (zoom > 1f) {
+                detectTransformGestures { _, panChange, zoomChange, _ ->
+                  val z = (zoom * zoomChange).coerceIn(1f, 5f)
+                  onZoomChange(z)
+                  pan += panChange
+                  if (z == 1f) pan = Offset.Zero
+                }
+              }
+            }
+            .pointerInput(Unit) {
+              detectTapGestures(
+                onDoubleTap = {
+                  if (zoom > 1f) onZoomChange(1f)
+                  else onZoomChange(2.5f)
+                }
+              )
+            },
+          contentScale = ContentScale.FillWidth
+        )
+      }
+    }
+    Spacer(Modifier.height(Ds.s4))
+    Text("Page ${pageIndex + 1}", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+  }
+}
+
 
 // 11. PROTECT PDF — Lock / Unlock segmented control, title stays
 // "Protect PDF". Lock: password with a real vector eye, strength hint

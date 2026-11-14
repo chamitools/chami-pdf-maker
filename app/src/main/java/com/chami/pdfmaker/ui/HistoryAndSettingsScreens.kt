@@ -1106,14 +1106,31 @@ fun SettingsScreen(
       )
       Spacer(Modifier.width(Ds.s12))
       Column {
-        Text(
-          "CHAMI PRO",
-          fontFamily = PixelFont,
-          fontWeight = FontWeight.ExtraBold,
-          fontSize = (Ds.TITLE_SP * fontScale).sp,
-          lineHeight = (Ds.TITLE_SP * 1.4 * fontScale).sp,
-          color = theme.text
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Text(
+            "CHAMI",
+            fontFamily = PixelFont,
+            fontWeight = FontWeight.ExtraBold,
+            fontSize = (Ds.TITLE_SP * fontScale).sp,
+            lineHeight = (Ds.TITLE_SP * 1.4 * fontScale).sp,
+            color = theme.text
+          )
+          Spacer(Modifier.width(6.dp))
+          Box(
+            Modifier
+              .clip(RoundedCornerShape(4.dp))
+              .background(theme.primary)
+              .padding(horizontal = 5.dp, vertical = 1.dp)
+          ) {
+            Text(
+              "PRO",
+              fontFamily = PixelFont,
+              fontWeight = FontWeight.Bold,
+              fontSize = (10 * fontScale).sp,
+              color = theme.textOnPrimary
+            )
+          }
+        }
         Text(
           "Professional PDF Toolkit",
           fontSize = (Ds.HINT_SP * fontScale).sp,

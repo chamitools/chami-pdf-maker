@@ -7,14 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color as AndroidColor
-import android.graphics.Paint
 import android.graphics.Rect
-import android.graphics.RectF
-import android.graphics.Typeface
-import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.widget.Toast
@@ -52,6 +45,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect as ComposeRect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -130,33 +124,6 @@ fun displayNameOf(ctx: Context, uri: Uri): String? {
 fun baseNameOf(ctx: Context, uri: Uri, fallback: String): String {
   val name = displayNameOf(ctx, uri) ?: return fallback
   return name.substringBeforeLast(".", name).ifBlank { fallback }
-}
-
-/** Draws the watermark on a COPY of [bmp] so the preview shows exactly
- *  what the PDF gets. Centre = diagonal across the middle; bottom =
- *  centred near the bottom edge. Opacity is 10-50 (%). */
-fun watermarkedPreview(bmp: Bitmap, text: String, opacityPct: Int, position: String): Bitmap {
-  if (text.isBlank()) return bmp
-  return try {
-    val out = bmp.copy(Bitmap.Config.ARGB_8888, true)
-    val c = Canvas(out)
-    val alpha = ((opacityPct.coerceIn(10, 50) / 100f) * 255).toInt()
-    val paint = Paint().apply {
-      color = AndroidColor.argb(alpha, 0, 0, 0)
-      textSize = (out.width / 12f).coerceAtLeast(24f)
-      typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-      textAlign = Paint.Align.CENTER
-    }
-    if (position == "bottom") {
-      c.drawText(text, out.width / 2f, out.height - out.height * 0.06f, paint)
-    } else {
-      c.save()
-      c.rotate(-30f, out.width / 2f, out.height / 2f)
-      c.drawText(text, out.width / 2f, out.height / 2f, paint)
-      c.restore()
-    }
-    out
-  } catch (_: Exception) { bmp }
 }
 
 // --- Local PDF helpers (Phase 6) ------------------------------------------
@@ -653,9 +620,7 @@ fun MultiDoneScreen(
 
 // Big main preview (340dp, full width) with the left-corner vertical icon
 // stack: Crop on top, then Straighten, Delete, Filter, Adjust. Each is a
-// 48dp PreviewActionButton with a real vector icon. [watermarkedBitmap]
-// is the preview with the live watermark already drawn on it, when one
-// is set; [pageNumber] draws a real page number at the chosen position.
+// 48dp PreviewActionButton with a real vector icon.
 @Composable
 fun BigPagePreview(
   page: PageItem?,
@@ -666,10 +631,7 @@ fun BigPagePreview(
   onDelete: () -> Unit,
   onFilter: () -> Unit,
   onAdjust: () -> Unit,
-  height: Dp = 340.dp,
-  watermarkedBitmap: Bitmap? = null,
-  pageNumber: Int? = null,
-  pageNumberPosition: String = "centre"
+  height: Dp = 340.dp
 ) {
   Box(
     Modifier
@@ -679,7 +641,7 @@ fun BigPagePreview(
       .background(theme.card)
       .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s8))
   ) {
-    val shown = watermarkedBitmap ?: page?.bitmap
+    val shown = page?.bitmap
     if (shown != null) {
       Image(
         bitmap = shown.asImageBitmap(),
@@ -691,18 +653,6 @@ fun BigPagePreview(
       Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text("No page yet", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
       }
-    }
-    if (pageNumber != null) {
-      Text(
-        "$pageNumber",
-        fontSize = Ds.HINT_SP.sp,
-        color = theme.text,
-        modifier = Modifier
-          .align(if (pageNumberPosition == "right") Alignment.BottomEnd else Alignment.BottomCenter)
-          .padding(Ds.s8)
-          .background(Color.White.copy(alpha = 0.7f), RoundedCornerShape(Ds.s4))
-          .padding(horizontal = Ds.s8, vertical = Ds.s4)
-      )
     }
     Column(
       Modifier.align(Alignment.TopStart).padding(Ds.s8),
@@ -1157,99 +1107,14 @@ class PageEditor(
   fun filterModeFor(page: PageItem): Int = vm.filterModes[page.uri] ?: 0
 }
 
-/** The Images-to-PDF options (page size, quality, page numbers,
- *  watermark, margins), shared by Images to PDF and Scan to PDF. */
-@Composable
-fun ImagesPdfOptionsSection(
-  theme: ChamiTheme,
-  pageSize: String, onPageSize: (String) -> Unit,
-  quality: String, onQuality: (String) -> Unit,
-  pageNumbers: Boolean, onPageNumbers: (Boolean) -> Unit,
-  pageNumberPosition: String, onPageNumberPosition: (String) -> Unit,
-  watermarkOn: Boolean, onWatermarkOn: (Boolean) -> Unit,
-  watermarkText: String, onWatermarkText: (String) -> Unit,
-  watermarkOpacity: Int, onWatermarkOpacity: (Int) -> Unit,
-  watermarkPosition: String, onWatermarkPosition: (String) -> Unit,
-  marginsMm: Int, onMarginsMm: (Int) -> Unit
-) {
-  SectionText("Page size", color = theme.text)
-  Spacer(Modifier.height(Ds.s8))
-  Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-    listOf("A4", "Letter", "Original").forEach { size ->
-      ChamiChip(size, pageSize == size, { onPageSize(size) })
-    }
-  }
-  Spacer(Modifier.height(Ds.s16))
-  SectionText("Image quality", color = theme.text)
-  Spacer(Modifier.height(Ds.s8))
-  Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-    listOf("Original", "High", "Medium", "Low").forEach { q ->
-      ChamiChip(q, quality == q, { onQuality(q) })
-    }
-  }
-  if (quality == "Original") {
-    Spacer(Modifier.height(Ds.s4))
-    HintText("Original embeds the source pixels unmodified — no recompression.")
-  }
-  Spacer(Modifier.height(Ds.s16))
-  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-    Text("Page numbers", fontSize = Ds.BODY_SP.sp, color = theme.text)
-    Switch(checked = pageNumbers, onCheckedChange = onPageNumbers)
-  }
-  if (pageNumbers) {
-    Spacer(Modifier.height(Ds.s8))
-    Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-      ChamiChip("Bottom centre", pageNumberPosition == "centre", { onPageNumberPosition("centre") })
-      ChamiChip("Bottom right", pageNumberPosition == "right", { onPageNumberPosition("right") })
-    }
-    HintText("Page numbers are drawn at the bottom centre of each PDF page.")
-  }
-  Spacer(Modifier.height(Ds.s16))
-  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-    Text("Watermark", fontSize = Ds.BODY_SP.sp, color = theme.text)
-    Switch(checked = watermarkOn, onCheckedChange = onWatermarkOn)
-  }
-  if (watermarkOn) {
-    Spacer(Modifier.height(Ds.s8))
-    DebouncedTextField(
-      value = watermarkText, onValueChange = onWatermarkText,
-      label = "Watermark text"
-    )
-    Spacer(Modifier.height(Ds.s12))
-    Text("Opacity: $watermarkOpacity%", fontSize = Ds.BODY_SP.sp, color = theme.text)
-    Slider(
-      value = watermarkOpacity.toFloat(),
-      onValueChange = { onWatermarkOpacity(it.toInt()) },
-      valueRange = 10f..50f,
-      colors = SliderDefaults.colors(thumbColor = theme.primary, activeTrackColor = theme.primary)
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-      ChamiChip("Centre diagonal", watermarkPosition == "centre", { onWatermarkPosition("centre") })
-      ChamiChip("Bottom", watermarkPosition == "bottom", { onWatermarkPosition("bottom") })
-    }
-    Spacer(Modifier.height(Ds.s4))
-    HintText("The watermark is drawn live on the preview above — if you cannot see it there, it will not be in the PDF.")
-  }
-  if (pageSize != "Original") {
-    Spacer(Modifier.height(Ds.s16))
-    SectionText("Margins", color = theme.text)
-    Spacer(Modifier.height(Ds.s8))
-    Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-      ChamiChip("None", marginsMm == 0, { onMarginsMm(0) })
-      ChamiChip("Small (10mm)", marginsMm == 10, { onMarginsMm(10) })
-      ChamiChip("Normal (15mm)", marginsMm == 15, { onMarginsMm(15) })
-    }
-  }
-}
-
 // 1. IMAGES TO PDF
 // - Builds through the shared engine: PdfEngine.buildImagesPdf with
-//   ImagesPdfOptions (quality default Original, A4 default, watermark
-//   off by default with live preview, margins hidden for Original).
+//   FIXED defaults — Original size, full-resolution quality, no
+//   watermark, no page numbers, no margins (no option controls).
 // - Picker loads at full resolution (loadBitmap cap 8000).
 // - Crop CUTS by default (RectCropDialog); Straighten is the separate
 //   warp path. Per-page filter state, correct delete, selection follows
-//   the page Uri, debounced watermark field.
+//   the page Uri.
 @Composable
 fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
@@ -1265,15 +1130,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var showFilters by remember { mutableStateOf(false) }
   var showAdjust by remember { mutableStateOf(false) }
   var brightness by remember { mutableStateOf(0f) }
-  var pageSize by rememberSaveable { mutableStateOf("A4") }
-  var quality by rememberSaveable { mutableStateOf("Original") }
-  var pageNumbers by rememberSaveable { mutableStateOf(false) }
-  var pageNumberPosition by rememberSaveable { mutableStateOf("centre") }
-  var watermarkOn by rememberSaveable { mutableStateOf(false) }
-  var watermarkText by rememberSaveable { mutableStateOf("") }
-  var watermarkOpacity by rememberSaveable { mutableStateOf(25) }
-  var watermarkPosition by rememberSaveable { mutableStateOf("centre") }
-  var marginsMm by rememberSaveable { mutableStateOf(10) }
 
   var doneFile by remember { mutableStateOf<File?>(null) }
   var showDone by remember { mutableStateOf(false) }
@@ -1316,14 +1172,16 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     progressText = "Page 1 of ${pages.size}"
     scope.launch {
       val out = PdfEngine.outFile(ctx, "IMG_PDF_${System.currentTimeMillis()}.pdf")
+      // Fixed defaults: Original size, full-resolution quality, no
+      // watermark, no page numbers, no margins.
       val options = PdfEngine.ImagesPdfOptions(
-        pageSize = pageSize,
-        quality = quality,
-        watermarkText = if (watermarkOn) watermarkText.trim() else "",
-        watermarkOpacity = watermarkOpacity,
-        watermarkPosition = watermarkPosition,
-        pageNumbers = pageNumbers,
-        marginsMm = if (pageSize == "Original") 0 else marginsMm
+        pageSize = "Original",
+        quality = "Original",
+        watermarkText = "",
+        watermarkOpacity = 25,
+        watermarkPosition = "centre",
+        pageNumbers = false,
+        marginsMm = 0
       )
       val file: File? = try {
         withContext(Dispatchers.IO) {
@@ -1340,19 +1198,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       if (file != null) saveFile(file)
       else Toast.makeText(ctx, "Failed to create PDF", Toast.LENGTH_SHORT).show()
     }
-  }
-
-  // Live watermark on the preview (downscaled copy — the preview is
-  // 340dp, full resolution is only used at export).
-  val previewBitmap = remember(selectedPage?.bitmap, watermarkOn, watermarkText, watermarkOpacity, watermarkPosition) {
-    val bmp = selectedPage?.bitmap ?: return@remember null
-    if (!watermarkOn || watermarkText.isBlank()) return@remember bmp
-    val maxSide = maxOf(bmp.width, bmp.height)
-    val scaled = if (maxSide > 1200) {
-      val s = 1200f / maxSide
-      Bitmap.createScaledBitmap(bmp, (bmp.width * s).toInt(), (bmp.height * s).toInt(), true)
-    } else bmp
-    watermarkedPreview(scaled, watermarkText.trim(), watermarkOpacity, watermarkPosition)
   }
 
   cropIndex?.let { index ->
@@ -1447,9 +1292,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
           onDelete = { vibrate(); vm.deleteAt(safeSelected) },
           onFilter = { showFilters = true },
           onAdjust = { showAdjust = true },
-          watermarkedBitmap = previewBitmap,
-          pageNumber = if (pageNumbers) safeSelected + 1 else null,
-          pageNumberPosition = pageNumberPosition
         )
         Spacer(Modifier.height(Ds.s8))
         Text(
@@ -1468,19 +1310,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
           onSelect = { vm.select(it) },
           onMove = { from, to -> vm.movePage(from, to) },
           onAddPages = { vibrate(); picker.launch("image/*") }
-        )
-        Spacer(Modifier.height(Ds.s24))
-        ImagesPdfOptionsSection(
-          theme = theme,
-          pageSize = pageSize, onPageSize = { pageSize = it },
-          quality = quality, onQuality = { quality = it },
-          pageNumbers = pageNumbers, onPageNumbers = { pageNumbers = it },
-          pageNumberPosition = pageNumberPosition, onPageNumberPosition = { pageNumberPosition = it },
-          watermarkOn = watermarkOn, onWatermarkOn = { watermarkOn = it },
-          watermarkText = watermarkText, onWatermarkText = { watermarkText = it },
-          watermarkOpacity = watermarkOpacity, onWatermarkOpacity = { watermarkOpacity = it },
-          watermarkPosition = watermarkPosition, onWatermarkPosition = { watermarkPosition = it },
-          marginsMm = marginsMm, onMarginsMm = { marginsMm = it }
         )
       }
 
@@ -1507,6 +1336,15 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 // capture. RETAKE never deletes the current page first: it only
 // replaces it after a new capture succeeds. Scanned pages default to
 // the Enhance filter.
+// 2. SCAN TO PDF — Adobe Scan-style preview (user reference, restyled
+// in Executive Emerald green/white, never Adobe blue): camera opens
+// directly, manual shutter only, capture proof on every tap, then this
+// preview — detected-edge border with draggable corner + midpoint
+// handles, "Page X of Y" pager, Auto-detect / No crop chips, Retake /
+// Crop / Rotate / Filters / Adjust / Clean toolbar, bottom bar
+// "Keep scanning" + pill "Save PDF".
+// Fixed defaults: Original size, full resolution, no watermark, no
+// page numbers, no margins. No auto-capture, no options section.
 @Composable
 fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
@@ -1517,25 +1355,12 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val editor = remember(ctx, scope, vm) { PageEditor(ctx, scope, vm) }
   var isProcessing by remember { mutableStateOf(false) }
   var progressText by remember { mutableStateOf("") }
-  var cropIndex by remember { mutableStateOf<Int?>(null) }
-  var straightenIndex by remember { mutableStateOf<Int?>(null) }
-  var autoQuad by remember { mutableStateOf<List<Offset>?>(null) }
   var showFilters by remember { mutableStateOf(false) }
   var showAdjust by remember { mutableStateOf(false) }
   var brightness by remember { mutableStateOf(0f) }
-  var autoCapture by rememberSaveable { mutableStateOf(false) }
   var showCamera by remember { mutableStateOf(false) }
   var showAddSource by remember { mutableStateOf(false) }
   var retakeIndex by remember { mutableStateOf<Int?>(null) }
-  var pageSize by rememberSaveable { mutableStateOf("A4") }
-  var quality by rememberSaveable { mutableStateOf("Original") }
-  var pageNumbers by rememberSaveable { mutableStateOf(false) }
-  var pageNumberPosition by rememberSaveable { mutableStateOf("centre") }
-  var watermarkOn by rememberSaveable { mutableStateOf(false) }
-  var watermarkText by rememberSaveable { mutableStateOf("") }
-  var watermarkOpacity by rememberSaveable { mutableStateOf(25) }
-  var watermarkPosition by rememberSaveable { mutableStateOf("centre") }
-  var marginsMm by rememberSaveable { mutableStateOf(10) }
 
   var doneFile by remember { mutableStateOf<File?>(null) }
   var showDone by remember { mutableStateOf(false) }
@@ -1545,7 +1370,6 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val safeSelected = vm.selectedIndex.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
   val selectedPage = pages.getOrNull(safeSelected)
   val filterMode = selectedPage?.let { editor.filterModeFor(it) } ?: 0
-  val filterNames = listOf("Original", "B&W", "Grayscale", "Enhance")
 
   fun vibrate() {
     if (tm.hapticOn()) {
@@ -1595,14 +1419,16 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     progressText = "Page 1 of ${pages.size}"
     scope.launch {
       val out = PdfEngine.outFile(ctx, "Scan_${System.currentTimeMillis()}.pdf")
+      // Fixed defaults: Original size, full-resolution quality, no
+      // watermark, no page numbers, no margins.
       val options = PdfEngine.ImagesPdfOptions(
-        pageSize = pageSize,
-        quality = quality,
-        watermarkText = if (watermarkOn) watermarkText.trim() else "",
-        watermarkOpacity = watermarkOpacity,
-        watermarkPosition = watermarkPosition,
-        pageNumbers = pageNumbers,
-        marginsMm = if (pageSize == "Original") 0 else marginsMm
+        pageSize = "Original",
+        quality = "Original",
+        watermarkText = "",
+        watermarkOpacity = 25,
+        watermarkPosition = "centre",
+        pageNumbers = false,
+        marginsMm = 0
       )
       val file: File? = try {
         withContext(Dispatchers.IO) {
@@ -1621,55 +1447,6 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     }
   }
 
-  val previewBitmap = remember(selectedPage?.bitmap, watermarkOn, watermarkText, watermarkOpacity, watermarkPosition) {
-    val bmp = selectedPage?.bitmap ?: return@remember null
-    if (!watermarkOn || watermarkText.isBlank()) return@remember bmp
-    val maxSide = maxOf(bmp.width, bmp.height)
-    val scaled = if (maxSide > 1200) {
-      val s = 1200f / maxSide
-      Bitmap.createScaledBitmap(bmp, (bmp.width * s).toInt(), (bmp.height * s).toInt(), true)
-    } else bmp
-    watermarkedPreview(scaled, watermarkText.trim(), watermarkOpacity, watermarkPosition)
-  }
-
-  cropIndex?.let { index ->
-    val page = pages.getOrNull(index)
-    if (page != null) {
-      RectCropDialog(
-        bitmap = page.bitmap,
-        theme = theme,
-        onApply = { bmp ->
-          vm.filterOriginals.remove(page.uri)
-          editor.replacePage(index, bmp, newOriginal = bmp) { cropIndex = null }
-        },
-        onDismiss = { cropIndex = null },
-        onRotate = {
-          vm.filterOriginals.remove(page.uri)
-          editor.replacePage(index, ImagePageEditor.rotate90(page.bitmap), newOriginal = null)
-          cropIndex = null
-        }
-      )
-    }
-  }
-  straightenIndex?.let { index ->
-    val page = pages.getOrNull(index)
-    if (page != null) {
-      CropEditorDialog(
-        bitmap = page.bitmap,
-        theme = theme,
-        onApply = { bmp ->
-          vm.filterOriginals.remove(page.uri)
-          editor.replacePage(index, bmp, newOriginal = bmp) { straightenIndex = null; autoQuad = null }
-        },
-        onDismiss = { straightenIndex = null; autoQuad = null },
-        onRotate = {
-          vm.filterOriginals.remove(page.uri)
-          editor.replacePage(index, ImagePageEditor.rotate90(page.bitmap), newOriginal = null)
-        },
-        initialQuad = autoQuad
-      )
-    }
-  }
   if (showFilters) {
     FilterPickerDialog(
       selected = filterMode,
@@ -1718,7 +1495,6 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   if (showCamera) {
     ScanCameraScreen(
       theme = theme,
-      autoCapture = autoCapture,
       onCaptured = { bmp ->
         scope.launch(Dispatchers.IO) {
           val f = File(ctx.cacheDir, "scan_${System.currentTimeMillis()}.jpg")
@@ -1752,132 +1528,310 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   }
 
   ToolScreenContainer("Scan to PDF", theme, onBack) {
-    Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-      if (pages.isEmpty()) {
-        Text("Point the camera at a page, or pick pages from the gallery.", fontSize = Ds.BODY_SP.sp, color = theme.text)
-        Spacer(Modifier.height(Ds.s16))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          ChamiPrimaryButton(text = "Camera", onClick = { vibrate(); requestCamera() }, modifier = Modifier.weight(1f))
-          ChamiPrimaryButton(text = "Gallery", onClick = { vibrate(); galleryLauncher.launch("image/*") }, modifier = Modifier.weight(1f))
+    if (pages.isEmpty()) {
+      Text("Point the camera at a page, or pick pages from the gallery.", fontSize = Ds.BODY_SP.sp, color = theme.text)
+      Spacer(Modifier.height(Ds.s16))
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+        ChamiPrimaryButton(text = "Camera", onClick = { vibrate(); requestCamera() }, modifier = Modifier.weight(1f))
+        ChamiSecondaryButton(text = "Gallery", onClick = { vibrate(); galleryLauncher.launch("image/*") }, modifier = Modifier.weight(1f))
+      }
+      Spacer(Modifier.height(Ds.s16))
+      HintText("Tap the shutter to take a photo — nothing is captured automatically.")
+    } else if (selectedPage != null) {
+      ScanAdobePreview(
+        theme = theme,
+        page = selectedPage,
+        pageIndex = safeSelected,
+        pageCount = pages.size,
+        isProcessing = isProcessing,
+        progressText = progressText,
+        onPrev = { if (safeSelected > 0) vm.select(safeSelected - 1) },
+        onNext = { if (safeSelected < pages.lastIndex) vm.select(safeSelected + 1) },
+        onRetake = { vibrate(); retakeIndex = safeSelected; requestCamera() },
+        onRotate = {
+          vibrate()
+          vm.filterOriginals.remove(selectedPage.uri)
+          editor.replacePage(safeSelected, ImagePageEditor.rotate90(selectedPage.bitmap), newOriginal = null)
+        },
+        onFilter = { showFilters = true },
+        onAdjust = { showAdjust = true },
+        onClean = {
+          vibrate()
+          editor.applyFilter(safeSelected, 3)
+          Toast.makeText(ctx, "Cleaned", Toast.LENGTH_SHORT).show()
+        },
+        onDelete = { vibrate(); vm.deleteAt(safeSelected) },
+        onKeepScanning = { vibrate(); requestCamera() },
+        onSavePdf = { if (!isProcessing) { vibrate(); buildPdf() } },
+        onCropApply = { quad ->
+          pages.getOrNull(safeSelected)?.let { pg ->
+            val cropped = ImagePageEditor.cropToQuad(pg.bitmap, quad)
+            vm.filterOriginals.remove(pg.uri)
+            editor.replacePage(safeSelected, cropped, newOriginal = cropped)
+          }
         }
-        Spacer(Modifier.height(Ds.s16))
-        Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          ChamiChip("Auto-capture", autoCapture, { vibrate(); autoCapture = !autoCapture })
+      )
+    }
+  }
+}
+
+// Adobe Scan-style preview for Scan to PDF (user reference, restyled
+// Executive Emerald — green border, never Adobe blue). Preview with
+// the detected-edge border + draggable corner and edge-midpoint
+// handles; releasing a drag applies the document crop (perspective
+// corrected, as in Adobe Scan). Pager pill, Auto-detect / No crop
+// chips, Retake / Crop / Rotate / Filters / Adjust / Clean toolbar,
+// bottom bar Keep scanning + pill Save PDF.
+@Composable
+fun ScanAdobePreview(
+  theme: ChamiTheme,
+  page: PageItem,
+  pageIndex: Int,
+  pageCount: Int,
+  isProcessing: Boolean,
+  progressText: String,
+  onPrev: () -> Unit,
+  onNext: () -> Unit,
+  onRetake: () -> Unit,
+  onRotate: () -> Unit,
+  onFilter: () -> Unit,
+  onAdjust: () -> Unit,
+  onClean: () -> Unit,
+  onDelete: () -> Unit,
+  onKeepScanning: () -> Unit,
+  onSavePdf: () -> Unit,
+  onCropApply: (List<Offset>) -> Unit
+) {
+  val bitmap = page.bitmap
+  val density = LocalDensity.current
+  // "auto" = detected edge border with handles (default, Crop highlighted);
+  // "none" = full page, no border.
+  var cropMode by remember(bitmap) { mutableStateOf("auto") }
+  var quad by remember(bitmap) { mutableStateOf(ImagePageEditor.detectDocumentQuad(bitmap)) }
+  var activeHandle by remember { mutableStateOf<Int?>(null) }
+
+  fun fullQuad() = listOf(Offset(0f, 0f), Offset(1f, 0f), Offset(1f, 1f), Offset(0f, 1f))
+  fun isFull(q: List<Offset>): Boolean {
+    val f = fullQuad()
+    return q.zip(f).all { (a, b) -> (a - b).getDistance() < 0.02f }
+  }
+
+  Column(Modifier.fillMaxSize()) {
+    // Preview with the draggable edge border.
+    BoxWithConstraints(
+      Modifier
+        .weight(1f)
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(Ds.s8))
+        .background(theme.card)
+        .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s8))
+    ) {
+      val boxW = with(density) { maxWidth.toPx() }
+      val boxH = with(density) { maxHeight.toPx() }
+      val imgAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+      val boxAspect = boxW / boxH.coerceAtLeast(1f)
+      val dispW = if (boxAspect > imgAspect) boxH * imgAspect else boxW
+      val dispH = if (boxAspect > imgAspect) boxH else boxW / imgAspect
+      val offX = (boxW - dispW) / 2f
+      val offY = (boxH - dispH) / 2f
+      fun toPx(p: Offset) = Offset(offX + p.x * dispW, offY + p.y * dispH)
+      fun handlePoints(): List<Offset> {
+        val c = quad.map { toPx(it) }
+        return c + listOf((c[0] + c[1]) / 2f, (c[1] + c[2]) / 2f, (c[2] + c[3]) / 2f, (c[3] + c[0]) / 2f)
+      }
+      val touchR = with(density) { 24.dp.toPx() }
+
+      fun moveHandle(handle: Int, dxPx: Float, dyPx: Float) {
+        val fx = dxPx / dispW
+        val fy = dyPx / dispH
+        val q = quad.toMutableList()
+        fun clampPt(p: Offset) = Offset(p.x.coerceIn(0f, 1f), p.y.coerceIn(0f, 1f))
+        when (handle) {
+          in 0..3 -> q[handle] = clampPt(q[handle] + Offset(fx, fy))
+          4 -> { q[0] = clampPt(q[0] + Offset(0f, fy)); q[1] = clampPt(q[1] + Offset(0f, fy)) }
+          5 -> { q[1] = clampPt(q[1] + Offset(fx, 0f)); q[2] = clampPt(q[2] + Offset(fx, 0f)) }
+          6 -> { q[2] = clampPt(q[2] + Offset(0f, fy)); q[3] = clampPt(q[3] + Offset(0f, fy)) }
+          7 -> { q[3] = clampPt(q[3] + Offset(fx, 0f)); q[0] = clampPt(q[0] + Offset(fx, 0f)) }
         }
-        HintText("Auto-capture takes a photo when the page is steady. The shutter always works.")
-      } else {
-        BigPagePreview(
-          page = selectedPage,
-          label = "Page ${safeSelected + 1}",
-          theme = theme,
-          onCrop = { cropIndex = safeSelected },
-          onStraighten = { straightenIndex = safeSelected },
-          onDelete = { vibrate(); vm.deleteAt(safeSelected) },
-          onFilter = { showFilters = true },
-          onAdjust = { showAdjust = true },
-          watermarkedBitmap = previewBitmap,
-          pageNumber = if (pageNumbers) safeSelected + 1 else null,
-          pageNumberPosition = pageNumberPosition
-        )
-        Spacer(Modifier.height(Ds.s8))
-        Row(
-          Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.Center,
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          ChamiIconButton(
-            icon = Icons.Filled.ChevronLeft, description = "Previous page",
-            onClick = { if (safeSelected > 0) vm.select(safeSelected - 1) }
-          )
-          Text(
-            "Page ${safeSelected + 1} of ${pages.size}",
-            fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text,
-            modifier = Modifier.padding(horizontal = Ds.s12)
-          )
-          ChamiIconButton(
-            icon = Icons.Filled.ChevronRight, description = "Next page",
-            onClick = { if (safeSelected < pages.lastIndex) vm.select(safeSelected + 1) }
-          )
-        }
-        Spacer(Modifier.height(Ds.s12))
-        PageThumbnailStrip(
-          pages = pages,
-          selectedIndex = safeSelected,
-          theme = theme,
-          onSelect = { vm.select(it) },
-          onMove = { from, to -> vm.movePage(from, to) },
-          onAddPages = { vibrate(); showAddSource = true }
-        )
-        Spacer(Modifier.height(Ds.s12))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          ChamiSecondaryButton(
-            text = "Keep scanning",
-            onClick = { vibrate(); requestCamera() },
-            modifier = Modifier.weight(1f)
-          )
-          ChamiSecondaryButton(
-            text = "Retake page",
-            onClick = {
-              vibrate()
-              // Do NOT delete the page: it is replaced only after a
-              // new capture succeeds (see onCaptured / retakeIndex).
-              retakeIndex = safeSelected
-              requestCamera()
-            },
-            modifier = Modifier.weight(1f)
-          )
-        }
-        Spacer(Modifier.height(Ds.s12))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          ChamiSecondaryButton(
-            text = "Auto-detect edges",
-            onClick = {
-              vibrate()
-              val pg = pages.getOrNull(safeSelected)
-              if (pg != null) {
-                autoQuad = ImagePageEditor.detectDocumentQuad(pg.bitmap)
-                straightenIndex = safeSelected
-              }
-            },
-            modifier = Modifier.weight(1f)
-          )
-          ChamiChip("Auto-capture", autoCapture, { vibrate(); autoCapture = !autoCapture })
-        }
-        if (filterMode != 0) {
-          Spacer(Modifier.height(Ds.s8))
-          HintText("Filter on this page: ${filterNames[filterMode]}")
-        }
-        Spacer(Modifier.height(Ds.s24))
-        ImagesPdfOptionsSection(
-          theme = theme,
-          pageSize = pageSize, onPageSize = { pageSize = it },
-          quality = quality, onQuality = { quality = it },
-          pageNumbers = pageNumbers, onPageNumbers = { pageNumbers = it },
-          pageNumberPosition = pageNumberPosition, onPageNumberPosition = { pageNumberPosition = it },
-          watermarkOn = watermarkOn, onWatermarkOn = { watermarkOn = it },
-          watermarkText = watermarkText, onWatermarkText = { watermarkText = it },
-          watermarkOpacity = watermarkOpacity, onWatermarkOpacity = { watermarkOpacity = it },
-          watermarkPosition = watermarkPosition, onWatermarkPosition = { watermarkPosition = it },
-          marginsMm = marginsMm, onMarginsMm = { marginsMm = it }
-        )
+        quad = q
       }
 
-      Spacer(Modifier.height(Ds.s16))
-      if (isProcessing) {
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        Spacer(Modifier.height(Ds.s8))
-        Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+      Box(
+        Modifier.fillMaxSize().pointerInput(bitmap) {
+          detectDragGestures(
+            onDragStart = { off ->
+              val pts = handlePoints()
+              activeHandle = pts.withIndex()
+                .minByOrNull { (_, p) -> (p - off).getDistance() }
+                ?.takeIf { (_, p) -> (p - off).getDistance() <= touchR }?.index
+            },
+            onDragEnd = {
+              val h = activeHandle
+              activeHandle = null
+              if (h != null && cropMode == "auto" && !isFull(quad)) onCropApply(quad)
+            },
+            onDragCancel = { activeHandle = null },
+            onDrag = { change, dragAmount ->
+              change.consume()
+              activeHandle?.let { moveHandle(it, dragAmount.x, dragAmount.y) }
+            }
+          )
+        }
+      ) {
+        Image(
+          bitmap = bitmap.asImageBitmap(),
+          contentDescription = "Page ${pageIndex + 1}",
+          modifier = Modifier.fillMaxSize(),
+          contentScale = ContentScale.Fit
+        )
+        if (cropMode == "auto") {
+          androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+            val pts = quad.map { toPx(it) }
+            val borderPath = androidx.compose.ui.graphics.Path().apply {
+              moveTo(pts[0].x, pts[0].y)
+              for (i in 1 until 4) lineTo(pts[i].x, pts[i].y)
+              close()
+            }
+            // Dim everything outside the frame.
+            val dimPath = androidx.compose.ui.graphics.Path().apply {
+              addRect(androidx.compose.ui.geometry.Rect(Offset.Zero, size))
+              addPath(borderPath)
+            }
+            dimPath.fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
+            drawPath(dimPath, Color.Black.copy(alpha = 0.35f))
+            drawPath(borderPath, ChamiColors.brightGreen, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 5f))
+            val cornerR = with(density) { 11.dp.toPx() }
+            val midR = with(density) { 8.dp.toPx() }
+            handlePoints().forEachIndexed { i, p ->
+              val r = if (i < 4) cornerR else midR
+              drawCircle(Color.White, radius = r, center = p)
+              drawCircle(ChamiColors.darkGreen, radius = r, center = p, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
+            }
+          }
+        }
+      }
+      // Small delete button, top-right of the preview.
+      Box(
+        Modifier
+          .align(Alignment.TopEnd)
+          .padding(Ds.s8)
+          .size(Ds.minTouch)
+          .background(Color.White.copy(alpha = 0.9f), CircleShape)
+          .clickable { onDelete() },
+        contentAlignment = Alignment.Center
+      ) {
+        Icon(Icons.Filled.Delete, contentDescription = "Delete this page", tint = ChamiColors.errorRed, modifier = Modifier.size(24.dp))
       }
     }
 
-    SlideToAction(
-      label = "Slide to Save PDF",
-      theme = theme,
-      enabled = !isProcessing && pages.isNotEmpty(),
-      onSlideComplete = { vibrate(); buildPdf() }
+    Spacer(Modifier.height(Ds.s12))
+    // Pager pill with arrows.
+    Row(
+      Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.Center,
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      ChamiIconButton(icon = Icons.Filled.ChevronLeft, description = "Previous page", onClick = onPrev)
+      Box(
+        Modifier
+          .clip(RoundedCornerShape(50))
+          .background(theme.card)
+          .border(1.dp, theme.cardBorder, RoundedCornerShape(50))
+          .padding(horizontal = Ds.s16, vertical = Ds.s8),
+        contentAlignment = Alignment.Center
+      ) {
+        Text("Page ${pageIndex + 1} of $pageCount", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
+      }
+      ChamiIconButton(icon = Icons.Filled.ChevronRight, description = "Next page", onClick = onNext)
+    }
+    Spacer(Modifier.height(Ds.s12))
+    // Auto-detect / No crop chips.
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+      ChamiCompactChip("Auto-detect", cropMode == "auto", {
+        cropMode = "auto"
+        quad = ImagePageEditor.detectDocumentQuad(bitmap)
+      })
+      Spacer(Modifier.width(Ds.s8))
+      ChamiCompactChip("No crop", cropMode == "none", {
+        cropMode = "none"
+        quad = fullQuad()
+      })
+    }
+    Spacer(Modifier.height(Ds.s12))
+    // Toolbar: Retake, Crop (selected), Rotate, Filters, Adjust, Clean.
+    Row(
+      Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+      horizontalArrangement = Arrangement.spacedBy(Ds.s4)
+    ) {
+      ScanToolItem(theme, Icons.Filled.PhotoCamera, "Retake", false, onRetake)
+      ScanToolItem(theme, Icons.Filled.Crop, "Crop", cropMode == "auto", {
+        cropMode = "auto"
+        quad = ImagePageEditor.detectDocumentQuad(bitmap)
+      })
+      ScanToolItem(theme, Icons.Filled.Rotate90DegreesCcw, "Rotate", false, onRotate)
+      ScanToolItem(theme, Icons.Filled.Filter, "Filters", false, onFilter)
+      ScanToolItem(theme, Icons.Filled.Tune, "Adjust", false, onAdjust)
+      ScanToolItem(theme, Icons.Filled.AutoFixHigh, "Clean", false, onClean)
+    }
+    if (isProcessing) {
+      Spacer(Modifier.height(Ds.s12))
+      LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
+      Spacer(Modifier.height(Ds.s4))
+      Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+    }
+    Spacer(Modifier.height(Ds.s12))
+    // Bottom bar: Keep scanning (left) + pill Save PDF (right).
+    Row(
+      Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.SpaceBetween,
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      TextButton(onClick = onKeepScanning) {
+        Text("Keep scanning", fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = theme.primary)
+      }
+      Button(
+        onClick = onSavePdf,
+        enabled = !isProcessing,
+        modifier = Modifier.height(Ds.secondaryButtonHeight),
+        shape = RoundedCornerShape(50),
+        colors = ButtonDefaults.buttonColors(
+          containerColor = ChamiColors.brightGreen,
+          contentColor = Color.White,
+          disabledContainerColor = ChamiColors.lightGreen
+        ),
+        contentPadding = PaddingValues(horizontal = Ds.s24, vertical = 0.dp)
+      ) {
+        Text("Save PDF", fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+      }
+    }
+  }
+}
+
+// One toolbar item in the Scan preview: icon over a label, 64dp wide,
+// highlighted (light-green circle) when selected.
+@Composable
+private fun ScanToolItem(theme: ChamiTheme, icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
+  Column(
+    Modifier.width(64.dp).clickable { onClick() }.padding(vertical = Ds.s4),
+    horizontalAlignment = Alignment.CenterHorizontally
+  ) {
+    Box(
+      Modifier.size(Ds.minTouch).background(if (selected) ChamiColors.lightGreen else Color.Transparent, CircleShape),
+      contentAlignment = Alignment.Center
+    ) {
+      Icon(icon, contentDescription = label, tint = if (selected) ChamiColors.darkGreen else ChamiColors.deepGreen, modifier = Modifier.size(24.dp))
+    }
+    Spacer(Modifier.height(Ds.s4))
+    Text(
+      label,
+      fontSize = Ds.NAV_SP.sp,
+      fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+      color = if (selected) ChamiColors.darkGreen else theme.text,
+      maxLines = 1
     )
   }
 }
+
 
 // 3. PDF TO IMAGES — JPG (default) / PNG, resolution Screen 150 /
 // High 300 (default) / Print 600 DPI, page range with live validation,

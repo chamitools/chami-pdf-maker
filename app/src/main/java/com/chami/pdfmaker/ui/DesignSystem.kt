@@ -163,25 +163,6 @@ fun ChamiIconButton(
     }
 }
 
-/** Compact systematic action button — 40dp, 12sp semibold, icon + label.
- *  Used for the Scan preview action row (Keep scanning / Retake /
- *  Auto-detect) so the actions sit in one even row instead of big
- *  full-width buttons. */
-@Composable
-fun ChamiCompactButton(icon: ImageVector, text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Button(
-        onClick = onClick, modifier = modifier.height(40.dp),
-        shape = RoundedCornerShape(Ds.buttonRadius),
-        border = BorderStroke(1.dp, ChamiColors.darkGreen),
-        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = ChamiColors.darkGreen),
-        contentPadding = PaddingValues(horizontal = Ds.s8, vertical = 0.dp)
-    ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(Ds.s4))
-        Text(text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-    }
-}
-
 /** Small chip — 36dp, 12sp. Used for the Scan preview Auto-detect /
  *  No crop chips under the pager. */
 @Composable

@@ -85,7 +85,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "Convert", "save_pdf" to "Save PDF",
       "done" to "Done", "language" to "Language",
       "contact_support" to "Contact Support", "check_updates" to "Check for Updates",
-      "storage" to "Storage", "app_lock" to "App Lock", "background" to "Background",
+      "storage" to "Storage", "app_lock" to "App Lock",
       "font_size" to "Font Size", "clear_cache" to "Clear Cache",
       "privacy_policy" to "Privacy Policy"
     ),
@@ -100,7 +100,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "बदलें", "save_pdf" to "PDF सहेजें",
       "done" to "हो गया", "language" to "भाषा",
       "contact_support" to "सहायता से संपर्क करें", "check_updates" to "अपडेट देखें",
-      "storage" to "स्टोरेज", "app_lock" to "ऐप लॉक", "background" to "बैकग्राउंड",
+      "storage" to "स्टोरेज", "app_lock" to "ऐप लॉक",
       "font_size" to "फ़ॉन्ट आकार", "clear_cache" to "कैश साफ़ करें",
       "privacy_policy" to "गोपनीयता नीति"
     ),
@@ -115,7 +115,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "Convertir", "save_pdf" to "Guardar PDF",
       "done" to "Listo", "language" to "Idioma",
       "contact_support" to "Contactar soporte", "check_updates" to "Buscar actualizaciones",
-      "storage" to "Almacenamiento", "app_lock" to "Bloqueo de app", "background" to "Fondo",
+      "storage" to "Almacenamiento", "app_lock" to "Bloqueo de app",
       "font_size" to "Tamaño de fuente", "clear_cache" to "Borrar caché",
       "privacy_policy" to "Política de privacidad"
     ),
@@ -130,7 +130,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "Convertir", "save_pdf" to "Enregistrer PDF",
       "done" to "Terminé", "language" to "Langue",
       "contact_support" to "Contacter l'assistance", "check_updates" to "Vérifier les mises à jour",
-      "storage" to "Stockage", "app_lock" to "Verrouillage de l'app", "background" to "Arrière-plan",
+      "storage" to "Stockage", "app_lock" to "Verrouillage de l'app",
       "font_size" to "Taille de police", "clear_cache" to "Vider le cache",
       "privacy_policy" to "Politique de confidentialité"
     ),
@@ -145,7 +145,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "Konvertieren", "save_pdf" to "PDF speichern",
       "done" to "Fertig", "language" to "Sprache",
       "contact_support" to "Support kontaktieren", "check_updates" to "Nach Updates suchen",
-      "storage" to "Speicher", "app_lock" to "App-Sperre", "background" to "Hintergrund",
+      "storage" to "Speicher", "app_lock" to "App-Sperre",
       "font_size" to "Schriftgröße", "clear_cache" to "Cache leeren",
       "privacy_policy" to "Datenschutzerklärung"
     ),
@@ -160,7 +160,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "Converter", "save_pdf" to "Salvar PDF",
       "done" to "Concluído", "language" to "Idioma",
       "contact_support" to "Falar com o suporte", "check_updates" to "Verificar atualizações",
-      "storage" to "Armazenamento", "app_lock" to "Bloqueio do app", "background" to "Fundo",
+      "storage" to "Armazenamento", "app_lock" to "Bloqueio do app",
       "font_size" to "Tamanho da fonte", "clear_cache" to "Limpar cache",
       "privacy_policy" to "Política de privacidade"
     ),
@@ -175,7 +175,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "تحويل", "save_pdf" to "حفظ PDF",
       "done" to "تم", "language" to "اللغة",
       "contact_support" to "الاتصال بالدعم", "check_updates" to "التحقق من التحديثات",
-      "storage" to "التخزين", "app_lock" to "قفل التطبيق", "background" to "الخلفية",
+      "storage" to "التخزين", "app_lock" to "قفل التطبيق",
       "font_size" to "حجم الخط", "clear_cache" to "مسح ذاكرة التخزين المؤقت",
       "privacy_policy" to "سياسة الخصوصية"
     ),
@@ -190,7 +190,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "转换", "save_pdf" to "保存 PDF",
       "done" to "完成", "language" to "语言",
       "contact_support" to "联系客服", "check_updates" to "检查更新",
-      "storage" to "存储空间", "app_lock" to "应用锁", "background" to "背景",
+      "storage" to "存储空间", "app_lock" to "应用锁",
       "font_size" to "字体大小", "clear_cache" to "清除缓存",
       "privacy_policy" to "隐私政策"
     ),
@@ -205,7 +205,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "Конвертировать", "save_pdf" to "Сохранить PDF",
       "done" to "Готово", "language" to "Язык",
       "contact_support" to "Связаться с поддержкой", "check_updates" to "Проверить обновления",
-      "storage" to "Хранилище", "app_lock" to "Блокировка приложения", "background" to "Фон",
+      "storage" to "Хранилище", "app_lock" to "Блокировка приложения",
       "font_size" to "Размер шрифта", "clear_cache" to "Очистить кэш",
       "privacy_policy" to "Политика конфиденциальности"
     ),
@@ -220,7 +220,7 @@ object LocaleHelper {
       "ocr" to "OCR", "convert" to "変換", "save_pdf" to "PDFを保存",
       "done" to "完了", "language" to "言語",
       "contact_support" to "サポートに連絡", "check_updates" to "アップデートを確認",
-      "storage" to "ストレージ", "app_lock" to "アプリロック", "background" to "背景",
+      "storage" to "ストレージ", "app_lock" to "アプリロック",
       "font_size" to "フォントサイズ", "clear_cache" to "キャッシュを消去",
       "privacy_policy" to "プライバシーポリシー"
     )

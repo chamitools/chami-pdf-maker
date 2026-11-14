@@ -4,8 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -917,7 +915,6 @@ fun SettingsScreen(
   var showClearCacheDialog by remember { mutableStateOf(false) }
   var showPrivacyPolicyFallback by remember { mutableStateOf(false) }
   var showLanguageDialog by remember { mutableStateOf(false) }
-  var showBackgroundDialog by remember { mutableStateOf(false) }
   var showFontSizeDialog by remember { mutableStateOf(false) }
   var showPinSetupDialog by remember { mutableStateOf(false) }
   var showUpdateDialog by remember { mutableStateOf(false) }
@@ -927,8 +924,6 @@ fun SettingsScreen(
   var pinSetupText by remember { mutableStateOf("") }
   var pinSetupError by remember { mutableStateOf("") }
   var appLockOn by remember { mutableStateOf(prefs.getBoolean("app_lock", false)) }
-  var bgKey by remember { mutableStateOf(prefs.getString("home_bg", "default") ?: "default") }
-  var bgOpacity by remember { mutableStateOf(prefs.getFloat("home_bg_opacity", 0.6f)) }
   var previewFontScale by remember { mutableStateOf(fontScale) }
 
   val chamiDir = remember { File(ctx.getExternalFilesDir(null), "Chami") }
@@ -937,23 +932,6 @@ fun SettingsScreen(
   fun refreshSizes() {
     storageUsedBytes = dirSizeBytes(chamiDir)
     cacheBytes = dirSizeBytes(ctx.cacheDir)
-  }
-
-  val bgPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-    if (uri != null) {
-      try {
-        ctx.contentResolver.takePersistableUriPermission(
-          uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-        )
-      } catch (_: Exception) {}
-      prefs.edit()
-        .putString("home_bg", "custom")
-        .putString("home_bg_custom_uri", uri.toString())
-        .apply()
-      bgKey = "custom"
-      showBackgroundDialog = false
-      Toast.makeText(ctx, "Custom background set", Toast.LENGTH_SHORT).show()
-    }
   }
 
   fun vibrate() {
@@ -1004,23 +982,6 @@ fun SettingsScreen(
     }
   }
 
-  // Honest labels: no pixel-art background assets exist in this build,
-  // so the picker offers colour tints (not the 5 pixel backgrounds)
-  // plus a custom gallery photo. This is stated in the dialog.
-  val bgOptions = listOf(
-    "default" to "Default White",
-    "grass" to "Grass tint",
-    "sky" to "Sky tint",
-    "night" to "Night tint",
-    "sunset" to "Sunset tint"
-  )
-  val bgTintColors = mapOf(
-    "default" to Color.White,
-    "grass" to Color(0xFFE8F5E9),
-    "sky" to Color(0xFFE3F2FD),
-    "night" to Color(0xFF111827),
-    "sunset" to Color(0xFFFFF3E0)
-  )
   val fontOptions = listOf(
     "Small" to 0.85f,
     "Default" to 1.0f,
@@ -1175,11 +1136,6 @@ fun SettingsScreen(
         onClick = { showLanguageDialog = true }
       )
       SettingsRow(
-        title = LocaleHelper.t(ctx, "background"),
-        value = if (bgKey == "custom") "Custom photo" else bgOptions.firstOrNull { it.first == bgKey }?.second,
-        onClick = { showBackgroundDialog = true }
-      )
-      SettingsRow(
         title = LocaleHelper.t(ctx, "font_size"),
         value = fontOptions.firstOrNull { it.second == fontScale }?.first,
         onClick = { previewFontScale = fontScale; showFontSizeDialog = true }
@@ -1295,144 +1251,6 @@ fun SettingsScreen(
               if (isCurrent) {
                 Icon(Icons.Filled.Check, contentDescription = "Current language", tint = theme.primary)
               }
-            }
-          }
-        }
-      }
-    )
-  }
-
-  // Dialog: Background — colour tints (no pixel assets in this build)
-  // + custom photo, opacity slider 20–100% (default 60%), live Home
-  // preview. Applies to Home only.
-  if (showBackgroundDialog) {
-    AlertDialog(
-      onDismissRequest = { showBackgroundDialog = false },
-      confirmButton = {
-        TextButton(onClick = { showBackgroundDialog = false }) {
-          Text("DONE", fontFamily = PixelFont, color = theme.primary)
-        }
-      },
-      title = {
-        Text(LocaleHelper.t(ctx, "background"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-      },
-      text = {
-        Column {
-          Text(
-            "Pixel backgrounds are not included in this build — these are colour tints. " +
-              "A custom photo can be picked from your gallery.",
-            fontSize = (Ds.HINT_SP * fontScale).sp,
-            lineHeight = (Ds.HINT_SP * 1.4 * fontScale).sp,
-            color = theme.textSecondary
-          )
-          Spacer(Modifier.height(Ds.s12))
-          // Live Home preview: tint/photo colour at the chosen opacity.
-          Box(
-            Modifier
-              .fillMaxWidth()
-              .height(96.dp)
-              .clip(RoundedCornerShape(Ds.tileRadius))
-              .background(Color.White)
-              .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius)),
-            contentAlignment = Alignment.Center
-          ) {
-            Box(
-              Modifier
-                .fillMaxSize()
-                .background(
-                  (bgTintColors[bgKey] ?: Color.White).copy(alpha = bgOpacity)
-                )
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Image(
-                painter = painterResource(id = com.chami.pdfmaker.R.drawable.chami_logo_asset),
-                contentDescription = null,
-                modifier = Modifier.size(40.dp),
-                contentScale = ContentScale.Fit
-              )
-              Spacer(Modifier.width(Ds.s8))
-              Text(
-                "CHAMI PRO",
-                fontFamily = PixelFont,
-                fontWeight = FontWeight.ExtraBold,
-                fontSize = (Ds.SECTION_SP * fontScale).sp,
-                color = theme.text
-              )
-            }
-          }
-          Spacer(Modifier.height(Ds.s12))
-          Text(
-            "Opacity: ${(bgOpacity * 100).toInt()}%",
-            fontSize = (Ds.BODY_SP * fontScale).sp,
-            fontWeight = FontWeight.SemiBold,
-            color = theme.text
-          )
-          Slider(
-            value = bgOpacity,
-            onValueChange = {
-              bgOpacity = it
-              prefs.edit().putFloat("home_bg_opacity", it).apply()
-            },
-            valueRange = 0.2f..1.0f,
-            colors = SliderDefaults.colors(
-              thumbColor = theme.primary,
-              activeTrackColor = theme.primary
-            )
-          )
-          Spacer(Modifier.height(Ds.s8))
-          bgOptions.forEach { (key, name) ->
-            val isCurrent = key == bgKey
-            Row(
-              Modifier
-                .fillMaxWidth()
-                .defaultMinSize(minHeight = Ds.minTouch)
-                .clip(RoundedCornerShape(8.dp))
-                .clickable {
-                  vibrate()
-                  prefs.edit().putString("home_bg", key).apply()
-                  bgKey = key
-                }
-                .padding(vertical = Ds.s8, horizontal = Ds.s4),
-              verticalAlignment = Alignment.CenterVertically
-            ) {
-              Box(
-                Modifier
-                  .size(24.dp)
-                  .clip(RoundedCornerShape(6.dp))
-                  .background(bgTintColors[key] ?: Color.White)
-                  .border(1.dp, theme.cardBorder, RoundedCornerShape(6.dp))
-              )
-              Spacer(Modifier.width(Ds.s12))
-              Text(
-                name,
-                fontSize = (Ds.BODY_SP * fontScale).sp,
-                fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.SemiBold,
-                color = if (isCurrent) theme.primary else theme.text,
-                modifier = Modifier.weight(1f)
-              )
-              if (isCurrent) {
-                Icon(Icons.Filled.Check, contentDescription = "Current background", tint = theme.primary)
-              }
-            }
-          }
-          Row(
-            Modifier
-              .fillMaxWidth()
-              .defaultMinSize(minHeight = Ds.minTouch)
-              .clip(RoundedCornerShape(8.dp))
-              .clickable { bgPicker.launch("image/*") }
-              .padding(vertical = Ds.s8, horizontal = Ds.s4),
-            verticalAlignment = Alignment.CenterVertically
-          ) {
-            Text(
-              "Custom photo…",
-              fontSize = (Ds.BODY_SP * fontScale).sp,
-              fontWeight = if (bgKey == "custom") FontWeight.ExtraBold else FontWeight.SemiBold,
-              color = if (bgKey == "custom") theme.primary else theme.text,
-              modifier = Modifier.weight(1f)
-            )
-            if (bgKey == "custom") {
-              Icon(Icons.Filled.Check, contentDescription = "Current background", tint = theme.primary)
             }
           }
         }

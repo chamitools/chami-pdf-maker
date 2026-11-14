@@ -95,7 +95,8 @@ import java.security.MessageDigest
 // - ImagePageEditor.kt is unchanged in this copy, so its CropEditorDialog
 //   still warps (cropToQuad). Crop therefore uses the new RectCropDialog
 //   below (true rectangular CUT via ImagePageEditor.cropToRect); the warp
-//   dialog is only opened from the separate "Straighten" button.
+//   dialog is no longer reachable — the Straighten button that opened
+//   it was removed at the user's request (2026-11-14).
 // - PdfProtector already exposes unlockPdf / setPermissions /
 //   verifyPassword in this copy; Protect uses them instead of the old
 //   local RC4 unlock (kept only where still needed: patchPdfPermissions).
@@ -619,15 +620,16 @@ fun MultiDoneScreen(
 }
 
 // Big main preview (340dp, full width) with the left-corner vertical icon
-// stack: Crop on top, then Straighten, Delete, Filter, Adjust. Each is a
-// 48dp PreviewActionButton with a real vector icon.
+// stack: Crop on top, then Delete, Filter, Adjust. Each is a
+// 48dp PreviewActionButton with a real vector icon. The second crop
+// (Straighten / perspective warp) was removed at the user's request —
+// Crop is the only crop entry point on Images to PDF.
 @Composable
 fun BigPagePreview(
   page: PageItem?,
   label: String,
   theme: ChamiTheme,
   onCrop: () -> Unit,
-  onStraighten: () -> Unit,
   onDelete: () -> Unit,
   onFilter: () -> Unit,
   onAdjust: () -> Unit,
@@ -659,7 +661,6 @@ fun BigPagePreview(
       verticalArrangement = Arrangement.spacedBy(Ds.s8)
     ) {
       PreviewActionButton(Icons.Filled.Crop, "Crop — cut the image", onCrop)
-      PreviewActionButton(Icons.Filled.Straighten, "Straighten — fix perspective", onStraighten)
       PreviewActionButton(Icons.Filled.Delete, "Delete this page", onDelete)
       PreviewActionButton(Icons.Filled.Filter, "Filter", onFilter)
       PreviewActionButton(Icons.Filled.Tune, "Adjust brightness", onAdjust)
@@ -886,10 +887,9 @@ fun AddPageSourceDialog(
 
 // --- Rectangular CUT crop dialog (default crop) ---------------------------
 // Crop CUTS: dragging a corner or edge removes everything outside the
-// frame. It never bends, warps or changes perspective — perspective
-// correction is the separate Straighten button, which opens
-// CropEditorDialog (cropToQuad) instead. Ratio presets: Free / Original /
-// 1:1 / 3:4 / 4:3 / 16:9 / A4. Apply calls ImagePageEditor.cropToRect.
+// frame. It never bends, warps or changes perspective. Ratio presets:
+// Free / Original / 1:1 / 3:4 / 4:3 / 16:9 / A4. Apply calls
+// ImagePageEditor.cropToRect.
 @Composable
 fun RectCropDialog(
   bitmap: Bitmap,
@@ -942,7 +942,7 @@ fun RectCropDialog(
       }
       Spacer(Modifier.height(Ds.s8))
       Text(
-        "Drag a corner or edge to cut. Everything outside the frame is removed. For tilted pages use Straighten instead.",
+        "Drag a corner or edge to cut. Everything outside the frame is removed.",
         fontSize = Ds.HINT_SP.sp, color = Color(0xFFCBD5E1)
       )
       Spacer(Modifier.height(Ds.s8))
@@ -1112,9 +1112,10 @@ class PageEditor(
 //   FIXED defaults — Original size, full-resolution quality, no
 //   watermark, no page numbers, no margins (no option controls).
 // - Picker loads at full resolution (loadBitmap cap 8000).
-// - Crop CUTS by default (RectCropDialog); Straighten is the separate
-//   warp path. Per-page filter state, correct delete, selection follows
-//   the page Uri.
+// - Crop CUTS by default (RectCropDialog) — the only crop on this
+//   screen; the second crop (Straighten / warp) was removed at the
+//   user's request. Per-page filter state, correct delete, selection
+//   follows the page Uri.
 @Composable
 fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
@@ -1126,7 +1127,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var isProcessing by remember { mutableStateOf(false) }
   var progressText by remember { mutableStateOf("") }
   var cropIndex by remember { mutableStateOf<Int?>(null) }
-  var straightenIndex by remember { mutableStateOf<Int?>(null) }
   var showFilters by remember { mutableStateOf(false) }
   var showAdjust by remember { mutableStateOf(false) }
   var brightness by remember { mutableStateOf(0f) }
@@ -1219,24 +1219,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       )
     }
   }
-  straightenIndex?.let { index ->
-    val page = pages.getOrNull(index)
-    if (page != null) {
-      CropEditorDialog(
-        bitmap = page.bitmap,
-        theme = theme,
-        onApply = { bmp ->
-          vm.filterOriginals.remove(page.uri)
-          editor.replacePage(index, bmp, newOriginal = bmp) { straightenIndex = null }
-        },
-        onDismiss = { straightenIndex = null },
-        onRotate = {
-          vm.filterOriginals.remove(page.uri)
-          editor.replacePage(index, ImagePageEditor.rotate90(page.bitmap), newOriginal = null)
-        }
-      )
-    }
-  }
   if (showFilters) {
     FilterPickerDialog(
       selected = filterMode,
@@ -1288,7 +1270,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
           label = "Page ${safeSelected + 1}",
           theme = theme,
           onCrop = { cropIndex = safeSelected },
-          onStraighten = { straightenIndex = safeSelected },
           onDelete = { vibrate(); vm.deleteAt(safeSelected) },
           onFilter = { showFilters = true },
           onAdjust = { showAdjust = true },
@@ -1569,7 +1550,11 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
             vm.filterOriginals.remove(pg.uri)
             editor.replacePage(safeSelected, cropped, newOriginal = cropped)
           }
-        }
+        },
+        pages = pages,
+        onSelectPage = { vm.select(it) },
+        onMovePage = { from, to -> vm.movePage(from, to) },
+        onAddPages = { vibrate(); requestCamera() }
       )
     }
   }
@@ -1579,9 +1564,11 @@ fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 // Executive Emerald — green border, never Adobe blue). Preview with
 // the detected-edge border + draggable corner and edge-midpoint
 // handles; releasing a drag applies the document crop (perspective
-// corrected, as in Adobe Scan). Pager pill, Auto-detect / No crop
-// chips, Retake / Crop / Rotate / Filters / Adjust / Clean toolbar,
-// bottom bar Keep scanning + pill Save PDF.
+// corrected, as in Adobe Scan). Left-corner tools (Crop, Delete,
+// Filter, Adjust) and bottom page previews match Images to PDF;
+// toolbar keeps only Retake / Rotate / Clean so nothing duplicates.
+// Pager pill, Auto-detect / No crop chips, bottom bar Keep scanning
+// + pill Save PDF.
 @Composable
 fun ScanAdobePreview(
   theme: ChamiTheme,
@@ -1600,7 +1587,11 @@ fun ScanAdobePreview(
   onDelete: () -> Unit,
   onKeepScanning: () -> Unit,
   onSavePdf: () -> Unit,
-  onCropApply: (List<Offset>) -> Unit
+  onCropApply: (List<Offset>) -> Unit,
+  pages: List<PageItem>,
+  onSelectPage: (Int) -> Unit,
+  onMovePage: (Int, Int) -> Unit,
+  onAddPages: () -> Unit
 ) {
   val bitmap = page.bitmap
   val density = LocalDensity.current
@@ -1710,17 +1701,20 @@ fun ScanAdobePreview(
           }
         }
       }
-      // Small delete button, top-right of the preview.
-      Box(
-        Modifier
-          .align(Alignment.TopEnd)
-          .padding(Ds.s8)
-          .size(Ds.minTouch)
-          .background(Color.White.copy(alpha = 0.9f), CircleShape)
-          .clickable { onDelete() },
-        contentAlignment = Alignment.Center
+      // Left-corner tools, same order as Images to PDF: Crop on top,
+      // then Delete, Filter, Adjust. Crop turns the detected-edge
+      // border + handles back on (Auto-detect).
+      Column(
+        Modifier.align(Alignment.TopStart).padding(Ds.s8),
+        verticalArrangement = Arrangement.spacedBy(Ds.s8)
       ) {
-        Icon(Icons.Filled.Delete, contentDescription = "Delete this page", tint = ChamiColors.errorRed, modifier = Modifier.size(24.dp))
+        PreviewActionButton(Icons.Filled.Crop, "Crop", {
+          cropMode = "auto"
+          quad = ImagePageEditor.detectDocumentQuad(bitmap)
+        })
+        PreviewActionButton(Icons.Filled.Delete, "Delete this page", onDelete)
+        PreviewActionButton(Icons.Filled.Filter, "Filter", onFilter)
+        PreviewActionButton(Icons.Filled.Tune, "Adjust brightness", onAdjust)
       }
     }
 
@@ -1758,19 +1752,15 @@ fun ScanAdobePreview(
       })
     }
     Spacer(Modifier.height(Ds.s12))
-    // Toolbar: Retake, Crop (selected), Rotate, Filters, Adjust, Clean.
+    // Toolbar: Retake, Rotate, Clean only — Crop / Filters / Adjust
+    // live in the left-corner tools above (same as Images to PDF), so
+    // nothing is duplicated.
     Row(
       Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
       horizontalArrangement = Arrangement.spacedBy(Ds.s4)
     ) {
       ScanToolItem(theme, Icons.Filled.PhotoCamera, "Retake", false, onRetake)
-      ScanToolItem(theme, Icons.Filled.Crop, "Crop", cropMode == "auto", {
-        cropMode = "auto"
-        quad = ImagePageEditor.detectDocumentQuad(bitmap)
-      })
       ScanToolItem(theme, Icons.Filled.Rotate90DegreesCcw, "Rotate", false, onRotate)
-      ScanToolItem(theme, Icons.Filled.Filter, "Filters", false, onFilter)
-      ScanToolItem(theme, Icons.Filled.Tune, "Adjust", false, onAdjust)
       ScanToolItem(theme, Icons.Filled.AutoFixHigh, "Clean", false, onClean)
     }
     if (isProcessing) {
@@ -1779,6 +1769,18 @@ fun ScanAdobePreview(
       Spacer(Modifier.height(Ds.s4))
       Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
     }
+    Spacer(Modifier.height(Ds.s12))
+    // Page previews at the bottom, just like Images to PDF: tap a
+    // thumbnail to change the big preview, drag to reorder, "+" opens
+    // the camera to keep scanning.
+    PageThumbnailStrip(
+      pages = pages,
+      selectedIndex = pageIndex,
+      theme = theme,
+      onSelect = onSelectPage,
+      onMove = onMovePage,
+      onAddPages = onAddPages
+    )
     Spacer(Modifier.height(Ds.s12))
     // Bottom bar: Keep scanning (left) + pill Save PDF (right).
     Row(

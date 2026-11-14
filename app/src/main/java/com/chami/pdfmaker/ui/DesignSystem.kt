@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -159,6 +160,42 @@ fun ChamiIconButton(
 ) {
     IconButton(onClick = onClick, modifier = modifier.size(Ds.minTouch)) {
         Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(24.dp))
+    }
+}
+
+/** Compact systematic action button — 40dp, 12sp semibold, icon + label.
+ *  Used for the Scan preview action row (Keep scanning / Retake /
+ *  Auto-detect) so the actions sit in one even row instead of big
+ *  full-width buttons. */
+@Composable
+fun ChamiCompactButton(icon: ImageVector, text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Button(
+        onClick = onClick, modifier = modifier.height(40.dp),
+        shape = RoundedCornerShape(Ds.buttonRadius),
+        border = BorderStroke(1.dp, ChamiColors.darkGreen),
+        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = ChamiColors.darkGreen),
+        contentPadding = PaddingValues(horizontal = Ds.s8, vertical = 0.dp)
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(Ds.s4))
+        Text(text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+/** Small chip — 36dp, 12sp. Used for the Scan preview Auto-detect /
+ *  No crop chips under the pager. */
+@Composable
+fun ChamiCompactChip(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.defaultMinSize(minHeight = 36.dp).clickable(onClick = onClick),
+        shape = RoundedCornerShape(50),
+        color = if (selected) ChamiColors.lightGreen else Color.White,
+        border = BorderStroke(1.dp, if (selected) ChamiColors.darkGreen else Color(0xFFCBD5E1)),
+    ) {
+        Box(Modifier.padding(horizontal = Ds.s16, vertical = Ds.s8), contentAlignment = Alignment.Center) {
+            Text(label, fontSize = Ds.HINT_SP.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (selected) ChamiColors.deepGreen else Color(0xFF1A2B1F))
+        }
     }
 }
 

@@ -1,8 +1,6 @@
 package com.chami.pdfmaker
 
 import android.content.Context
-import android.graphics.Bitmap
-import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
@@ -28,8 +26,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -41,12 +37,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.chami.pdfmaker.pdf.PdfEngine
 import com.chami.pdfmaker.theme.*
 import com.chami.pdfmaker.ui.*
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 data class ToolItem(val id: String, val title: String, val iconRes: Int, val category: String = "CORE")
 
@@ -125,34 +118,6 @@ class MainActivity : ComponentActivity() {
         "Convert" to convertTools,
         "Images & Reading" to imagesReadingTools,
       )
-
-      // Home background from Settings ("home_bg" in chami_prefs).
-      // No pixel-art background assets exist in this build, so the
-      // picker stores colour tints (labelled as such in Settings) or a
-      // custom photo URI; opacity 20–100%, default 60%, is a white
-      // overlay over the tint/photo and applies to Home only.
-      val bgPrefs = ctx.getSharedPreferences(LocaleHelper.PREFS, Context.MODE_PRIVATE)
-      val homeBgKey = bgPrefs.getString("home_bg", "default") ?: "default"
-      val homeBgOpacity = bgPrefs.getFloat("home_bg_opacity", 0.6f).coerceIn(0.2f, 1.0f)
-      val homeBgTint: Color = when (homeBgKey) {
-        "grass" -> Color(0xFFE8F5E9)
-        "sky" -> Color(0xFFE3F2FD)
-        "night" -> Color(0xFF111827)
-        "sunset" -> Color(0xFFFFF3E0)
-        else -> theme.bg
-      }
-      val customBgUriStr = bgPrefs.getString("home_bg_custom_uri", null)
-      var customBgBmp by remember(customBgUriStr, homeBgKey) { mutableStateOf<Bitmap?>(null) }
-      LaunchedEffect(customBgUriStr, homeBgKey) {
-        customBgBmp = null
-        if (homeBgKey == "custom" && !customBgUriStr.isNullOrBlank()) {
-          withContext(Dispatchers.IO) {
-            try {
-              PdfEngine.loadBitmap(ctx, Uri.parse(customBgUriStr), 1200)
-            } catch (_: Exception) { null }
-          }?.let { customBgBmp = it }
-        }
-      }
 
       @Composable
       fun ToolTile(t: ToolItem) {
@@ -343,26 +308,6 @@ class MainActivity : ComponentActivity() {
               .fillMaxSize()
               .background(theme.bg)
           ) {
-            // Home background layer (Home only): custom photo or tint
-            // at the saved opacity over white. Other tabs stay plain.
-            if (currentTab == "Home") {
-              val customBmp = customBgBmp
-              if (homeBgKey == "custom" && customBmp != null) {
-                Image(
-                  bitmap = customBmp.asImageBitmap(),
-                  contentDescription = null,
-                  modifier = Modifier.fillMaxSize(),
-                  contentScale = ContentScale.Crop,
-                  alpha = homeBgOpacity
-                )
-              } else {
-                Box(
-                  Modifier
-                    .fillMaxSize()
-                    .background(lerp(Color.White, homeBgTint, homeBgOpacity))
-                )
-              }
-            }
             Column(
               Modifier
                 .fillMaxSize()

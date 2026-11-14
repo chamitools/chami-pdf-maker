@@ -47,8 +47,6 @@ import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -109,13 +107,7 @@ import kotlinx.coroutines.launch
  * pill says so ("GUIDE — ALIGN PAGE INSIDE"). The frame never pulses
  * and is never presented as live tracking when it is only the guide.
  * Thresholds below (stability < 3, edge score > 6) are estimates for a
- * 16x12 grid — tune on-phone if auto-capture fires too early / late.
- *
- * AUTO-CAPTURE: the old blind 2.5s timer is gone. Auto-capture fires
- * only when the toggle is ON, the frame is steady AND edges are found
- * continuously for 1 second. After any capture it must re-arm: the
- * scene has to become unsteady first, so one steady page can never
- * auto-fire twice. Manual shutter always works regardless.
+ * 16x12 grid. No auto-capture: only the shutter button takes a photo.
  */
 private data class FrameStats(
   val stability: Float, // mean |luminance change| vs previous frame (0-255 scale)
@@ -125,14 +117,11 @@ private data class FrameStats(
 
 private const val GRID_W = 16
 private const val GRID_H = 12
-private const val STABLE_MAX_DIFF = 3f
 private const val EDGE_MIN_SCORE = 6f
-private const val AUTO_CAPTURE_STEADY_MS = 1000L
 
 @Composable
 fun ScanCameraScreen(
   theme: ChamiTheme,
-  autoCapture: Boolean,
   onCaptured: (android.graphics.Bitmap) -> Unit,
   onGallery: () -> Unit,
   onClose: () -> Unit,
@@ -164,13 +153,7 @@ fun ScanCameraScreen(
   var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
   var cameraReady by remember { mutableStateOf(false) }
   var flashOn by remember { mutableStateOf(false) }
-  // On-camera auto-capture toggle: initialised from the caller's value,
-  // toggled here for this camera session (the toggle lives on the
-  // camera screen, per spec §7 Tool 2).
-  var autoCaptureOn by remember { mutableStateOf(autoCapture) }
   var capturing by remember { mutableStateOf(false) }
-  var needRearm by remember { mutableStateOf(false) }
-  var steadySince by remember { mutableStateOf<Long?>(null) }
 
   // Capture proof state.
   var sessionCaptures by remember { mutableStateOf(0) }
@@ -246,10 +229,6 @@ fun ScanCameraScreen(
             }
             try { oldThumb?.recycle() } catch (_: Exception) {}
             playCaptureProof(pageNumber)
-            // One steady page must never auto-fire twice: re-arm only
-            // after the scene becomes unsteady again.
-            needRearm = true
-            steadySince = null
             onCaptured(bmp)
           } else {
             Toast.makeText(ctx, "Capture failed — try again", Toast.LENGTH_SHORT).show()
@@ -382,37 +361,19 @@ fun ScanCameraScreen(
     if (hasPermission) bindCamera(previewView)
   }
 
-  // Auto-capture: NO blind timer. Polls the analysed frames every
-  // 150 ms; fires only when auto-capture is ON, the frame is steady
-  // AND edges are found continuously for 1 second, and the capture
-  // has re-armed since the last shot. Manual shutter always works.
-  LaunchedEffect(cameraReady, autoCaptureOn) {
+  // Frame analysis publishes the detected quad / edge state for the
+  // overlay and status pill. No auto-capture: only the shutter takes
+  // a photo.
+  LaunchedEffect(cameraReady) {
     if (!cameraReady) return@LaunchedEffect
     while (true) {
       delay(150)
       val stats = statsRef.get() ?: continue
-      val stable = stats.stability < STABLE_MAX_DIFF
       val edges = stats.edgeScore > EDGE_MIN_SCORE && stats.quad != null
       // Publish detection state for the frame overlay (only on change,
       // so the screen is not recomposed every 150 ms for nothing).
       if (detectedQuad != stats.quad) detectedQuad = stats.quad
       if (edgesFound != edges) edgesFound = edges
-      if (needRearm) {
-        if (!stable) { needRearm = false; steadySince = null }
-        continue
-      }
-      if (autoCaptureOn && stable && edges) {
-        val now = System.currentTimeMillis()
-        val since = steadySince
-        if (since == null) {
-          steadySince = now
-        } else if (now - since >= AUTO_CAPTURE_STEADY_MS && !capturing) {
-          steadySince = null
-          takePhoto()
-        }
-      } else {
-        steadySince = null
-      }
     }
   }
 
@@ -493,7 +454,7 @@ fun ScanCameraScreen(
   val statusText = when {
     !cameraReady -> "STARTING CAMERA…"
     captureMessage != null -> captureMessage!!
-    edgesFound -> "PAGE FOUND — HOLD STEADY"
+    edgesFound -> "PAGE FOUND — TAP SHUTTER"
     else -> "GUIDE — ALIGN PAGE INSIDE"
   }
 
@@ -670,49 +631,27 @@ fun ScanCameraScreen(
         }
       }
       if (captureMessage != null) Spacer(Modifier.height(Ds.s12))
-      Row(
-        modifier = Modifier
-          .clip(RoundedCornerShape(Ds.s16))
-          .background(Color.Black.copy(alpha = 0.45f))
-          .padding(horizontal = Ds.s12),
-        verticalAlignment = Alignment.CenterVertically
-      ) {
-        Text(
-          "Auto-capture",
-          color = Color.White,
-          fontSize = Ds.HINT_SP.sp,
-          fontWeight = FontWeight.Bold
-        )
-        Spacer(Modifier.size(Ds.s8))
-        Switch(
-          checked = autoCaptureOn,
-          onCheckedChange = { autoCaptureOn = it },
-          colors = SwitchDefaults.colors(
-            checkedThumbColor = Color.White,
-            checkedTrackColor = ChamiColors.brightGreen,
-            uncheckedThumbColor = Color.White,
-            uncheckedTrackColor = Color.White.copy(alpha = 0.4f)
-          )
-        )
-      }
       Spacer(Modifier.height(Ds.s12))
       Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
       ) {
-        // Gallery — labelled icon button, 48dp target (was a lone emoji).
-        Column(
+        // Gallery — small labelled pill, clearly a secondary option
+        // next to the big shutter (Adobe-like: gallery is not the
+        // main action).
+        Row(
           modifier = Modifier
-            .size(72.dp)
-            .clip(CircleShape)
+            .height(Ds.minTouch)
+            .clip(RoundedCornerShape(Ds.s16))
             .background(Color.Black.copy(alpha = 0.45f))
-            .clickable { onGallery() },
-          horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.Center
+            .clickable { onGallery() }
+            .padding(horizontal = Ds.s12),
+          verticalAlignment = Alignment.CenterVertically
         ) {
-          Icon(Icons.Filled.PhotoLibrary, contentDescription = "Gallery", tint = Color.White, modifier = Modifier.size(24.dp))
-          Text("Gallery", color = Color.White, fontSize = Ds.NAV_SP.sp)
+          Icon(Icons.Filled.PhotoLibrary, contentDescription = "Gallery", tint = Color.White, modifier = Modifier.size(20.dp))
+          Spacer(Modifier.size(Ds.s4))
+          Text("Gallery", color = Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
         // Large round shutter button — 72dp, centred. Plain shape
         // (a shutter is a shape, not an icon); tap = take photo.
@@ -736,7 +675,7 @@ fun ScanCameraScreen(
         // Tapping it closes the camera to the review screen.
         Box(
           modifier = Modifier
-            .size(72.dp)
+            .size(56.dp)
             .clip(RoundedCornerShape(Ds.s12))
             .background(Color.Black.copy(alpha = 0.45f))
             .clickable(onClickLabel = "View captured pages") { onClose() },
@@ -748,7 +687,7 @@ fun ScanCameraScreen(
               bitmap = thumb.asImageBitmap(),
               contentDescription = "Captured pages",
               modifier = Modifier
-                .size(Ds.minTouch)
+                .size(40.dp)
                 .clip(RoundedCornerShape(Ds.s8))
             )
           } else {

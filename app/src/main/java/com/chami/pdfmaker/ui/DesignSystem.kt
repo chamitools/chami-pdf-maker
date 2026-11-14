@@ -21,14 +21,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.chami.pdfmaker.R
 
 /** Executive Emerald — exact spec §2 values (the only theme). */
 object ChamiColors {
@@ -86,32 +84,15 @@ object Ds {
     val listRowMinHeight: Dp = 56.dp
 }
 
-/** Real pixel font (Press Start 2P, OFL) — replaces the old SansSerif alias.
- *  The font bytes live in [PixelFontData] (Base64) and are decoded into a
- *  platform Typeface at first use — the TTF is binary and cannot be pushed
- *  through the GitHub contents API, so it ships as text. If decoding ever
- *  fails, the system default is used rather than crashing. */
-val PixelFontFamily: FontFamily by lazy { buildPixelFontFamily() }
+/** Previous theme: clean sans-serif (Executive Emerald).
+ *  The embedded pixel font was removed at the user's request —
+ *  [PixelFontFamily] is now plain [FontFamily.SansSerif], as it was before
+ *  the fix-everything rebuild. No pixel font is embedded anywhere. */
+val PixelFontFamily: FontFamily = FontFamily.SansSerif
 
-private fun buildPixelFontFamily(): FontFamily {
-  return try {
-    val bytes = android.util.Base64.decode(PixelFontData.base64, android.util.Base64.DEFAULT)
-    val buffer = java.nio.ByteBuffer.allocateDirect(bytes.size).apply {
-      put(bytes)
-      flip()
-    }
-    val font = android.graphics.fonts.Font.Builder(buffer).build()
-    val family = android.graphics.fonts.FontFamily.Builder(font).build()
-    val typeface = android.graphics.Typeface.CustomFallbackBuilder(family).build()
-    FontFamily(typeface)
-  } catch (_: Exception) {
-    FontFamily.Default
-  }
-}
-
-/** Headings / big numbers in the pixel font. Body text stays in the system sans
- *  (pixel font at body sizes is unreadable); use [PixelFontFamily] only for
- *  titles, group headings and the CHAMI PRO header, at 20sp / 16sp. */
+/** Headings / big numbers in the clean sans-serif font.
+ *  Use [PixelFontFamily] only for titles, group headings and the
+ *  CHAMI PRO header, at 20sp / 16sp. */
 @Composable
 fun PixelTitle(text: String, sizeSp: Int = Ds.TITLE_SP, color: Color = ChamiColors.deepGreen) {
     Text(text, fontFamily = PixelFontFamily, fontSize = sizeSp.sp,

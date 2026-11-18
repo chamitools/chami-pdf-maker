@@ -6,7 +6,6 @@
     <string name="simple_tools">सरल टूल्स</string>
     <string name="smart_tools">स्मार्ट टूल्स</string>
     <string name="images_to_pdf">इमेज से PDF</string>
-    <string name="scan_to_pdf">स्कैन से PDF</string>
     <string name="merge_pdf">PDF मिलाएँ</string>
     <string name="split_pdf">PDF अलग करें</string>
     <string name="protect_pdf">PDF सुरक्षित करें</string>

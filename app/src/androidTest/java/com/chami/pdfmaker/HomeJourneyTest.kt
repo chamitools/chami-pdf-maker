@@ -103,7 +103,9 @@ class HomeJourneyTest {
     tapTile("Images to PDF")
     composeRule.onNodeWithText("Choose images").assertIsDisplayed()
     composeRule.onNodeWithText("Slide to Convert").assertIsDisplayed()
-    composeRule.onNodeWithText("Not ready yet — finish the steps above first.").assertIsDisplayed()
+    // FIX 2026-11-18 (report #46): disabled slides now carry a
+    // specific reason instead of the generic message.
+    composeRule.onNodeWithText("Select at least 1 image first").assertIsDisplayed()
     goBack()
   }
 

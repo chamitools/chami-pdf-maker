@@ -85,8 +85,8 @@ suspend fun ocrImage(ctx: Context, uri: Uri, language: String): String =
 suspend fun ocrImage(ctx: Context, uri: Uri): String = ocrImage(ctx, uri, "English")
 
 // OCR with EVERY on-device recogniser, no language picking (FIX
-// 2026-11-18, Fix 5): Latin first, then Devanagari, and the
-// non-blank results are merged (deduped). Latin covers English,
+// 2026-11-18, Fix 5): Latin first, then Devanagari, and the results
+// are SCORED, not blindly concatenated (#32). Latin covers English,
 // Spanish, French, German and other Latin-script languages;
 // Devanagari covers Hindi, Marathi and Nepali. A genuinely
 // mixed-script page (e.g. Hindi + English) returns both parts.
@@ -95,7 +95,50 @@ suspend fun ocrImage(ctx: Context, uri: Uri): String = ocrImage(ctx, uri, "Engli
 suspend fun ocrImageAnyLanguage(ctx: Context, uri: Uri): String {
   val latin = ocrImage(ctx, uri, "English")
   val devanagari = ocrImage(ctx, uri, "Hindi")
-  val parts = listOf(latin.trim(), devanagari.trim())
-    .filter { it.isNotEmpty() }.distinct()
-  return parts.joinToString("\n")
+  return pickBetterOcrResult(latin, devanagari)
+}
+
+// Same script-scored OCR for a Bitmap (Reader search renders page
+// bitmaps and needs this directly — it cannot go through a Uri).
+suspend fun ocrBitmapAnyLanguage(bmp: Bitmap): String {
+  val latin = ocrBitmap(bmp, "English")
+  val devanagari = ocrBitmap(bmp, "Hindi")
+  return pickBetterOcrResult(latin, devanagari)
+}
+
+// Cleanliness score for an OCR result (#32): the fraction of
+// characters that are letters, digits, whitespace or common
+// punctuation. The wrong-script recogniser on a single-script page
+// returns gibberish — stray symbols, broken fragments — so it scores
+// low, while the right recogniser's real words score near 1.0.
+// Blank text scores 0.0. Letters are Unicode letters, so Devanagari
+// (and other scripts) count as letters, not garbage.
+fun ocrCleanScore(text: String): Double {
+  if (text.isBlank()) return 0.0
+  var good = 0
+  for (ch in text) {
+    if (ch.isLetterOrDigit() || ch.isWhitespace() ||
+      ch in ".,;:!?'-\"'()[]{}…—–/\\@#%&*+=<>") good++
+  }
+  return good.toDouble() / text.length
+}
+
+// Pick between the Latin and Devanagari OCR results for one image
+// (#32). The better-scoring result wins. Both are merged ONLY when
+// both are clean (score >= 0.85) AND distinct (neither is blank, they
+// are not equal, and neither contains the other) — a genuinely
+// mixed-script page. Otherwise the single-script gibberish from the
+// wrong recogniser is dropped instead of landing in the output.
+fun pickBetterOcrResult(latin: String, devanagari: String): String {
+  val lat = latin.trim()
+  val dev = devanagari.trim()
+  if (lat.isEmpty()) return dev
+  if (dev.isEmpty()) return lat
+  val latScore = ocrCleanScore(lat)
+  val devScore = ocrCleanScore(dev)
+  val bothClean = latScore >= 0.85 && devScore >= 0.85
+  val distinct = lat != dev && !lat.contains(dev) && !dev.contains(lat)
+  if (bothClean && distinct) return "$lat\n$dev"
+  // Tie: prefer Latin (deterministic; matches the old order).
+  return if (devScore > latScore) dev else lat
 }

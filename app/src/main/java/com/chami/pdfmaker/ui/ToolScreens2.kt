@@ -78,8 +78,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.chami.pdfmaker.LocaleHelper
 import com.chami.pdfmaker.pdf.*
 import com.chami.pdfmaker.theme.ChamiTheme
 import com.chami.pdfmaker.theme.ThemeManager
@@ -98,14 +100,17 @@ import java.io.FileOutputStream
 // ---------------------------------------------------------------------------
 
 @Composable
-fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
+fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
   val density = LocalDensity.current
-  var pdfUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+  var pdfUris by rememberSaveableUriList()
   var pdfPreviews by remember { mutableStateOf<List<Pair<Int, Bitmap?>>>(emptyList()) }
+  var initialConsumed by rememberSaveable { mutableStateOf(false) }
+  // FIX 2026-11-18 (report #13): progress text shown while merging.
+  var mergeProgressText by remember { mutableStateOf("") }
   var pdfSizes by remember { mutableStateOf<List<Long>>(emptyList()) }
   var previewJob by remember { mutableStateOf<Job?>(null) }
   var isProcessing by remember { mutableStateOf(false) }
@@ -114,7 +119,14 @@ fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
   var doneFile by remember { mutableStateOf<File?>(null) }
   var showDone by remember { mutableStateOf(false) }
-  val singleSave = rememberSingleFileSaver { file -> doneFile = file; showDone = true }
+  var savedLocationText by remember { mutableStateOf<String?>(null) }
+  val singleSave = rememberSingleFileSaver(
+    onSavedToUri = { uri -> savedLocationText = displayNameOf(ctx, uri) }
+  ) { file ->
+    HistoryStore.record(ctx, file.name, "merge")
+    doneFile = file
+    showDone = true
+  }
 
   fun vibrate() {
     if (tm.hapticOn()) {
@@ -150,6 +162,21 @@ fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     }
   }
 
+  // Reader hand-off (report #27): consume the incoming Uri once.
+  LaunchedEffect(initialPdfUri) {
+    if (initialPdfUri != null && !initialConsumed) {
+      initialConsumed = true
+      pdfUris = listOf(initialPdfUri)
+      onInitialPdfConsumed()
+    }
+  }
+
+  // Restored Uris (process death, report #47): reload previews when
+  // the restored list has none yet.
+  LaunchedEffect(pdfUris) {
+    if (pdfUris.isNotEmpty() && pdfPreviews.size != pdfUris.size) refreshPreviews(pdfUris)
+  }
+
   fun moveFile(from: Int, to: Int) {
     if (from !in pdfUris.indices || to !in pdfUris.indices) return
     val m = pdfUris.toMutableList()
@@ -176,11 +203,19 @@ fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       return
     }
     isProcessing = true
+    // FIX 2026-11-18 (report #13): show the real total while merging.
+    // PdfEngine.copyPages exposes no per-page progress callback (the
+    // callback lives on PdfProtector.protectPdf only), so a live
+    // "Page X of N" is not possible from this screen without an engine
+    // change — the total page count is shown instead of a bare spinner.
+    val totalPages = pdfPreviews.sumOf { it.first }
+    mergeProgressText = if (totalPages > 0) "Merging $totalPages pages…" else "Merging PDF pages..."
     scope.launch {
       val out = PdfEngine.outFile(ctx, "MERGED_${System.currentTimeMillis()}.pdf")
       val sources = pdfUris.map { it to null }
       val ok = withContext(Dispatchers.IO) { PdfEngine.copyPages(ctx, sources, out) }
       isProcessing = false
+      mergeProgressText = ""
       if (ok) singleSave(out)
       else Toast.makeText(ctx, "Failed to merge PDFs", Toast.LENGTH_SHORT).show()
     }
@@ -191,7 +226,9 @@ fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       file = doneFile!!,
       theme = theme,
       onBackHome = onBack,
-      onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") }
+      onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
+      savedLocationText = savedLocationText,
+      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -213,8 +250,12 @@ fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
           fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text
         )
         Spacer(Modifier.height(Ds.s8))
-        HintText("Long-press a row and drag to reorder. Arrow buttons move it one step.")
-        Spacer(Modifier.height(Ds.s8))
+        // FIX 2026-11-18 (report #24): a file that cannot be opened
+        // (0 pages) says so instead of silently listing "0 pages".
+        if (pdfPreviews.any { it.first == 0 }) {
+          Text(UNOPENABLE_PDF_MESSAGE, fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
+          Spacer(Modifier.height(Ds.s8))
+        }
         val rowPx = with(density) { 112.dp.toPx() }
         Column(verticalArrangement = Arrangement.spacedBy(Ds.s12)) {
           pdfPreviews.forEachIndexed { index, pair ->
@@ -305,20 +346,29 @@ fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
             }
           }
         }
+        // FIX 2026-11-18 (report #14): the long-press drag hint sits
+        // under the file list, where the files it describes are.
+        Spacer(Modifier.height(Ds.s8))
+        HintText("Long-press a row and drag to reorder. Arrow buttons move it one step.")
       }
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
         LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
         Spacer(Modifier.height(Ds.s8))
-        Text("Merging PDF pages...", fontSize = Ds.HINT_SP.sp, color = theme.text)
+        Text(if (mergeProgressText.isNotEmpty()) mergeProgressText else "Merging PDF pages...", fontSize = Ds.HINT_SP.sp, color = theme.text)
       }
     }
 
     SlideToAction(
-      label = "Slide to Merge",
+      label = LocaleHelper.t(ctx, "slide_merge"),
       theme = theme,
-      enabled = !isProcessing && pdfUris.size >= 2,
+      enabled = !isProcessing && pdfUris.size >= 2 && pdfPreviews.size == pdfUris.size && pdfPreviews.all { it.first > 0 },
+      disabledReason = when {
+        pdfUris.size < 2 -> "Select at least 2 PDFs to merge"
+        pdfPreviews.any { it.first == 0 } -> UNOPENABLE_PDF_MESSAGE
+        else -> null
+      },
       onSlideComplete = { vibrate(); merge() }
     )
   }
@@ -334,7 +384,7 @@ fun MergePdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 // plainly. Done shows actual before/after + % saved, and says plainly
 // if the output is not smaller (the smaller file is kept).
 @Composable
-fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
+fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -344,7 +394,7 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var quality by rememberSaveable { mutableStateOf(70) }
 
   // --- IMAGE TAB STATE ---
-  var imageUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+  var imageUris by rememberSaveableUriList()
   var imageOrigKb by remember { mutableStateOf(0L) }
   var imagePreview by remember { mutableStateOf<Bitmap?>(null) }
   var targetKb by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -355,7 +405,10 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var imageResults by remember { mutableStateOf<List<String>>(emptyList()) }
 
   // --- PDF TAB STATE ---
-  var pdfUri by remember { mutableStateOf<Uri?>(null) }
+  var pdfUri by rememberSaveableUri()
+  var pdfLoadFailed by remember { mutableStateOf(false) }
+  var loadedPdfUri by remember { mutableStateOf<Uri?>(null) }
+  var initialConsumed by rememberSaveable { mutableStateOf(false) }
   var pdfOrigBytes by remember { mutableStateOf(0L) }
   var pdfTotalPages by remember { mutableStateOf(0) }
   var pdfPreviewBmp by remember { mutableStateOf<Bitmap?>(null) }
@@ -366,14 +419,23 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var doneFiles by remember { mutableStateOf<List<DoneFileInfo>?>(null) }
   var doneSummary by remember { mutableStateOf<List<String>>(emptyList()) }
   var showDone by remember { mutableStateOf(false) }
+  // FIX 2026-11-18 (report #15): per-file MIME types for compressed
+  // images — a kept PNG original is a .png file, not a .jpg.
+  var lastImageMimes by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+  var savedLocationText by remember { mutableStateOf<String?>(null) }
   val folderSave = rememberFolderSaver(
     onSaved = { files ->
-      doneFiles = files.map { DoneFileInfo(it, if (selectedTab == 0) "image/jpeg" else "application/pdf", formatSizeText(it.length())) }
+      files.forEach { HistoryStore.record(ctx, it.name, "compress") }
+      doneFiles = files.map { DoneFileInfo(it, if (selectedTab == 0) (lastImageMimes[it.name] ?: "image/jpeg") else "application/pdf", formatSizeText(it.length())) }
       showDone = true
     },
-    onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() }
+    onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() },
+    onSavedToFolder = { uri -> savedLocationText = displayNameOf(ctx, uri) }
   )
-  val singleSave = rememberSingleFileSaver { file ->
+  val singleSave = rememberSingleFileSaver(
+    onSavedToUri = { uri -> savedLocationText = displayNameOf(ctx, uri) }
+  ) { file ->
+    HistoryStore.record(ctx, file.name, "compress")
     doneFiles = listOf(DoneFileInfo(file, "application/pdf", formatSizeText(file.length())))
     showDone = true
   }
@@ -432,23 +494,48 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
     }
   }
 
+  // FIX 2026-11-18 (report #27/#47): the picked Uri is restored by
+  // rememberSaveable after process death, and the Reader hands a Uri
+  // in through initialPdfUri — both go through this loader.
+  fun loadPdf(uri: Uri) {
+    loadedPdfUri = uri
+    scope.launch(Dispatchers.IO) {
+      val bytes = PdfCompress.originalSizeBytes(ctx, uri)
+      val pages = PdfEngine.pageCount(ctx, uri)
+      val bmp = PdfReader.renderPageBitmap(ctx, uri, 0, 1.5f)
+      withContext(Dispatchers.Main) {
+        pdfOrigBytes = bytes
+        pdfTotalPages = pages
+        pdfLoadFailed = pages == 0
+        pdfPreviewBmp = bmp
+      }
+    }
+  }
+
   val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selected ->
     pdfUri = selected
     showDone = false
     doneFiles = null
     pdfPreviewBmp = null
-    if (selected != null) {
-      scope.launch(Dispatchers.IO) {
-        val bytes = PdfCompress.originalSizeBytes(ctx, selected)
-        val pages = PdfEngine.pageCount(ctx, selected)
-        val bmp = PdfReader.renderPageBitmap(ctx, selected, 0, 1.5f)
-        withContext(Dispatchers.Main) {
-          pdfOrigBytes = bytes
-          pdfTotalPages = pages
-          pdfPreviewBmp = bmp
-        }
-      }
+    pdfLoadFailed = false
+    if (selected != null) loadPdf(selected)
+  }
+
+  // Reader hand-off (report #27): consume the incoming Uri once, on
+  // the PDF tab.
+  LaunchedEffect(initialPdfUri) {
+    if (initialPdfUri != null && !initialConsumed) {
+      initialConsumed = true
+      selectedTab = 1
+      pdfUri = initialPdfUri
+      onInitialPdfConsumed()
     }
+  }
+
+  // Restored Uri (process death) or the Reader's handed-over Uri.
+  LaunchedEffect(pdfUri) {
+    val u = pdfUri
+    if (u != null && loadedPdfUri != u) loadPdf(u)
   }
 
   // If the compressed file is not smaller, keep the smaller one: copy
@@ -474,7 +561,7 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
     isImageProcessing = true
     imageResults = emptyList()
     scope.launch {
-      val outs = mutableListOf<File>()
+      val outs = mutableListOf<Pair<File, String>>()
       val lines = mutableListOf<String>()
       imageUris.forEachIndexed { i, u ->
         withContext(Dispatchers.Main) { imageProgressText = "File ${i + 1} of ${imageUris.size}" }
@@ -483,14 +570,26 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
         val out = PdfEngine.outFile(ctx, "Compressed_${i + 1}_${System.currentTimeMillis()}.jpg")
         val ok = withContext(Dispatchers.IO) { PdfEngine.compressImageToKb(ctx, u, tgt, out) }
         if (ok && out.exists()) {
-          val notSmaller = keepSmaller(u, out)
-          val afterKb = out.length() / 1024L
-          val savedPct = if (origKb > 0) ((origKb - afterKb) * 100 / origKb) else 0
-          lines.add(
-            if (notSmaller || afterKb >= origKb) "${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: ${origKb} KB to ${afterKb} KB — not smaller, original kept"
-            else "${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: ${origKb} KB to ${afterKb} KB (${savedPct}% saved)"
-          )
-          outs.add(out)
+          // FIX 2026-11-18 (report #15): format-aware keep-smaller —
+          // a PNG original that does not shrink is kept in a sibling
+          // .png file with MIME image/png, never as PNG bytes in a
+          // .jpg. Use the returned file/MIME, never assume .jpg.
+          val kept = withContext(Dispatchers.IO) { PdfCompress.keepSmallerImage(ctx, u, out) }
+          if (!kept.ok) {
+            lines.add("${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: could not compress")
+          } else {
+            val finalOut = kept.outFile
+            val afterKb = finalOut.length() / 1024L
+            val savedPct = if (origKb > 0) ((origKb - afterKb) * 100 / origKb) else 0
+            lines.add(
+              if (kept.keptOriginal || afterKb >= origKb) "${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: ${origKb} KB to ${afterKb} KB — not smaller, original kept"
+              else "${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: ${origKb} KB to ${afterKb} KB (${savedPct}% saved)"
+            )
+            // FIX 2026-11-18 (report #16): record the result so
+            // History can show before→after KB.
+            recordCompressResult(ctx, finalOut.name, origKb, afterKb)
+            outs.add(finalOut to kept.mimeType)
+          }
         } else {
           lines.add("${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: could not compress")
         }
@@ -500,7 +599,8 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
       imageResults = lines
       if (outs.isNotEmpty()) {
         doneSummary = lines
-        folderSave(outs.map { it to "image/jpeg" })
+        lastImageMimes = outs.associate { it.first.name to it.second }
+        folderSave(outs)
       } else {
         Toast.makeText(ctx, "Compression failed", Toast.LENGTH_SHORT).show()
       }
@@ -517,14 +617,18 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
       isPdfProcessing = false
       pdfProgressText = ""
       if (res.ok && out.exists()) {
+        // FIX 2026-11-18 (report #18): the engine already keeps the
+        // smaller file and reports it via res.keptOriginal — no
+        // second keep-smaller pass here. res.outKb is the measured
+        // result, not an estimate.
         val origKb = pdfOrigBytes / 1024L
-        val afterKb = out.length() / 1024L
-        val notSmaller = afterKb >= origKb
-        if (notSmaller) keepSmaller(u, out)
         val finalKb = out.length() / 1024L
         val savedPct = if (origKb > 0) ((origKb - finalKb) * 100 / origKb).coerceAtLeast(0) else 0
-        doneSummary = if (notSmaller) {
-          listOf("Before: ${origKb} KB — after: ${finalKb} KB.", "The output was not smaller, so the original file was kept.")
+        // FIX 2026-11-18 (report #16): record the result so History
+        // can show before→after KB.
+        recordCompressResult(ctx, out.name, origKb, finalKb)
+        doneSummary = if (res.keptOriginal) {
+          listOf("Before: ${origKb} KB — after: ${finalKb} KB.", "The compressed file was larger, so the original file was kept.")
         } else {
           listOf("Before: ${origKb} KB — after: ${finalKb} KB.", "Saved $savedPct%.")
         }
@@ -542,7 +646,13 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
       summaryLines = doneSummary,
       theme = theme,
       onBackHome = onBack,
-      onOpen = { ShareHelper.openFile(ctx, it, if (selectedTab == 0) "image/jpeg" else "application/pdf") }
+      onOpen = { f ->
+        val mime = doneFiles?.firstOrNull { it.file == f }?.mimeType
+          ?: if (selectedTab == 0) "image/jpeg" else "application/pdf"
+        ShareHelper.openFile(ctx, f, mime)
+      },
+      savedLocationText = savedLocationText,
+      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -606,7 +716,7 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
             Spacer(Modifier.height(Ds.s8))
             Text("Original size: ${if (imageOrigKb > 0) "$imageOrigKb KB" else "—"}", fontSize = Ds.BODY_SP.sp, color = theme.text, fontWeight = FontWeight.Bold)
             estimatedImageKb?.let {
-              Text("Estimated output: about $it KB", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
+              Text("Rough estimate: about $it KB", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
             }
           }
         }
@@ -673,10 +783,16 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
         }
       } else {
         ChamiSecondaryButton(
-          text = if (pdfUri != null) "PDF selected ($pdfTotalPages pages)" else "Select PDF",
+          text = if (pdfLoadFailed) "PDF can't be opened — pick another" else if (pdfUri != null) "PDF selected ($pdfTotalPages pages)" else "Select PDF",
           onClick = { vibrate(); pdfPicker.launch("application/pdf") },
           modifier = Modifier.fillMaxWidth()
         )
+        // FIX 2026-11-18 (report #24): a protected/corrupt PDF says so
+        // instead of showing "0 pages" with a disabled slide.
+        if (pdfLoadFailed) {
+          Spacer(Modifier.height(Ds.s8))
+          Text(UNOPENABLE_PDF_MESSAGE, fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
+        }
         if (pdfUri != null) {
           Spacer(Modifier.height(Ds.s16))
           Row(
@@ -701,12 +817,15 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
               Text("Original size: ${formatSizeText(pdfOrigBytes)}", fontSize = Ds.BODY_SP.sp, color = theme.text, fontWeight = FontWeight.Bold)
               Text("Total pages: $pdfTotalPages", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
               val estKb = (kb * quality / 100L).coerceAtLeast(1)
-              Text("Estimated output: about $estKb KB", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
+              Text("Rough estimate: about $estKb KB", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
             }
           }
           Spacer(Modifier.height(Ds.s16))
           Text("Quality: $quality%", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
           HintText("Lower quality = smaller file. Pages are re-encoded as images, so text in the output becomes an image and is not selectable.")
+          // FIX 2026-11-18 (report #18): warn that a text PDF can
+          // come out larger — when it does, the original is kept.
+          HintText("For text PDFs the result can be larger — when it is, the original file is kept instead.")
           Slider(
             value = quality.toFloat(),
             onValueChange = { quality = it.toInt() },
@@ -725,16 +844,27 @@ fun CompressKbScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
     if (selectedTab == 0) {
       SlideToAction(
-        label = "Slide to Compress",
+        label = LocaleHelper.t(ctx, "slide_compress"),
         theme = theme,
         enabled = !isImageProcessing && imageUris.isNotEmpty() && !targetUnreachable,
+        disabledReason = when {
+          imageUris.isEmpty() -> "Select images first"
+          targetUnreachable -> "This target size cannot be reached"
+          else -> null
+        },
         onSlideComplete = { vibrate(); compressImages() }
       )
     } else {
       SlideToAction(
-        label = "Slide to Compress",
+        label = LocaleHelper.t(ctx, "slide_compress"),
         theme = theme,
-        enabled = !isPdfProcessing && pdfUri != null,
+        enabled = !isPdfProcessing && pdfUri != null && !pdfLoadFailed && pdfTotalPages > 0,
+        disabledReason = when {
+          pdfUri == null -> "Pick a PDF first"
+          pdfLoadFailed -> UNOPENABLE_PDF_MESSAGE
+          pdfTotalPages == 0 -> "Loading PDF…"
+          else -> null
+        },
         onSlideComplete = { vibrate(); compressPdf() }
       )
     }
@@ -771,14 +901,14 @@ private fun sourceFormatOf(ctx: Context, uri: Uri): String {
 // "Already JPG" and skipped, quality slider only for lossy targets,
 // per-file progress + result list, one save folder for the batch.
 @Composable
-fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBack: () -> Unit) {
+fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
   val isBatch = title == "Format Convert"
-  var imageUri by remember { mutableStateOf<Uri?>(null) }
-  var imageUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+  var imageUri by rememberSaveableUri()
+  var imageUris by rememberSaveableUriList()
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
   var origDimensions by remember { mutableStateOf<Pair<Int, Int>?>(null) }
   var widthStr by rememberSaveable { mutableStateOf("800") }
@@ -794,20 +924,25 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
   var doneFiles by remember { mutableStateOf<List<DoneFileInfo>?>(null) }
   var doneSummary by remember { mutableStateOf<List<String>>(emptyList()) }
   var showDone by remember { mutableStateOf(false) }
+  var savedLocationText by remember { mutableStateOf<String?>(null) }
   val folderSave = rememberFolderSaver(
     onSaved = { files ->
       val mime = if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg"
+      files.forEach { HistoryStore.record(ctx, it.name, if (isBatch) "convert" else "resize") }
       doneFiles = files.map { DoneFileInfo(it, mime, formatSizeText(it.length())) }
       showDone = true
     },
-    onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() }
+    onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() },
+    onSavedToFolder = { uri -> savedLocationText = displayNameOf(ctx, uri) }
   )
   // FIX 2026-11-18 (Fix 4): the save picker MIME must match the image
   // being saved — rememberSingleFileSaver used to hardcode
   // "application/pdf", so a resized JPG/PNG/WEBP was offered as a PDF.
   val singleSave = rememberSingleFileSaver(
+    onSavedToUri = { uri -> savedLocationText = displayNameOf(ctx, uri) },
     onSaved = { file ->
       val mime = if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg"
+      HistoryStore.record(ctx, file.name, if (isBatch) "convert" else "resize")
       doneFiles = listOf(DoneFileInfo(file, mime, formatSizeText(file.length())))
       showDone = true
     },
@@ -870,6 +1005,29 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
       }
     }
   }
+  // FIX 2026-11-18 (report #47): a restored Uri (process death)
+  // reloads its preview instead of showing an empty screen.
+  LaunchedEffect(imageUri) {
+    val u = imageUri
+    if (u != null && previewBitmap == null) {
+      scope.launch(Dispatchers.IO) {
+        val bmp = PdfEngine.loadBitmap(ctx, u, 1200)
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        try {
+          ctx.contentResolver.openInputStream(u)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        } catch (_: Exception) {}
+        withContext(Dispatchers.Main) {
+          previewBitmap = bmp
+          if (opts.outWidth > 0 && opts.outHeight > 0) {
+            origDimensions = Pair(opts.outWidth, opts.outHeight)
+            widthStr = "${opts.outWidth / 2}"
+            heightStr = "${opts.outHeight / 2}"
+          }
+        }
+      }
+    }
+  }
+
   val widthInt = widthStr.toIntOrNull()
   val heightInt = heightStr.toIntOrNull()
   val dimsValid = widthInt != null && heightInt != null && widthInt > 0 && heightInt > 0
@@ -1007,7 +1165,9 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
       onBackHome = onBack,
       onOpen = {
         ShareHelper.openFile(ctx, it, if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg")
-      }
+      },
+      savedLocationText = savedLocationText,
+      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -1211,16 +1371,26 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
 
     if (isBatch) {
       SlideToAction(
-        label = "Slide to Convert All",
+        label = LocaleHelper.t(ctx, "slide_convert_all"),
         theme = theme,
         enabled = !isProcessing && imageUris.isNotEmpty() && dimsValid,
+        disabledReason = when {
+          imageUris.isEmpty() -> "Select images first"
+          !dimsValid -> "Enter a width and height above 0"
+          else -> null
+        },
         onSlideComplete = { vibrate(); convertBatch() }
       )
     } else {
       SlideToAction(
-        label = "Slide to Resize",
+        label = LocaleHelper.t(ctx, "slide_resize"),
         theme = theme,
         enabled = !isProcessing && imageUri != null && dimsValid,
+        disabledReason = when {
+          imageUri == null -> "Select an image first"
+          !dimsValid -> "Enter a width and height above 0"
+          else -> null
+        },
         onSlideComplete = { vibrate(); convertSingle() }
       )
     }
@@ -1238,12 +1408,12 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
 // shows "No text found" with a Retake action and says plainly which
 // scripts are supported on-device, never a fake placeholder.
 @Composable
-fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
+fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
-  var imageUri by remember { mutableStateOf<Uri?>(null) }
+  var imageUri by rememberSaveableUri()
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
   var isProcessing by remember { mutableStateOf(false) }
   var extractedText by remember { mutableStateOf("") }
@@ -1253,14 +1423,23 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var doneFile by remember { mutableStateOf<File?>(null) }
   var doneMime by remember { mutableStateOf("text/plain") }
   var showDone by remember { mutableStateOf(false) }
+  var savedLocationText by remember { mutableStateOf<String?>(null) }
   val singleSaveTxt = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
     val file = doneFile
     if (uri != null && file != null) {
       scope.launch {
         val ok = withContext(Dispatchers.IO) { SaveLocation.copyToUri(ctx, file, uri) }
-        if (ok) { doneMime = "text/plain"; showDone = true }
+        if (ok) {
+          savedLocationText = displayNameOf(ctx, uri)
+          HistoryStore.record(ctx, file.name, "ocr")
+          doneMime = "text/plain"; showDone = true
+        }
         else Toast.makeText(ctx, "Could not save to chosen folder", Toast.LENGTH_SHORT).show()
       }
+    } else if (uri == null && file != null) {
+      // FIX 2026-11-18 (report #33): same "kept in Chami folder"
+      // toast the other tools show when the save picker is cancelled.
+      Toast.makeText(ctx, "Save cancelled — file kept in Chami folder", Toast.LENGTH_SHORT).show()
     }
   }
   val singleSavePdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
@@ -1268,9 +1447,17 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
     if (uri != null && file != null) {
       scope.launch {
         val ok = withContext(Dispatchers.IO) { SaveLocation.copyToUri(ctx, file, uri) }
-        if (ok) { doneMime = "application/pdf"; showDone = true }
+        if (ok) {
+          savedLocationText = displayNameOf(ctx, uri)
+          HistoryStore.record(ctx, file.name, "ocr")
+          doneMime = "application/pdf"; showDone = true
+        }
         else Toast.makeText(ctx, "Could not save to chosen folder", Toast.LENGTH_SHORT).show()
       }
+    } else if (uri == null && file != null) {
+      // FIX 2026-11-18 (report #33): same "kept in Chami folder"
+      // toast the other tools show when the save picker is cancelled.
+      Toast.makeText(ctx, "Save cancelled — file kept in Chami folder", Toast.LENGTH_SHORT).show()
     }
   }
 
@@ -1291,6 +1478,18 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
     if (selected != null) {
       scope.launch(Dispatchers.IO) {
         val bmp = PdfEngine.loadBitmap(ctx, selected, 1200)
+        withContext(Dispatchers.Main) { previewBitmap = bmp }
+      }
+    }
+  }
+
+  // FIX 2026-11-18 (report #47): a restored Uri (process death)
+  // reloads its preview instead of showing an empty screen.
+  LaunchedEffect(imageUri) {
+    val u = imageUri
+    if (u != null && previewBitmap == null) {
+      scope.launch(Dispatchers.IO) {
+        val bmp = PdfEngine.loadBitmap(ctx, u, 1200)
         withContext(Dispatchers.Main) { previewBitmap = bmp }
       }
     }
@@ -1321,7 +1520,9 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
       file = doneFile!!,
       theme = theme,
       onBackHome = onBack,
-      onOpen = { ShareHelper.openFile(ctx, it, doneMime) }
+      onOpen = { ShareHelper.openFile(ctx, it, doneMime) },
+      savedLocationText = savedLocationText,
+      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -1443,9 +1644,10 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
     }
 
     SlideToAction(
-      label = "Slide to Extract Text",
+      label = LocaleHelper.t(ctx, "slide_extract_text"),
       theme = theme,
       enabled = !isProcessing && imageUri != null,
+      disabledReason = if (imageUri == null) "Select a photo first" else null,
       onSlideComplete = { vibrate(); runOcr() }
     )
   }
@@ -1477,14 +1679,14 @@ private fun removeBookmark(ctx: Context, fileName: String, page: Int) {
 fun PdfReaderScreen(
   theme: ChamiTheme,
   initialFile: File? = null,
-  onOpenTool: ((String) -> Unit)? = null,
+  onOpenTool: ((String, Uri?) -> Unit)? = null,
   onBack: () -> Unit
 ) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
-  var pdfUri by remember { mutableStateOf<Uri?>(initialFile?.let { Uri.fromFile(it) }) }
+  var pdfUri by rememberSaveableUri(initialFile?.let { Uri.fromFile(it) })
   var totalPages by remember { mutableStateOf(0) }
   var currentPage by remember { mutableStateOf(0) }
   // Render scale: 2.0x at fit; raised (debounced) while zoomed so the
@@ -1493,7 +1695,9 @@ fun PdfReaderScreen(
   var isNightMode by remember { mutableStateOf(false) }
   var pageInput by remember { mutableStateOf("1") }
   var zoom by remember { mutableStateOf(1f) }
-  val pageBitmapCache = remember { mutableStateMapOf<Int, Bitmap>() }
+  // FIX 2026-11-18 (report #23): byte-budgeted cache (see
+  // PageBitmapCache below) instead of a 12-page count cap.
+  val pageBitmapCache = remember { PageBitmapCache() }
   // Continuous scroll (Google Drive style): the reader is one vertical
   // list of pages; the current page follows the first visible page.
   val listState = rememberLazyListState()
@@ -1509,6 +1713,15 @@ fun PdfReaderScreen(
   var showGoToPage by remember { mutableStateOf(false) }
   var goToInput by remember { mutableStateOf("") }
   var showOverflow by remember { mutableStateOf(false) }
+  // FIX 2026-11-18 (report #24): a PDF that cannot be opened.
+  var pdfLoadFailed by remember { mutableStateOf(false) }
+  // Same-PDF re-pick (report #24): the picker resets totalPages to 0
+  // for the same Uri, which would not re-fire LaunchedEffect(pdfUri)
+  // — this key forces the reload.
+  var pdfReloadKey by remember { mutableStateOf(0) }
+  // FIX 2026-11-18 (report #25): recognised page text, cached in
+  // memory so repeat searches never re-OCR a page.
+  val searchTextCache = remember { mutableStateMapOf<Int, String>() }
 
   val fileName: String = pdfUri?.let { displayNameOf(ctx, it) } ?: initialFile?.name ?: "file"
 
@@ -1516,6 +1729,22 @@ fun PdfReaderScreen(
     if (tm.hapticOn()) {
       try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
     }
+  }
+
+  // FIX 2026-11-18 (report #27): the Uri handed to Split / Merge /
+  // Compress. The picker's own content Uri is passed as-is; a file
+  // opened from History/Done (a java.io.File) goes through
+  // FileProvider so the target tool gets a content Uri it can read.
+  fun readerContentUri(): Uri? {
+    val u = pdfUri ?: return null
+    val f = initialFile
+    return if (f != null && u == Uri.fromFile(f)) {
+      try {
+        FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
+      } catch (_: Exception) {
+        u
+      }
+    } else u
   }
 
   fun jumpToPage(page1Based: Int) {
@@ -1546,6 +1775,14 @@ fun PdfReaderScreen(
   // Lazy search: render + OCR one page at a time, with progress and a
   // cancel button. The job is cancelled between pages, so cancelling
   // stops promptly instead of finishing the whole document.
+  // FIX 2026-11-18 (report #25): OCR runs ocrBitmapAnyLanguage
+  // (Latin + Devanagari, script-scored) straight on the rendered
+  // bitmap — no search_page_*.jpg temp files are written at all, so
+  // there is nothing to delete — and recognised text is cached in
+  // memory, so a repeat search never re-OCRs a page.
+  // FIX 2026-11-18 (report #26): "no matches" is only reported when
+  // OCR actually read text on some page; when no page yielded any
+  // text at all, the model is probably not downloaded yet.
   fun runSearch() {
     val q = searchQuery.trim()
     val u = pdfUri
@@ -1556,6 +1793,7 @@ fun PdfReaderScreen(
     searchIndex = 0
     searchJob = scope.launch {
       val hits = mutableListOf<Int>()
+      var anyTextFound = false
       var renderer: android.graphics.pdf.PdfRenderer? = null
       var pfd: android.os.ParcelFileDescriptor? = null
       try {
@@ -1569,7 +1807,8 @@ fun PdfReaderScreen(
         for (i in 0 until count) {
           if (searchJob?.isActive == false) break
           withContext(Dispatchers.Main) { searchProgress = "Searching page ${i + 1} of $count" }
-          val text = withContext(Dispatchers.IO) {
+          val cached = searchTextCache[i]
+          val text = cached ?: withContext(Dispatchers.IO) {
             try {
               val page = renderer!!.openPage(i)
               val w = page.width; val h = page.height
@@ -1579,12 +1818,13 @@ fun PdfReaderScreen(
               bmp.eraseColor(AndroidColor.WHITE)
               page.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
               page.close()
-              val tmp = File(ctx.cacheDir, "search_page_$i.jpg")
-              FileOutputStream(tmp).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+              val t = ocrBitmapAnyLanguage(bmp)
               bmp.recycle()
-              ocrImage(ctx, Uri.fromFile(tmp))
+              t
             } catch (_: Exception) { "" }
           }
+          if (cached == null) searchTextCache[i] = text
+          if (text.isNotBlank()) anyTextFound = true
           if (text.contains(q, ignoreCase = true)) hits.add(i + 1)
         }
       } catch (_: Exception) {
@@ -1596,6 +1836,7 @@ fun PdfReaderScreen(
       searchPages = hits
       searchIndex = 0
       if (hits.isNotEmpty()) jumpToPage(hits[0])
+      else if (!anyTextFound) Toast.makeText(ctx, "Search isn't available yet — the text-recognition model may still be downloading. Connect to the internet and try again.", Toast.LENGTH_LONG).show()
       else Toast.makeText(ctx, "No matches for \"$q\"", Toast.LENGTH_SHORT).show()
     }
   }
@@ -1603,9 +1844,11 @@ fun PdfReaderScreen(
   val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selected ->
     pdfUri = selected
     if (selected != null) {
-      pageBitmapCache.values.forEach { try { it.recycle() } catch (_: Exception) {} }
       pageBitmapCache.clear()
       totalPages = 0
+      pdfLoadFailed = false
+      pdfReloadKey++
+      searchTextCache.clear()
       currentPage = 0
       pageInput = "1"
       searchPages = emptyList()
@@ -1614,10 +1857,13 @@ fun PdfReaderScreen(
     }
   }
 
-  LaunchedEffect(pdfUri) {
+  LaunchedEffect(pdfUri, pdfReloadKey) {
     val u = pdfUri ?: return@LaunchedEffect
     if (totalPages == 0) {
       totalPages = withContext(Dispatchers.IO) { PdfEngine.pageCount(ctx, u) }
+      // FIX 2026-11-18 (report #24): a 0-page count means the PDF
+      // cannot be opened — show the error state, never a spinner.
+      pdfLoadFailed = totalPages == 0
     }
     loadBookmarks()
   }
@@ -1632,15 +1878,16 @@ fun PdfReaderScreen(
   }
 
   // Re-render sharper after the pinch ends (debounced): render scale
-  // follows the display zoom, up to 5x.
+  // follows the display zoom, capped at 3x — FIX 2026-11-18 (report
+  // #23): at 2.0x * 5x zoom one A4 page is ~50 MB, and 12 such pages
+  // OOM a 4 GB phone. The byte-budgeted cache is the other half.
   LaunchedEffect(zoom) {
     delay(300)
-    scale = (2.0f * zoom).coerceIn(2.0f, 5.0f)
+    scale = (2.0f * zoom).coerceIn(2.0f, 3.0f)
   }
 
   androidx.compose.runtime.DisposableEffect(Unit) {
     onDispose {
-      pageBitmapCache.values.forEach { try { it.recycle() } catch (_: Exception) {} }
       pageBitmapCache.clear()
     }
   }
@@ -1769,15 +2016,15 @@ fun PdfReaderScreen(
               )
               DropdownMenuItem(
                 text = { Text("Open in Split", fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; onOpenTool?.invoke("split") }
+                onClick = { showOverflow = false; onOpenTool?.invoke("split", readerContentUri()) }
               )
               DropdownMenuItem(
                 text = { Text("Open in Merge", fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; onOpenTool?.invoke("merge") }
+                onClick = { showOverflow = false; onOpenTool?.invoke("merge", readerContentUri()) }
               )
               DropdownMenuItem(
                 text = { Text("Open in Compress", fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; onOpenTool?.invoke("compress") }
+                onClick = { showOverflow = false; onOpenTool?.invoke("compress", readerContentUri()) }
               )
             }
           }
@@ -1846,7 +2093,22 @@ fun PdfReaderScreen(
         // FULL SCROLL (Google Drive style): one continuous vertical
         // list, page after page — no page-by-page flipping, no Prev /
         // Next buttons, no page-number strip.
-        if (totalPages == 0) {
+        if (pdfLoadFailed) {
+          // FIX 2026-11-18 (report #24): a protected/corrupt PDF
+          // shows this error with a way out — never an infinite
+          // spinner.
+          Column(
+            Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+          ) {
+            Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = ChamiColors.errorRed, modifier = Modifier.size(48.dp))
+            Spacer(Modifier.height(Ds.s16))
+            Text(UNOPENABLE_PDF_MESSAGE, fontSize = Ds.BODY_SP.sp, color = theme.text)
+            Spacer(Modifier.height(Ds.s16))
+            ChamiPrimaryButton(text = "Back", onClick = { vibrate(); onBack() }, modifier = Modifier.fillMaxWidth())
+          }
+        } else if (totalPages == 0) {
           Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = theme.primary)
           }
@@ -1876,9 +2138,42 @@ fun PdfReaderScreen(
   }
 }
 
+// FIX 2026-11-18 (report #23): byte-budgeted page-bitmap cache.
+// The old cache kept up to 12 pages regardless of size — at 2.5x zoom
+// one A4 page is ~50 MB, so 12 pages could reach ~600 MB and OOM a
+// 4 GB phone. This cache caps TOTAL bytes (~150 MB) and evicts the
+// page farthest from the one being rendered first.
+private class PageBitmapCache(private val maxBytes: Long = 150L * 1024L * 1024L) {
+  private val map = LinkedHashMap<Int, Bitmap>(16, 0.75f, true)
+  private var bytes = 0L
+
+  @Synchronized
+  fun get(page: Int): Bitmap? = map[page]
+
+  @Synchronized
+  fun put(page: Int, bmp: Bitmap, currentPage: Int) {
+    map[page]?.let { bytes -= it.allocationByteCount.toLong() }
+    map[page] = bmp
+    bytes += bmp.allocationByteCount.toLong()
+    while (bytes > maxBytes && map.size > 1) {
+      val farthest = map.keys.filter { it != page }.maxByOrNull { kotlin.math.abs(it - currentPage) } ?: break
+      val evicted = map.remove(farthest) ?: break
+      bytes -= evicted.allocationByteCount.toLong()
+      try { evicted.recycle() } catch (_: Exception) {}
+    }
+  }
+
+  @Synchronized
+  fun clear() {
+    map.values.forEach { try { it.recycle() } catch (_: Exception) {} }
+    map.clear()
+    bytes = 0L
+  }
+}
+
 // One page of the continuous reader: renders lazily at the given
-// scale and caches the bitmap (at most 12 pages kept, farthest from
-// the viewed page evicted first). FIX 2026-11-18 (Fix 10): pinch zoom
+// scale and caches the bitmap (byte-budgeted cache, ~150 MB max,
+// farthest page evicted first). FIX 2026-11-18 (Fix 10): pinch zoom
 // works from 100% — the old code only attached its gesture detector
 // while already zoomed (pointerInput(zoom > 1f)), so a two-finger
 // pinch at 100% did nothing. The new detector is always on: two
@@ -1895,10 +2190,10 @@ private fun ReaderPageView(
   zoom: Float,
   onZoomChange: (Float) -> Unit,
   isNightMode: Boolean,
-  cache: MutableMap<Int, Bitmap>
+  cache: PageBitmapCache
 ) {
   val ctx = LocalContext.current
-  var bmp by remember(uri, pageIndex) { mutableStateOf<Bitmap?>(cache[pageIndex]) }
+  var bmp by remember(uri, pageIndex) { mutableStateOf<Bitmap?>(cache.get(pageIndex)) }
   var pan by remember { mutableStateOf(Offset.Zero) }
   var pageSize by remember { mutableStateOf(IntSize.Zero) }
   // FIX 2026-11-18 (Fix 10): pointerInput blocks run once and capture
@@ -1907,17 +2202,11 @@ private fun ReaderPageView(
   // composition. Read the live zoom through rememberUpdatedState.
   val currentZoom by rememberUpdatedState(zoom)
   LaunchedEffect(uri, pageIndex, scale) {
-    cache[pageIndex]?.let { bmp = it; return@LaunchedEffect }
+    cache.get(pageIndex)?.let { bmp = it; return@LaunchedEffect }
     val rendered = withContext(Dispatchers.IO) { PdfReader.renderPageBitmap(ctx, uri, pageIndex, scale) }
     if (rendered != null) {
-      cache[pageIndex] = rendered
+      cache.put(pageIndex, rendered, pageIndex)
       bmp = rendered
-      if (cache.size > 12) {
-        val farthest = cache.keys.maxByOrNull { kotlin.math.abs(it - pageIndex) }
-        if (farthest != null && farthest != pageIndex) {
-          cache.remove(farthest)?.let { try { it.recycle() } catch (_: Exception) {} }
-        }
-      }
     }
   }
   LaunchedEffect(zoom) { if (zoom == 1f) pan = Offset.Zero }
@@ -2052,7 +2341,7 @@ private fun ReaderPageView(
 // own Standard V1/R2 (RC4) format via PdfProtector — modern readers
 // may warn about it; AES-256 is a separate engine upgrade.
 @Composable
-fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
+fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -2060,9 +2349,11 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
   var mode by rememberSaveable { mutableStateOf("Protect") }
 
-  var selectedUri by remember { mutableStateOf<Uri?>(null) }
+  var selectedUri by rememberSaveableUri()
   var selectedName by remember { mutableStateOf("") }
   var pageCount by remember { mutableStateOf(0) }
+  var pdfLoadFailed by remember { mutableStateOf(false) }
+  var loadedPdfUri by remember { mutableStateOf<Uri?>(null) }
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
   var password by remember { mutableStateOf("") }
   var confirmPassword by remember { mutableStateOf("") }
@@ -2071,7 +2362,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var allowCopy by rememberSaveable { mutableStateOf(true) }
   var allowEdit by rememberSaveable { mutableStateOf(true) }
 
-  var unlockUri by remember { mutableStateOf<Uri?>(null) }
+  var unlockUri by rememberSaveableUri()
   var unlockName by remember { mutableStateOf("") }
   var unlockPassword by remember { mutableStateOf("") }
   var unlockPasswordVisible by remember { mutableStateOf(false) }
@@ -2082,11 +2373,34 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
   var doneFile by remember { mutableStateOf<File?>(null) }
   var showDone by remember { mutableStateOf(false) }
-  val singleSave = rememberSingleFileSaver { file -> doneFile = file; showDone = true }
+  var savedLocationText by remember { mutableStateOf<String?>(null) }
+  val singleSave = rememberSingleFileSaver(
+    onSavedToUri = { uri -> savedLocationText = displayNameOf(ctx, uri) }
+  ) { file ->
+    HistoryStore.record(ctx, file.name, "protect")
+    doneFile = file
+    showDone = true
+  }
 
   fun vibrate() {
     if (tm.hapticOn()) {
       try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
+    }
+  }
+
+  // FIX 2026-11-18 (report #47): a restored Uri (process death)
+  // reloads its page count/preview instead of showing an empty card.
+  fun loadProtectPdf(uri: Uri) {
+    loadedPdfUri = uri
+    scope.launch(Dispatchers.IO) {
+      val count = PdfEngine.pageCount(ctx, uri)
+      val bmp = PdfReader.renderPageBitmap(ctx, uri, 0, 1.0f)
+      withContext(Dispatchers.Main) {
+        pageCount = count
+        pdfLoadFailed = count == 0
+        previewBitmap = bmp
+        selectedName = baseNameOf(ctx, uri, "Document")
+      }
     }
   }
 
@@ -2097,15 +2411,14 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       selectedName = baseNameOf(ctx, uri, "Document")
       showDone = false
       doneFile = null
-      scope.launch(Dispatchers.IO) {
-        val count = PdfEngine.pageCount(ctx, uri)
-        val bmp = PdfReader.renderPageBitmap(ctx, uri, 0, 1.0f)
-        withContext(Dispatchers.Main) {
-          pageCount = count
-          previewBitmap = bmp
-        }
-      }
+      pdfLoadFailed = false
+      loadProtectPdf(uri)
     }
+  }
+
+  LaunchedEffect(selectedUri) {
+    val u = selectedUri
+    if (u != null && loadedPdfUri != u) loadProtectPdf(u)
   }
 
   val unlockPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -2192,7 +2505,9 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       file = doneFile!!,
       theme = theme,
       onBackHome = onBack,
-      onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") }
+      onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
+      savedLocationText = savedLocationText,
+      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -2207,7 +2522,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     else -> "OK"
   }
   val mismatch = confirmPassword.isNotEmpty() && password != confirmPassword
-  val canEncrypt = selectedUri != null && password.length >= 4 && password == confirmPassword && !isProcessing
+  val canEncrypt = selectedUri != null && !pdfLoadFailed && pageCount > 0 && password.length >= 4 && password == confirmPassword && !isProcessing
 
   ToolScreenContainer("Protect PDF", theme, onBack) {
     Column(
@@ -2347,7 +2662,11 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
               Column(Modifier.weight(1f)) {
                 Text(selectedName, fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(Ds.s4))
-                Text("Total pages: $pageCount", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+                Text(
+                  if (pdfLoadFailed) UNOPENABLE_PDF_MESSAGE else "Total pages: $pageCount",
+                  fontSize = Ds.HINT_SP.sp,
+                  color = if (pdfLoadFailed) ChamiColors.errorRed else theme.textSecondary
+                )
               }
             }
           }
@@ -2425,6 +2744,21 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
               Switch(checked = allowEdit, onCheckedChange = { allowEdit = it })
             }
             Spacer(Modifier.height(Ds.s12))
+            // FIX 2026-11-18 (report #29): the encryption is legacy
+            // 40-bit — say so next to the protect action.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Icon(Icons.Filled.Warning, contentDescription = null, tint = ChamiColors.warningAmber, modifier = Modifier.size(24.dp))
+              Spacer(Modifier.width(Ds.s8))
+              Text(
+                "Older encryption (40-bit) — some readers may warn or refuse this file",
+                fontSize = Ds.HINT_SP.sp, color = ChamiColors.warningAmber
+              )
+            }
+            Spacer(Modifier.height(Ds.s8))
+            // FIX 2026-11-18 (report #30): same rasterised-output note
+            // the other tools carry.
+            HintText("Protected pages are rendered as images — text in the protected file is not selectable.")
+            Spacer(Modifier.height(Ds.s12))
             HintText("Keep this password safe — it cannot be recovered. The protected file is a new file; the original is never changed.")
           }
         }
@@ -2439,16 +2773,29 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
     if (mode == "Unlock") {
       SlideToAction(
-        label = "Slide to Unlock PDF",
+        label = LocaleHelper.t(ctx, "slide_unlock"),
         theme = theme,
         enabled = !isProcessing && unlockUri != null && unlockPassword.isNotBlank(),
+        disabledReason = when {
+          unlockUri == null -> "Choose a protected PDF first"
+          unlockPassword.isBlank() -> "Enter the PDF password"
+          else -> null
+        },
         onSlideComplete = { vibrate(); unlock() }
       )
     } else {
       SlideToAction(
-        label = "Slide to Protect PDF",
+        label = LocaleHelper.t(ctx, "slide_protect"),
         theme = theme,
         enabled = canEncrypt,
+        disabledReason = when {
+          selectedUri == null -> "Pick a PDF first"
+          pdfLoadFailed -> UNOPENABLE_PDF_MESSAGE
+          pageCount == 0 -> "Loading PDF…"
+          password.length < 4 -> "Enter a password of at least 4 characters"
+          password != confirmPassword -> "Passwords do not match"
+          else -> null
+        },
         onSlideComplete = { vibrate(); protect() }
       )
     }

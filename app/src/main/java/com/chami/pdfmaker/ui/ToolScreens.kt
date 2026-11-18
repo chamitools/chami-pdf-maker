@@ -645,12 +645,31 @@ fun BigPagePreview(
   ) {
     val shown = page?.bitmap
     if (shown != null) {
-      Image(
-        bitmap = shown.asImageBitmap(),
-        contentDescription = label,
-        modifier = Modifier.fillMaxSize().padding(Ds.s4),
-        contentScale = ContentScale.Fit
-      )
+      // FIX 2026-11-18 (fixed A4 page): the preview shows the FIXED A4
+      // portrait page (595x842pt, white) with the image fitted inside
+      // it at uniform 15mm margins, centred, aspect preserved — never
+      // stretched, never cropped to fill. This is exactly what the
+      // generated PDF page looks like.
+      BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val pageW = minOf(maxWidth, maxHeight * (595f / 842f))
+        val pageH = pageW * (842f / 595f)
+        Box(
+          Modifier.size(pageW, pageH)
+            .background(Color.White)
+            .border(1.dp, theme.cardBorder)
+        ) {
+          BoxWithConstraints(Modifier.fillMaxSize()) {
+            val padX = maxWidth * (15f / 210f)
+            val padY = maxHeight * (15f / 297f)
+            Image(
+              bitmap = shown.asImageBitmap(),
+              contentDescription = label,
+              modifier = Modifier.fillMaxSize().padding(horizontal = padX, vertical = padY),
+              contentScale = ContentScale.Fit
+            )
+          }
+        }
+      }
     } else {
       Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text("No page yet", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
@@ -921,8 +940,17 @@ fun RectCropDialog(
     }
   }
   Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    // FIX 2026-11-18 (Rotate/Reset unreachable): this dialog window runs
+    // edge-to-edge, and the Column had NO WindowInsets padding — unlike
+    // every other full-screen surface in the app (ToolScreenContainer,
+    // MainActivity, ScanCameraScreen all add statusBarsPadding /
+    // navigationBarsPadding). The bottom Reset / Rotate 90° row therefore
+    // sat UNDER the system navigation bar and could not be tapped.
+    // statusBarsPadding + navigationBarsPadding keep the fixed bottom
+    // action bar above the nav bar on every phone.
     Column(
-      Modifier.fillMaxSize().background(Color.Black).padding(Ds.s16)
+      Modifier.fillMaxSize().background(Color.Black)
+        .statusBarsPadding().navigationBarsPadding().padding(Ds.s16)
     ) {
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = onDismiss, modifier = Modifier.height(Ds.minTouch)) {
@@ -942,7 +970,7 @@ fun RectCropDialog(
       }
       Spacer(Modifier.height(Ds.s8))
       Text(
-        "Drag a corner or edge to cut. Everything outside the frame is removed.",
+        "Drag the box to move it, or a corner / edge to resize it. With a ratio selected the box keeps that ratio. Everything outside the frame is removed.",
         fontSize = Ds.HINT_SP.sp, color = Color(0xFFCBD5E1)
       )
       Spacer(Modifier.height(Ds.s8))
@@ -963,16 +991,131 @@ fun RectCropDialog(
         val boxW = with(density) { maxWidth.toPx() }
         val boxH = with(density) { maxHeight.toPx() }
         val imgAspect = bitmap.width.toFloat() / bitmap.height
-        val dispW = if (boxW / boxH > imgAspect) boxH * imgAspect else boxW
+        // FIX 2026-11-18 (fixed A4 page): the background is a FIXED A4
+        // portrait page (595x842pt), fitted into this box — it never
+        // changes size with the image. The image is fitted INSIDE that
+        // page with uniform 15mm margins, centred, aspect preserved
+        // (never stretched, never cropped to fill) — exactly what the
+        // PDF page will look like. Crop fractions still map to the
+        // image itself (offX/offY/dispW/dispH below), so cropping is
+        // unchanged; only the page behind it is now fixed A4.
+        val pageAspect = 595f / 842f
+        val pageW = if (boxW / boxH > pageAspect) boxH * pageAspect else boxW
+        val pageH = pageW / pageAspect
+        val pageOffX = (boxW - pageW) / 2f
+        val pageOffY = (boxH - pageH) / 2f
+        val availW = pageW * (1f - 2f * 15f / 210f)
+        val availH = pageH * (1f - 2f * 15f / 297f)
+        val dispW = if (availW / availH > imgAspect) availH * imgAspect else availW
         val dispH = dispW / imgAspect
-        val offX = (boxW - dispW) / 2f
-        val offY = (boxH - dispH) / 2f
+        val offX = pageOffX + (pageW - dispW) / 2f
+        val offY = pageOffY + (pageH - dispH) / 2f
         fun toPxX(f: Float) = offX + f * dispW
         fun toPxY(f: Float) = offY + f * dispH
+
+        // FIX 2026-11-18 (Fix 3): the active ratio lock. "Free" = no
+        // lock; "Original" = the image's own aspect; every other chip
+        // is a fixed width/height ratio. The drag handlers below MUST
+        // honour this. Before this fix they ignored it completely:
+        // there was no way to MOVE a ratio-locked box at all (only its
+        // handles moved), and the first corner/edge drag turned a 1:1
+        // box free-form.
+        val activeRatio: Float? = when (ratioLabel) {
+          "Free" -> null
+          "Original" -> imgAspect
+          else -> ratios.firstOrNull { it.first == ratioLabel }?.second
+        }
+
+        // Move the whole frame without changing its size or shape.
+        fun moveRect(cur: ComposeRect, dx: Float, dy: Float): ComposeRect {
+          val w = cur.width; val h = cur.height
+          val l = (cur.left + dx).coerceIn(0f, 1f - w)
+          val t = (cur.top + dy).coerceIn(0f, 1f - h)
+          return ComposeRect(l, t, l + w, t + h)
+        }
+
+        // Resize a corner while KEEPING a locked ratio: the drag
+        // dimension that moved most drives the resize, anchored at the
+        // opposite corner; the other dimension follows from the ratio,
+        // so the box NEVER goes free-form mid-drag.
+        fun resizeCornerRatio(cur: ComposeRect, corner: String, dx: Float, dy: Float, ratio: Float): ComposeRect {
+          val min = 0.05f
+          val anchorX = if (corner == "tl" || corner == "bl") cur.right else cur.left
+          val anchorY = if (corner == "tl" || corner == "tr") cur.bottom else cur.top
+          val movesLeft = corner == "tl" || corner == "bl"
+          val movesTop = corner == "tl" || corner == "tr"
+          val availW = if (movesLeft) anchorX else 1f - anchorX
+          val availH = if (movesTop) anchorY else 1f - anchorY
+          // Drive by whichever dimension the finger moved most (dy
+          // converted to width units through the ratio, so the
+          // comparison is fair).
+          val widthDriven = kotlin.math.abs(dx) >= kotlin.math.abs(dy) * ratio
+          val w: Float; val h: Float
+          if (widthDriven) {
+            val maxW = minOf(availW, availH * ratio)
+            if (maxW < min) return cur
+            val rawW = if (movesLeft) anchorX - (cur.left + dx).coerceIn(0f, anchorX - min)
+              else (cur.right + dx).coerceIn(anchorX + min, 1f) - anchorX
+            w = rawW.coerceIn(min, maxW)
+            h = w / ratio
+          } else {
+            val maxH = minOf(availH, availW / ratio)
+            if (maxH < min) return cur
+            val rawH = if (movesTop) anchorY - (cur.top + dy).coerceIn(0f, anchorY - min)
+              else (cur.bottom + dy).coerceIn(anchorY + min, 1f) - anchorY
+            h = rawH.coerceIn(min, maxH)
+            w = h * ratio
+          }
+          val l = if (movesLeft) anchorX - w else anchorX
+          val t = if (movesTop) anchorY - h else anchorY
+          return ComposeRect(l, t, l + w, t + h)
+        }
+
+        // Resize an edge while KEEPING a locked ratio: the dragged
+        // dimension drives, the other follows, centred on the frame.
+        fun resizeEdgeRatio(cur: ComposeRect, edge: String, dx: Float, dy: Float, ratio: Float): ComposeRect {
+          val min = 0.05f
+          val cx = (cur.left + cur.right) / 2f
+          val cy = (cur.top + cur.bottom) / 2f
+          return when (edge) {
+            "t", "b" -> {
+              var h = if (edge == "t") cur.bottom - (cur.top + dy).coerceIn(0f, cur.bottom - min)
+                else (cur.bottom + dy).coerceIn(cur.top + min, 1f) - cur.top
+              h = h.coerceIn(min, 1f)
+              var w = h * ratio
+              if (w > 1f) { w = 1f; h = w / ratio }
+              val l = (cx - w / 2f).coerceIn(0f, 1f - w)
+              val t = if (edge == "t") cur.bottom - h else cur.top
+              ComposeRect(l, t, l + w, t + h)
+            }
+            else -> { // "l" / "r"
+              var w = if (edge == "l") cur.right - (cur.left + dx).coerceIn(0f, cur.right - min)
+                else (cur.right + dx).coerceIn(cur.left + min, 1f) - cur.left
+              w = w.coerceIn(min, 1f)
+              var h = w / ratio
+              if (h > 1f) { h = 1f; w = h * ratio }
+              val t = (cy - h / 2f).coerceIn(0f, 1f - h)
+              val l = if (edge == "l") cur.right - w else cur.left
+              ComposeRect(l, t, l + w, t + h)
+            }
+          }
+        }
+
         Box(Modifier.fillMaxSize()) {
+          // Fixed A4 page background (white) behind the fitted image.
+          Box(
+            Modifier
+              .offset(x = with(density) { pageOffX.toDp() }, y = with(density) { pageOffY.toDp() })
+              .size(width = with(density) { pageW.toDp() }, height = with(density) { pageH.toDp() })
+              .background(Color.White)
+              .border(1.dp, Color(0xFF94A3B8))
+          )
           Image(
             bitmap = bitmap.asImageBitmap(), contentDescription = "Crop preview",
-            modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit
+            modifier = Modifier
+              .offset(x = with(density) { offX.toDp() }, y = with(density) { offY.toDp() })
+              .size(width = with(density) { dispW.toDp() }, height = with(density) { dispH.toDp() }),
+            contentScale = ContentScale.FillBounds
           )
           androidx.compose.foundation.Canvas(
             Modifier.fillMaxSize()
@@ -1010,6 +1153,46 @@ fun RectCropDialog(
           // (and cancel) the drag on its first pixel, because dragging
           // changes rect. The current rect is read via rememberUpdatedState.
           val latestRect by rememberUpdatedState(rect)
+          val latestRatio by rememberUpdatedState(activeRatio)
+          // Drag the BOX ITSELF to move it (Fix 3): a drag starting
+          // inside the frame (and not on a handle) translates the whole
+          // frame, clamped inside the image, without changing its size
+          // or shape — for every ratio, Free included. Handles are
+          // declared after this layer, so a drag starting on a handle
+          // still goes to the handle; the 24dp exclusion below is the
+          // belt-and-braces for the same rule.
+          Box(
+            Modifier.fillMaxSize().pointerInput("move") {
+              var moveActive = false
+              detectDragGestures(
+                onDragStart = { start ->
+                  val cur = latestRect
+                  val inside = start.x in toPxX(cur.left)..toPxX(cur.right) &&
+                    start.y in toPxY(cur.top)..toPxY(cur.bottom)
+                  val excludePx = with(density) { 24.dp.toPx() }
+                  val handleFracs = listOf(
+                    Offset(cur.left, cur.top), Offset(cur.right, cur.top),
+                    Offset(cur.left, cur.bottom), Offset(cur.right, cur.bottom),
+                    Offset((cur.left + cur.right) / 2f, cur.top),
+                    Offset((cur.left + cur.right) / 2f, cur.bottom),
+                    Offset(cur.left, (cur.top + cur.bottom) / 2f),
+                    Offset(cur.right, (cur.top + cur.bottom) / 2f)
+                  )
+                  val onHandle = handleFracs.any { frac ->
+                    (Offset(toPxX(frac.x), toPxY(frac.y)) - start).getDistance() < excludePx
+                  }
+                  moveActive = inside && !onHandle
+                },
+                onDragEnd = { moveActive = false },
+                onDragCancel = { moveActive = false },
+                onDrag = { change, drag ->
+                  if (!moveActive) return@detectDragGestures
+                  change.consume()
+                  rect = moveRect(latestRect, drag.x / dispW, drag.y / dispH)
+                }
+              )
+            }
+          )
           handles.forEach { (id, frac) ->
             Box(
               Modifier
@@ -1024,16 +1207,26 @@ fun RectCropDialog(
                     val cur = latestRect
                     val dx = drag.x / dispW
                     val dy = drag.y / dispH
-                    val min = 0.05f
-                    rect = when (id) {
-                      "tl" -> ComposeRect((cur.left + dx).coerceIn(0f, cur.right - min), (cur.top + dy).coerceIn(0f, cur.bottom - min), cur.right, cur.bottom)
-                      "tr" -> ComposeRect(cur.left, (cur.top + dy).coerceIn(0f, cur.bottom - min), (cur.right + dx).coerceIn(cur.left + min, 1f), cur.bottom)
-                      "bl" -> ComposeRect((cur.left + dx).coerceIn(0f, cur.right - min), cur.top, cur.right, (cur.bottom + dy).coerceIn(cur.top + min, 1f))
-                      "br" -> ComposeRect(cur.left, cur.top, (cur.right + dx).coerceIn(cur.left + min, 1f), (cur.bottom + dy).coerceIn(cur.top + min, 1f))
-                      "t" -> ComposeRect(cur.left, (cur.top + dy).coerceIn(0f, cur.bottom - min), cur.right, cur.bottom)
-                      "b" -> ComposeRect(cur.left, cur.top, cur.right, (cur.bottom + dy).coerceIn(cur.top + min, 1f))
-                      "l" -> ComposeRect((cur.left + dx).coerceIn(0f, cur.right - min), cur.top, cur.right, cur.bottom)
-                      else -> ComposeRect(cur.left, cur.top, (cur.right + dx).coerceIn(cur.left + min, 1f), cur.bottom)
+                    val ratio = latestRatio
+                    rect = if (ratio == null) {
+                      // Free: the exact old behaviour, untouched.
+                      val min = 0.05f
+                      when (id) {
+                        "tl" -> ComposeRect((cur.left + dx).coerceIn(0f, cur.right - min), (cur.top + dy).coerceIn(0f, cur.bottom - min), cur.right, cur.bottom)
+                        "tr" -> ComposeRect(cur.left, (cur.top + dy).coerceIn(0f, cur.bottom - min), (cur.right + dx).coerceIn(cur.left + min, 1f), cur.bottom)
+                        "bl" -> ComposeRect((cur.left + dx).coerceIn(0f, cur.right - min), cur.top, cur.right, (cur.bottom + dy).coerceIn(cur.top + min, 1f))
+                        "br" -> ComposeRect(cur.left, cur.top, (cur.right + dx).coerceIn(cur.left + min, 1f), (cur.bottom + dy).coerceIn(cur.top + min, 1f))
+                        "t" -> ComposeRect(cur.left, (cur.top + dy).coerceIn(0f, cur.bottom - min), cur.right, cur.bottom)
+                        "b" -> ComposeRect(cur.left, cur.top, cur.right, (cur.bottom + dy).coerceIn(cur.top + min, 1f))
+                        "l" -> ComposeRect((cur.left + dx).coerceIn(0f, cur.right - min), cur.top, cur.right, cur.bottom)
+                        else -> ComposeRect(cur.left, cur.top, (cur.right + dx).coerceIn(cur.left + min, 1f), cur.bottom)
+                      }
+                    } else if (id == "tl" || id == "tr" || id == "bl" || id == "br") {
+                      // Ratio locked: corner resize keeps the ratio.
+                      resizeCornerRatio(cur, id, dx, dy, ratio)
+                    } else {
+                      // Ratio locked: edge resize keeps the ratio.
+                      resizeEdgeRatio(cur, id, dx, dy, ratio)
                     }
                   }
                 },
@@ -1109,8 +1302,9 @@ class PageEditor(
 
 // 1. IMAGES TO PDF
 // - Builds through the shared engine: PdfEngine.buildImagesPdf with
-//   FIXED defaults — Original size, full-resolution quality, no
-//   watermark, no page numbers, no margins (no option controls).
+//   FIXED defaults — A4 page (595x842pt, fixed whatever the crop),
+//   full-resolution quality, no watermark, no page numbers, 15mm
+//   default margins (no option controls).
 // - Picker loads at full resolution (loadBitmap cap 8000).
 // - Crop CUTS by default (RectCropDialog) — the only crop on this
 //   screen; the second crop (Straighten / warp) was removed at the
@@ -1172,16 +1366,20 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     progressText = "Page 1 of ${pages.size}"
     scope.launch {
       val out = PdfEngine.outFile(ctx, "IMG_PDF_${System.currentTimeMillis()}.pdf")
-      // Fixed defaults: Original size, full-resolution quality, no
-      // watermark, no page numbers, no margins.
+      // FIX 2026-11-18 (fixed A4 page): pageSize was "Original", so the
+      // PDF page became the cropped image's own pixel size — the page
+      // changed with every crop. Now FIXED A4 (595x842pt) with the
+      // 15mm default margins: buildImagesPdf fits each image inside,
+      // centred, aspect preserved. Quality stays full-resolution
+      // ("Original"), no watermark, no page numbers.
       val options = PdfEngine.ImagesPdfOptions(
-        pageSize = "Original",
+        pageSize = "A4",
         quality = "Original",
         watermarkText = "",
         watermarkOpacity = 25,
         watermarkPosition = "centre",
         pageNumbers = false,
-        marginsMm = 0
+        marginsMm = 15
       )
       val file: File? = try {
         withContext(Dispatchers.IO) {

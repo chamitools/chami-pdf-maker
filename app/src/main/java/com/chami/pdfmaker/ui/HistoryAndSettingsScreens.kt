@@ -228,9 +228,13 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
     contentAlignment = Alignment.Center
   ) {
     val b = bmp
-    if (b != null) {
+    // PERFORMANCE (UI overhaul): wrap once per bitmap — rows recompose
+    // on scroll/selection and re-wrapping every thumbnail each time
+    // dropped frames.
+    val thumbImage = remember(b) { b?.asImageBitmap() }
+    if (thumbImage != null) {
       Image(
-        bitmap = b.asImageBitmap(),
+        bitmap = thumbImage,
         contentDescription = "First page of ${file.name}",
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Fit
@@ -281,7 +285,6 @@ fun HistoryScreen(
   }
   var fileList by remember { mutableStateOf(loadFilesNow()) }
   var storageUsed by remember { mutableStateOf(fileList.sumOf { it.length() }) }
-  var storageTotal by remember { mutableStateOf(storageUsed + (File(ctx.getExternalFilesDir(null), "Chami").usableSpace)) }
   var loaded by remember { mutableStateOf(false) }
   var query by remember { mutableStateOf("") }
   var filter by remember { mutableStateOf("All") }
@@ -312,11 +315,9 @@ fun HistoryScreen(
       val files = dir.listFiles()?.filter { it.isFile } ?: emptyList()
       fileList = files
       storageUsed = files.sumOf { it.length() }
-      storageTotal = storageUsed + dir.usableSpace
     } else {
       fileList = emptyList()
       storageUsed = 0L
-      storageTotal = 0L
     }
     loaded = true
   }
@@ -431,13 +432,11 @@ fun HistoryScreen(
 
     Spacer(Modifier.height(Ds.s12))
 
-    // Storage used — real folder size. FIX 2026-11-18 (report #38):
-    // the old bar compared folder size against folder size + free
-    // space, so it read ~0% always. The text now states the folder
-    // size plainly ("X used in Chami folder"); the bar is kept only
-    // as a visual, against total device storage it cannot measure
-    // here, so it is driven by the same folder-size fraction as before
-    // and must not be read as a percentage of anything meaningful.
+    // Storage used — real folder size, stated plainly.
+    // UI OVERHAUL 2026-11-18: the old progress bar is REMOVED — it
+    // compared folder size against folder size + free space, so it
+    // always read ~0% and looked broken to a reviewer. Honest text
+    // only, no fake bar.
     Row(
       Modifier.fillMaxWidth(),
       verticalAlignment = Alignment.CenterVertically,
@@ -449,12 +448,6 @@ fun HistoryScreen(
         color = theme.textSecondary
       )
     }
-    LinearProgressIndicator(
-      progress = if (storageTotal > 0) storageUsed.toFloat() / storageTotal else 0f,
-      modifier = Modifier.fillMaxWidth(),
-      color = theme.primary,
-      trackColor = theme.cardBorder
-    )
 
     Spacer(Modifier.height(Ds.s12))
 
@@ -569,6 +562,9 @@ fun HistoryScreen(
               else "*/*"
             ShareHelper.shareFiles(ctx, files, mime)
           },
+          // UI OVERHAUL 2026-11-18: 48dp minimum touch target — the
+          // old small-padding buttons were ~36dp tall.
+          modifier = Modifier.defaultMinSize(minHeight = Ds.minTouch),
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary),
           shape = RoundedCornerShape(8.dp),
           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
@@ -580,6 +576,8 @@ fun HistoryScreen(
             vibrate()
             filesToDelete = fileList.filter { selected.contains(it.absolutePath) }
           },
+          // UI OVERHAUL 2026-11-18: 48dp minimum touch target (see SHARE above).
+          modifier = Modifier.defaultMinSize(minHeight = Ds.minTouch),
           colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
           shape = RoundedCornerShape(8.dp),
           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
@@ -752,7 +750,10 @@ fun HistoryScreen(
                         "${formatKbFromKb(compressResult.first)} → ${formatKbFromKb(compressResult.second)}",
                         fontSize = (Ds.META_SP * fontScale).sp,
                         lineHeight = (Ds.META_SP * 1.4 * fontScale).sp,
-                        color = theme.primary
+                        // UI OVERHAUL 2026-11-18: primaryDark, not
+                        // primary — 12sp #16A34A on white is ~3:1 and
+                        // fails WCAG AA (4.5:1); #14532D passes.
+                        color = theme.primaryDark
                       )
                     }
                   }
@@ -813,7 +814,7 @@ fun HistoryScreen(
 
     // Delete one file (from the row menu).
     if (fileToDelete != null) {
-      AlertDialog(
+      ChamiAlertDialog(theme,
         onDismissRequest = { fileToDelete = null },
         confirmButton = {
           Button(
@@ -847,7 +848,7 @@ fun HistoryScreen(
 
     // Delete many files (multi-select bar).
     if (filesToDelete.isNotEmpty()) {
-      AlertDialog(
+      ChamiAlertDialog(theme,
         onDismissRequest = { filesToDelete = emptyList() },
         confirmButton = {
           Button(
@@ -878,7 +879,7 @@ fun HistoryScreen(
 
     // Rename a file (same folder, same extension).
     if (fileToRename != null) {
-      AlertDialog(
+      ChamiAlertDialog(theme,
         onDismissRequest = { fileToRename = null },
         confirmButton = {
           Button(
@@ -1081,6 +1082,10 @@ fun SettingsScreen(
         lineHeight = (Ds.BODY_SP * 1.4 * fontScale).sp,
         fontWeight = FontWeight.SemiBold,
         color = theme.text,
+        // UI OVERHAUL 2026-11-18: long titles wrap to 2 lines max at
+        // Large font instead of pushing the chevron/value off-screen.
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
         modifier = Modifier.weight(1f)
       )
       if (showSwitch) {
@@ -1098,7 +1103,9 @@ fun SettingsScreen(
             value,
             fontSize = (Ds.HINT_SP * fontScale).sp,
             lineHeight = (Ds.HINT_SP * 1.4 * fontScale).sp,
-            color = theme.textSecondary
+            color = theme.textSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
           )
           Spacer(Modifier.width(Ds.s8))
         }
@@ -1121,7 +1128,7 @@ fun SettingsScreen(
         .background(theme.card)
         .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
         .padding(Ds.s4),
-      verticalArrangement = Arrangement.spacedBy(2.dp),
+      verticalArrangement = Arrangement.spacedBy(Ds.s4),
       content = content
     )
   }
@@ -1246,7 +1253,7 @@ fun SettingsScreen(
 
   // Dialog: Language — tapping a language switches immediately.
   if (showLanguageDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showLanguageDialog = false },
       confirmButton = {},
       dismissButton = {
@@ -1294,11 +1301,13 @@ fun SettingsScreen(
   // Dialog: Font Size — segmented Small / Default / Large, with a
   // preview sentence rendered at the chosen size before leaving.
   if (showFontSizeDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showFontSizeDialog = false },
       confirmButton = {
         TextButton(onClick = { showFontSizeDialog = false }) {
-          Text("DONE", fontFamily = PixelFont, color = theme.primary)
+          // UI OVERHAUL 2026-11-18: primaryDark — 12sp #16A34A on white
+          // is ~3:1 and fails WCAG AA (4.5:1); #14532D passes.
+          Text("DONE", fontFamily = PixelFont, color = theme.primaryDark)
         }
       },
       title = {
@@ -1340,7 +1349,7 @@ fun SettingsScreen(
   // stored SHA-256 hashed, never plain text. "app_lock" turns on only
   // once a PIN is saved. Forgot PIN requires reinstall — stated here.
   if (showPinSetupDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showPinSetupDialog = false },
       confirmButton = {
         Button(
@@ -1432,7 +1441,7 @@ fun SettingsScreen(
   // could disable the lock. "app_lock" is written false only here,
   // after pinMatches() succeeds.
   if (showPinVerifyDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showPinVerifyDialog = false },
       confirmButton = {
         Button(
@@ -1505,7 +1514,7 @@ fun SettingsScreen(
   // Dialog: Clear Cache — shows the size, confirms, never deletes
   // user files or History entries (only cache + temp working files).
   if (showClearCacheDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showClearCacheDialog = false },
       confirmButton = {
         Button(
@@ -1549,11 +1558,11 @@ fun SettingsScreen(
   // Dialog: Check for Updates — shown only when the store app is not
   // available, so the check cannot be faked as "latest version".
   if (showUpdateDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showUpdateDialog = false },
       confirmButton = {
         TextButton(onClick = { showUpdateDialog = false }) {
-          Text("CLOSE", fontFamily = PixelFont, color = theme.primary)
+          Text("CLOSE", fontFamily = PixelFont, color = theme.primaryDark)
         }
       },
       title = {
@@ -1574,11 +1583,11 @@ fun SettingsScreen(
 
   // Dialog: About — app name, versionName, package. Nothing else.
   if (showAboutDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showAboutDialog = false },
       confirmButton = {
         TextButton(onClick = { showAboutDialog = false }) {
-          Text("CLOSE", fontFamily = PixelFont, color = theme.primary)
+          Text("CLOSE", fontFamily = PixelFont, color = theme.primaryDark)
         }
       },
       title = {
@@ -1611,7 +1620,7 @@ fun SettingsScreen(
   // Fallback: bundled privacy policy (used only if no browser can open
   // the live policy page).
   if (showPrivacyPolicyFallback) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showPrivacyPolicyFallback = false },
       confirmButton = {
         Button(

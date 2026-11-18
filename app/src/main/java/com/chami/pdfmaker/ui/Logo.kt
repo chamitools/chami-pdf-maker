@@ -144,7 +144,9 @@ fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
           fontFamily = PixelFont,
           fontWeight = FontWeight.Bold,
           fontSize = Ds.HINT_SP.sp,
-          color = theme.primary
+          // UI OVERHAUL 2026-11-18: primaryDark — 12sp #16A34A on white
+          // is ~3:1 and fails WCAG AA (4.5:1); #14532D passes.
+          color = theme.primaryDark
         )
       }
     }

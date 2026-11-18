@@ -87,7 +87,13 @@ object LocaleHelper {
       "contact_support" to "Contact Support", "check_updates" to "Check for Updates",
       "storage" to "Storage", "app_lock" to "App Lock",
       "font_size" to "Font Size", "clear_cache" to "Clear Cache",
-      "privacy_policy" to "Privacy Policy"
+      "privacy_policy" to "Privacy Policy",
+      "slide_convert" to "Slide to Convert", "slide_extract" to "Slide to Extract",
+      "slide_split" to "Slide to Split", "slide_merge" to "Slide to Merge",
+      "slide_compress" to "Slide to Compress", "slide_convert_all" to "Slide to Convert All",
+      "slide_resize" to "Slide to Resize", "slide_extract_text" to "Slide to Extract Text",
+      "slide_unlock" to "Slide to Unlock PDF", "slide_protect" to "Slide to Protect PDF",
+      "group_images_reading" to "Images & Reading", "group_fix_pdf" to "Fix a PDF"
     ),
     "hi" to mapOf(
       "home" to "होम", "history" to "इतिहास", "settings" to "सेटिंग्स",

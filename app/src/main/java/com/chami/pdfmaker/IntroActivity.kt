@@ -6,6 +6,7 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,22 +30,34 @@ class IntroActivity : ComponentActivity() {
     setContent {
       val theme = tm.current()
       var fill by remember { mutableStateOf(0f) }
+      // FIX 2026-11-18 (report #48): tap-to-skip. `finished` guards
+      // the navigation so a tap and the timer can never launch
+      // MainActivity twice.
+      var finished by remember { mutableStateOf(false) }
+
+      fun goToMain() {
+        if (finished) return
+        finished = true
+        startActivity(Intent(this@IntroActivity, MainActivity::class.java))
+        finish()
+      }
 
       LaunchedEffect(Unit) {
         // Fast, smooth, responsive 1-second sequence
         repeat(20) { i ->
+          if (finished) return@LaunchedEffect
           fill = (i + 1) / 20f
           delay(50)
         }
         delay(150)
-        startActivity(Intent(this@IntroActivity, MainActivity::class.java))
-        finish()
+        goToMain()
       }
 
       Box(
         Modifier
           .fillMaxSize()
           .background(theme.bg)
+          .clickable { goToMain() }
           .padding(Ds.s16),
         contentAlignment = Alignment.Center
       ) {

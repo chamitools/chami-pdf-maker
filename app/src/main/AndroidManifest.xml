@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  <uses-permission android:name="android.permission.CAMERA"/>
+  <!-- FIX 2026-11-18: CAMERA permission + camera feature REMOVED with
+       Scan to PDF (the only tool that used the camera). Images to PDF
+       picks from the gallery only and needs no camera permission. -->
   <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
   <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <!-- No INTERNET / ACCESS_NETWORK_STATE: offline-first, no network calls. -->
-  <uses-feature android:name="android.hardware.camera" android:required="false"/>
   <application
       android:allowBackup="true"
       android:icon="@mipmap/ic_launcher"

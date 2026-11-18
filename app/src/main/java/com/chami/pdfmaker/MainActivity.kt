@@ -97,6 +97,9 @@ class MainActivity : ComponentActivity() {
       // "Make a PDF" group would have been left with a single tile, so
       // it is gone too: Images to PDF moves into "Images & Reading",
       // which now fills a full 3-tile row. 10 tools.
+      // FIX 2026-11-18 (user feedback on Run #150): Images to PDF is
+      // the main tool — "Images & Reading" goes first, so Images to PDF
+      // is the very first tile on Home. Group order below is deliberate.
       val fixPdfTools = listOf(
         ToolItem("merge", "Merge PDF", R.drawable.tool_ic_05_merge_pdf, "EDIT"),
         ToolItem("split", "Split PDF", R.drawable.tool_ic_06_split_pdf, "EDIT"),
@@ -114,9 +117,9 @@ class MainActivity : ComponentActivity() {
         ToolItem("reader", "PDF Reader", R.drawable.tool_ic_10_pdf_reader, "VIEW"),
       )
       val toolGroups = listOf(
+        "Images & Reading" to imagesReadingTools,
         "Fix a PDF" to fixPdfTools,
         "Convert" to convertTools,
-        "Images & Reading" to imagesReadingTools,
       )
 
       @Composable

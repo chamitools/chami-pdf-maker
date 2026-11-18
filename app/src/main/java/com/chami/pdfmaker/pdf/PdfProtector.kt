@@ -378,6 +378,42 @@ object PdfProtector {
     }
   }
 
+  // Last up-to-`maxBytes` of a file as ISO-8859-1 text (#31). PDF
+  // trailer keys (/Encrypt, /ID) and this app's /Encrypt dictionary
+  // object sit at the END of the file, so a tail read finds them
+  // without loading the whole file into memory. Files smaller than
+  // maxBytes are read in full (they are small by definition).
+  private fun readPdfTail(input: File, maxBytes: Long = 64 * 1024): String {
+    return try {
+      val len = input.length()
+      val start = maxOf(0L, len - maxBytes)
+      val size = (len - start).toInt()
+      val buf = ByteArray(size)
+      RandomAccessFile(input, "r").use { raf ->
+        raf.seek(start)
+        raf.readFully(buf)
+      }
+      String(buf, Charsets.ISO_8859_1)
+    } catch (_: Exception) { "" }
+  }
+
+  // Text holding the password-check fields (/O /U /P /ID) for
+  // verifyPassword: the tail first (they sit at the end of files this
+  // app writes), the whole file only if a field is missing — so
+  // behaviour is identical for any PDF while the common case never
+  // reads a whole file into memory.
+  private fun passwordFieldsText(pdfFile: File): String {
+    val tail = readPdfTail(pdfFile)
+    val hasAll = listOf(
+      Regex("""/O\s*<([0-9a-fA-F]{64})>"""),
+      Regex("""/U\s*<([0-9a-fA-F]{64})>"""),
+      Regex("""/P\s*(-?[0-9]+)"""),
+      Regex("""/ID\s*\[\s*<([0-9a-fA-F]+)>""")
+    ).all { it.containsMatchIn(tail) }
+    return if (hasAll) tail
+    else pdfFile.inputStream().bufferedReader(Charsets.ISO_8859_1).use { it.readText() }
+  }
+
   // Phase 6 — UNLOCK: remove the password from a PDF protected by
   // this app (protectPdf / imagesToProtectedPdf, Standard V1/R2 RC4).
   // Wrong password -> false. A PDF that was never encrypted is simply
@@ -388,12 +424,18 @@ object PdfProtector {
   fun unlockPdf(input: File, out: File, password: String): Boolean {
     return try {
       if (!input.exists()) return false
-      val bytes = input.readBytes()
-      val text = String(bytes, Charsets.ISO_8859_1)
-      if (!text.contains("/Encrypt")) {
+      // Encryption check (#31): /Encrypt lives in the trailer at the
+      // END of a PDF, so only the last 64 KB is read for this check —
+      // never readBytes() on a whole (possibly huge) PDF just to ask
+      // whether it is encrypted. The full bytes are read below only
+      // when the file IS encrypted, because decryption indexes into
+      // the whole file's image streams.
+      if (!readPdfTail(input).contains("/Encrypt")) {
         input.copyTo(out, overwrite = true)
         return true
       }
+      val bytes = input.readBytes()
+      val text = String(bytes, Charsets.ISO_8859_1)
       if (!verifyPassword(input, password)) return false
       val idHex = Regex("""/ID\s*\[\s*<([0-9a-fA-F]+)>""").find(text)
         ?.groupValues?.get(1) ?: return false
@@ -509,7 +551,9 @@ object PdfProtector {
    */
   fun verifyPassword(pdfFile: File, candidatePassword: String): Boolean {
     return try {
-      val text = pdfFile.inputStream().bufferedReader(Charsets.ISO_8859_1).use { it.readText() }
+      // Tail first (see passwordFieldsText): the whole file is read
+      // only if a password field is missing from the last 64 KB.
+      val text = passwordFieldsText(pdfFile)
       val oMatch = Regex("""/O\s*<([0-9a-fA-F]{64})>""").find(text)
       val uMatch = Regex("""/U\s*<([0-9a-fA-F]{64})>""").find(text)
       val pMatch = Regex("""/P\s*(-?[0-9]+)""").find(text)

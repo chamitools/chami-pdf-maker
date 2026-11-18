@@ -804,7 +804,11 @@ fun CropEditorDialog(
               if (opt.free) {
                 activeRatio = null
               } else {
-                // Original = the image's own aspect ratio.
+                // FIX 2026-11-18 (report #6, verified): "Original" is
+                // NOT the same as "Free" — it locks to the image's real
+                // aspect ratio (opt.ratio is null for Original, so the
+                // image's own width/height is used). "Free" stays
+                // unlocked (activeRatio = null above).
                 val effRatio = opt.ratio ?: (bitmap.width.toFloat() / bitmap.height.toFloat())
                 activeRatio = effRatio
                 cropRect = ratioRect(effRatio); quad = quadFromRect(cropRect)
@@ -1070,7 +1074,13 @@ fun PageList(
   // (crop done), false for ROTATE (stay open so a ratio can follow).
   fun replacePage(index: Int, newBitmap: Bitmap, closeSheet: Boolean) {
     val page = pages.getOrNull(index) ?: return
-    if (cropBusy) return
+    // FIX 2026-11-18 (report #49): a Crop/Rotate tap that lands while
+    // an edit is still running is no longer dropped silently — the
+    // user gets a short "Working..." toast instead.
+    if (cropBusy) {
+      Toast.makeText(ctx, "Working...", Toast.LENGTH_SHORT).show()
+      return
+    }
     cropBusy = true
     scope.launch {
       try {

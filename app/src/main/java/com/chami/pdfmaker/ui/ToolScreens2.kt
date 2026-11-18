@@ -796,11 +796,17 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
     },
     onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() }
   )
-  val singleSave = rememberSingleFileSaver { file ->
-    val mime = if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg"
-    doneFiles = listOf(DoneFileInfo(file, mime, formatSizeText(file.length())))
-    showDone = true
-  }
+  // FIX 2026-11-18 (Fix 4): the save picker MIME must match the image
+  // being saved — rememberSingleFileSaver used to hardcode
+  // "application/pdf", so a resized JPG/PNG/WEBP was offered as a PDF.
+  val singleSave = rememberSingleFileSaver(
+    onSaved = { file ->
+      val mime = if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg"
+      doneFiles = listOf(DoneFileInfo(file, mime, formatSizeText(file.length())))
+      showDone = true
+    },
+    mimeType = if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg"
+  )
 
   fun vibrate() {
     if (tm.hapticOn()) {
@@ -1215,16 +1221,16 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
   }
 }
 
-// 9. OCR TEXT — language chips (English default, Hindi, Spanish),
-// result in a selectable editable text area with Copy + word count,
-// Export TXT and Export searchable PDF as two explicit choices.
-// NOTE: OcrHelper in this copy is ocrImage(ctx, uri) only — Latin
-// script, no language parameter — so the language is passed nowhere
-// yet; the ocrImage(bitmap, language) overload does not exist here
-// and the Devanagari recogniser is not wired in this copy. The UI
-// says so honestly instead of pretending the choice changes the
-// recogniser. Empty result shows "No text found" with a Retake
-// action, never a fake placeholder as extracted text.
+// 9. OCR TEXT — FIX 2026-11-18 (Fix 5): NO language selection any
+// more. The old English/Hindi/Spanish chips were fake options — the
+// screen only ever ran the Latin recogniser. OCR now runs EVERY
+// on-device recogniser (Latin + Devanagari, see
+// OcrHelper.ocrImageAnyLanguage) and reads whatever text is on the
+// image, in any supported language, with no picking. Result in a
+// selectable editable text area with Copy + word count, Export TXT
+// and Export searchable PDF as two explicit choices. Empty result
+// shows "No text found" with a Retake action and says plainly which
+// scripts are supported on-device, never a fake placeholder.
 @Composable
 fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
@@ -1237,7 +1243,6 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var extractedText by remember { mutableStateOf("") }
   var hasResult by remember { mutableStateOf(false) }
   var noTextFound by remember { mutableStateOf(false) }
-  var ocrLang by rememberSaveable { mutableStateOf("English") }
 
   var doneFile by remember { mutableStateOf<File?>(null) }
   var doneMime by remember { mutableStateOf("text/plain") }
@@ -1289,9 +1294,9 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
     val u = imageUri ?: return
     isProcessing = true
     scope.launch {
-      // No language overload exists in this copy: ocrImage(ctx, uri)
-      // reads Latin script. The chosen language is saved with exports.
-      val txt = withContext(Dispatchers.IO) { ocrImage(ctx, u) }
+      // No language picking: ocrImageAnyLanguage runs every on-device
+      // recogniser (Latin + Devanagari) and reads whatever is there.
+      val txt = withContext(Dispatchers.IO) { ocrImageAnyLanguage(ctx, u) }
       isProcessing = false
       if (txt.isBlank()) {
         extractedText = ""
@@ -1324,15 +1329,7 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
       )
 
       Spacer(Modifier.height(Ds.s16))
-      SectionText("Text language", color = theme.text)
-      Spacer(Modifier.height(Ds.s8))
-      Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        listOf("English", "Hindi", "Spanish").forEach { lang ->
-          ChamiChip(lang, ocrLang == lang, { vibrate(); ocrLang = lang })
-        }
-      }
-      Spacer(Modifier.height(Ds.s4))
-      HintText("The language is saved with your export. In this build the on-device recogniser reads Latin script only.")
+      HintText("Reads any text on the image — Latin-script languages (English, Spanish, French, German…) and Devanagari (Hindi, Marathi, Nepali). Other scripts aren't recognised on-device.")
 
       if (previewBitmap != null) {
         Spacer(Modifier.height(Ds.s16))
@@ -1370,7 +1367,7 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
           Spacer(Modifier.height(Ds.s8))
           Text("No text found", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text)
           Spacer(Modifier.height(Ds.s4))
-          HintText("Try a clearer, brighter photo of the text.")
+          HintText("Try a clearer, brighter photo of the text. OCR reads Latin-script and Devanagari text on-device — other scripts aren't supported.")
           Spacer(Modifier.height(Ds.s12))
           ChamiSecondaryButton(text = "Retake / choose another photo", onClick = { vibrate(); picker.launch("image/*") }, modifier = Modifier.fillMaxWidth())
         }
@@ -1413,7 +1410,7 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
               text = "Export TXT",
               onClick = {
                 vibrate()
-                val f = saveTextToFile(ctx, extractedText, "OCR_${ocrLang}_${System.currentTimeMillis()}.txt")
+                val f = saveTextToFile(ctx, extractedText, "OCR_${System.currentTimeMillis()}.txt")
                 doneFile = f
                 singleSaveTxt.launch(f.name)
               },
@@ -1423,8 +1420,8 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
               text = "Export searchable PDF",
               onClick = {
                 vibrate()
-                val out = PdfEngine.outFile(ctx, "OCR_${ocrLang}_${System.currentTimeMillis()}.pdf")
-                val ok = textToPdf(ctx, "OCR Text ($ocrLang)", extractedText, outFile = out)
+                val out = PdfEngine.outFile(ctx, "OCR_${System.currentTimeMillis()}.pdf")
+                val ok = textToPdf(ctx, "OCR Text", extractedText, outFile = out)
                 if (ok) {
                   doneFile = out
                   singleSavePdf.launch(out.name)

@@ -1063,7 +1063,7 @@ fun PageList(
         Spacer(Modifier.height(4.dp))
         Text("Page ${index + 1}", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
         if (page.cropped) {
-          Text("Edited", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.primary)
+          Text("Edited", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
         }
       }
     }

@@ -544,11 +544,17 @@ fun rememberFolderSaver(
  *  was hardcoded to "application/pdf", so Image Resizer offered a
  *  JPG/PNG/WEBP file as a PDF — the system picker then creates a
  *  PDF-typed document for image bytes. PDF tools keep the default;
- *  image tools pass their own MIME type. */
+ *  image tools pass their own MIME type.
+ *  FIX 2026-11-18 (build break, runs #121-#143): `mimeType` was added
+ *  AFTER `onSaved`, so every trailing-lambda call
+ *  (`rememberSingleFileSaver { file -> ... }`) bound the lambda to the
+ *  String parameter and left `onSaved` empty — 16 compile errors, and
+ *  every CI run after that push failed. `onSaved` MUST stay last so
+ *  the trailing lambda binds to it. */
 @Composable
 fun rememberSingleFileSaver(
-  onSaved: (File) -> Unit,
-  mimeType: String = "application/pdf"
+  mimeType: String = "application/pdf",
+  onSaved: (File) -> Unit
 ): (File) -> Unit {
   val ctx = LocalContext.current
   val scope = rememberCoroutineScope()
@@ -713,7 +719,13 @@ fun BigPagePreview(
     ) {
       PreviewActionButton(Icons.Filled.Crop, "Crop — cut the image", onCrop)
       PreviewActionButton(Icons.Filled.Delete, "Delete this page", onDelete)
-      PreviewActionButton(Icons.Filled.Filter, "Filter", onFilter)
+      // FIX 2026-11-18 (Fix 11): FilterList, NOT Filter. Verified by
+      // rendering the exact vectors from material-icons-extended 1.7.0:
+      // Icons.Filled.Filter draws a picture frame with mountains (the
+      // user rightly read it as an image icon); FilterList is the
+      // proper funnel glyph. Crop = crop corners, Delete = trash,
+      // Tune = sliders — all three already read correctly, unchanged.
+      PreviewActionButton(Icons.Filled.FilterList, "Filter", onFilter)
       PreviewActionButton(Icons.Filled.Tune, "Adjust brightness", onAdjust)
     }
   }

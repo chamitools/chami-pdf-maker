@@ -2,13 +2,17 @@ package com.chami.pdfmaker.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -20,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
@@ -51,7 +56,7 @@ object ChamiColors {
  * Spacing scale (4dp grid): 4 / 8 / 12 / 16 / 20 / 24 / 32dp only.
  * Screen side margin: 16dp everywhere. Minimum touch target: 48x48dp.
  * Typography: title 20sp bold, section 16sp bold, tile/body 14sp,
- * button 15sp semibold, hint/meta 12sp, nav label 11sp. Line height 1.4x.
+ * button 14sp semibold, hint/meta 12sp, nav label 11sp. Line height 1.4x.
  */
 object Ds {
     val s4: Dp = 4.dp
@@ -184,7 +189,7 @@ fun ChamiCompactChip(label: String, selected: Boolean, onClick: () -> Unit, modi
     }
 }
 
-/** Primary button — 52dp, bright green, white 15sp semibold (spec §5). */
+/** Primary button — 52dp, bright green, white 14sp semibold (spec §5). */
 @Composable
 fun ChamiPrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     Button(
@@ -208,11 +213,39 @@ fun ChamiSecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier =
 }
 
 /** Circular 48dp icon tile used for the left-corner preview actions
- *  (Crop / Delete / Filter / Adjust) — icon + spoken label, never a glyph. */
+ *  (Crop / Delete / Filter / Adjust) — icon + spoken label, never a glyph.
+ *  FIX 2026-11-18 (report #10): a tiny text label sits under the icon
+ *  (derived from the description: "Crop", "Delete", "Filter", "Adjust"),
+ *  and the white circle now has a visible grey border + shadow, so the
+ *  buttons read on a white/light preview instead of floating as bare icons. */
 @Composable
 fun PreviewActionButton(icon: ImageVector, description: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier.size(Ds.minTouch).background(Color.White, CircleShape).clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) { Icon(icon, contentDescription = description, tint = ChamiColors.deepGreen, modifier = Modifier.size(24.dp)) }
+    // Short label: the words before " —" ("Crop — cut the image" -> "Crop"),
+    // otherwise the first word ("Delete this page" -> "Delete").
+    val shortLabel = description.substringBefore(" —").split(" ").firstOrNull()?.trim().orEmpty()
+    Column(
+        modifier = modifier.width(60.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(Ds.minTouch)
+                .shadow(4.dp, CircleShape)
+                .background(Color.White, CircleShape)
+                .border(1.dp, Color(0xFFCBD5E1), CircleShape)
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, contentDescription = description, tint = ChamiColors.deepGreen, modifier = Modifier.size(24.dp)) }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            shortLabel,
+            fontSize = Ds.HINT_SP.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = ChamiColors.deepGreen,
+            maxLines = 1,
+            modifier = Modifier
+                .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(4.dp))
+                .padding(horizontal = Ds.s4)
+        )
+    }
 }

@@ -1,11 +1,9 @@
 package com.chami.pdfmaker.ui
 
-import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.net.Uri
@@ -64,7 +62,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chami.pdfmaker.pdf.*
@@ -86,12 +83,13 @@ import java.security.MessageDigest
 // ---------------------------------------------------------------------------
 //
 // FIX NOTES (2026-11-14 rewrite, audit chami-whole-app-audit-2026-11-14):
-// - Images/Scan build through PdfEngine.buildImagesPdf(ctx, List<Bitmap>,
+// - Images builds through PdfEngine.buildImagesPdf(ctx, List<Bitmap>,
 //   ImagesPdfOptions, onProgress) — the shared engine API (merged from the
 //   engine batch). The old buildImagesPdfWithOptions (duplicate engine,
 //   wrong quality/watermark/Original-size behaviour) is deleted.
-// - OcrHelper exposes ocrImage(ctx, uri, language); language chips use it
-//   (Hindi = Devanagari recogniser, Spanish = Latin).
+// - OcrHelper exposes ocrImage(ctx, uri, language) and
+//   ocrImageAnyLanguage (Latin + Devanagari, no picking); the OCR
+//   screen runs both recognisers and reads whatever is there.
 // - ImagePageEditor.kt is unchanged in this copy, so its CropEditorDialog
 //   still warps (cropToQuad). Crop therefore uses the new RectCropDialog
 //   below (true rectangular CUT via ImagePageEditor.cropToRect); the warp
@@ -471,7 +469,19 @@ fun DebouncedTextField(
 }
 
 /** Save-every-output flow: asks the folder ONCE (system folder picker),
- *  writes every file there, then reports the saved files. */
+ *  writes every file there, then reports the saved files.
+ *  FIX 2026-11-18 (Format Convert save): two bugs.
+ *  (1) createDocument was passed the raw tree URI from OpenDocumentTree,
+ *      but it needs a DOCUMENT URI — the tree URI is not a valid parent
+ *      document URI and strict providers reject it, so every write
+ *      failed and nothing was saved. The parent is now built with
+ *      buildDocumentUriUsingTree (raw tree URI only as a fallback for
+ *      lenient providers).
+ *  (2) When every write failed, the old code called onCancelled, so a
+ *      real failure showed "Save cancelled" even though the user picked
+ *      a folder. "Cancelled" now fires ONLY when the picker itself is
+ *      dismissed (treeUri == null); a write failure shows the real
+ *      error, and a partial save reports how many files were saved. */
 @Composable
 fun rememberFolderSaver(
   onSaved: (List<File>) -> Unit,
@@ -494,15 +504,31 @@ fun rememberFolderSaver(
           Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         )
       } catch (_: Exception) {}
+      // The folder picker returns a TREE uri; createDocument needs the
+      // parent DOCUMENT uri for that tree.
+      val parentDocUri = try {
+        DocumentsContract.buildDocumentUriUsingTree(
+          treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+        )
+      } catch (_: Exception) { treeUri }
       val saved = mutableListOf<File>()
+      var failed = 0
       for ((file, mime) in files) {
         try {
-          val docUri = DocumentsContract.createDocument(ctx.contentResolver, treeUri, mime, file.name)
+          val docUri = DocumentsContract.createDocument(ctx.contentResolver, parentDocUri, mime, file.name)
           if (docUri != null && SaveLocation.copyToUri(ctx, file, docUri)) saved.add(file)
-        } catch (_: Exception) {}
+          else failed++
+        } catch (_: Exception) { failed++ }
       }
       withContext(Dispatchers.Main) {
-        if (saved.isNotEmpty()) onSaved(saved) else onCancelled()
+        when {
+          saved.isNotEmpty() && failed == 0 -> onSaved(saved)
+          saved.isNotEmpty() -> {
+            Toast.makeText(ctx, "Saved ${saved.size} of ${files.size} files — $failed could not be saved to the chosen folder", Toast.LENGTH_LONG).show()
+            onSaved(saved)
+          }
+          else -> Toast.makeText(ctx, "Could not save to the chosen folder — files kept in Chami folder", Toast.LENGTH_LONG).show()
+        }
       }
     }
   }
@@ -513,15 +539,21 @@ fun rememberFolderSaver(
 }
 
 /** Single-file save flow shared by the one-output tools: build -> save
- *  picker opens directly -> DoneScreen. Returns the launcher trigger. */
+ *  picker opens directly -> DoneScreen. Returns the launcher trigger.
+ *  FIX 2026-11-18: the picker MIME must match the file being saved. It
+ *  was hardcoded to "application/pdf", so Image Resizer offered a
+ *  JPG/PNG/WEBP file as a PDF — the system picker then creates a
+ *  PDF-typed document for image bytes. PDF tools keep the default;
+ *  image tools pass their own MIME type. */
 @Composable
 fun rememberSingleFileSaver(
-  onSaved: (File) -> Unit
+  onSaved: (File) -> Unit,
+  mimeType: String = "application/pdf"
 ): (File) -> Unit {
   val ctx = LocalContext.current
   val scope = rememberCoroutineScope()
   var pending by remember { mutableStateOf<File?>(null) }
-  val launcher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+  val launcher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(mimeType)) { uri ->
     val file = pending
     pending = null
     if (uri != null && file != null) {
@@ -882,27 +914,6 @@ fun BrightnessDialog(
   )
 }
 
-@Composable
-fun AddPageSourceDialog(
-  theme: ChamiTheme,
-  onCamera: () -> Unit,
-  onGallery: () -> Unit,
-  onDismiss: () -> Unit
-) {
-  AlertDialog(
-    onDismissRequest = onDismiss,
-    title = { Text("Add page", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
-    text = {
-      Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        ChamiPrimaryButton(text = "Camera", onClick = onCamera, modifier = Modifier.fillMaxWidth())
-        ChamiSecondaryButton(text = "Gallery", onClick = onGallery, modifier = Modifier.fillMaxWidth())
-      }
-    },
-    confirmButton = {
-      TextButton(onClick = onDismiss) { Text("Cancel", color = theme.text) }
-    }
-  )
-}
 
 // --- Rectangular CUT crop dialog (default crop) ---------------------------
 // Crop CUTS: dragging a corner or edge removes everything outside the
@@ -943,7 +954,7 @@ fun RectCropDialog(
     // FIX 2026-11-18 (Rotate/Reset unreachable): this dialog window runs
     // edge-to-edge, and the Column had NO WindowInsets padding — unlike
     // every other full-screen surface in the app (ToolScreenContainer,
-    // MainActivity, ScanCameraScreen all add statusBarsPadding /
+    // MainActivity and the other full-screen surfaces all add statusBarsPadding /
     // navigationBarsPadding). The bottom Reset / Rotate 90° row therefore
     // sat UNDER the system navigation bar and could not be tapped.
     // statusBarsPadding + navigationBarsPadding keep the fixed bottom
@@ -1246,7 +1257,7 @@ fun RectCropDialog(
   }
 }
 
-// --- Shared page-editing helper (Images + Scan) ---------------------------
+// --- Shared page-editing helper (Images to PDF) ---------------------------
 class PageEditor(
   private val ctx: Context,
   private val scope: kotlinx.coroutines.CoroutineScope,
@@ -1508,530 +1519,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     )
   }
 }
-
-// 2. SCAN TO PDF — same options engine as Images to PDF (quality /
-// watermark / page size honoured), same preview system. The camera
-// opens directly on first entry; batch scan stays open after each
-// capture. RETAKE never deletes the current page first: it only
-// replaces it after a new capture succeeds. Scanned pages default to
-// the Enhance filter.
-// 2. SCAN TO PDF — Adobe Scan-style preview (user reference, restyled
-// in Executive Emerald green/white, never Adobe blue): camera opens
-// directly, manual shutter only, capture proof on every tap, then this
-// preview — detected-edge border with draggable corner + midpoint
-// handles, "Page X of Y" pager, Auto-detect / No crop chips, Retake /
-// Crop / Rotate / Filters / Adjust / Clean toolbar, bottom bar
-// "Keep scanning" + pill "Save PDF".
-// Fixed defaults: Original size, full resolution, no watermark, no
-// page numbers, no margins. No auto-capture, no options section.
-@Composable
-fun ScanToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
-  val ctx = LocalContext.current
-  val haptic = LocalHapticFeedback.current
-  val tm = remember { ThemeManager(ctx) }
-  val scope = rememberCoroutineScope()
-  val vm: PagesViewModel = viewModel(key = "scan")
-  val editor = remember(ctx, scope, vm) { PageEditor(ctx, scope, vm) }
-  var isProcessing by remember { mutableStateOf(false) }
-  var progressText by remember { mutableStateOf("") }
-  var showFilters by remember { mutableStateOf(false) }
-  var showAdjust by remember { mutableStateOf(false) }
-  var brightness by remember { mutableStateOf(0f) }
-  var showCamera by remember { mutableStateOf(false) }
-  var showAddSource by remember { mutableStateOf(false) }
-  var retakeIndex by remember { mutableStateOf<Int?>(null) }
-
-  var doneFile by remember { mutableStateOf<File?>(null) }
-  var showDone by remember { mutableStateOf(false) }
-  val saveFile = rememberSingleFileSaver { file -> doneFile = file; showDone = true }
-
-  val pages = vm.pages
-  val safeSelected = vm.selectedIndex.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-  val selectedPage = pages.getOrNull(safeSelected)
-  val filterMode = selectedPage?.let { editor.filterModeFor(it) } ?: 0
-
-  fun vibrate() {
-    if (tm.hapticOn()) {
-      try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
-    }
-  }
-
-  val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-    if (isGranted) showCamera = true
-    else Toast.makeText(ctx, "Camera permission needed. You can also pick from gallery.", Toast.LENGTH_LONG).show()
-  }
-
-  fun requestCamera() {
-    if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-      showCamera = true
-    } else {
-      permissionLauncher.launch(Manifest.permission.CAMERA)
-    }
-  }
-
-  LaunchedEffect(Unit) {
-    if (pages.isEmpty()) requestCamera()
-  }
-
-  val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { selected ->
-    if (selected.isNotEmpty()) {
-      showDone = false
-      doneFile = null
-      scope.launch(Dispatchers.IO) {
-        val added = selected.mapNotNull { uri ->
-          PdfEngine.loadBitmap(ctx, uri, 8000)?.let { bmp -> PageItem(uri, bmp) }
-        }
-        withContext(Dispatchers.Main) {
-          val firstNew = pages.size
-          vm.setPages(pages + added, selectFirstNew = firstNew)
-        }
-      }
-    }
-  }
-
-  fun buildPdf() {
-    if (pages.isEmpty()) {
-      Toast.makeText(ctx, "Capture or select a document first", Toast.LENGTH_SHORT).show()
-      return
-    }
-    isProcessing = true
-    progressText = "Page 1 of ${pages.size}"
-    scope.launch {
-      val out = PdfEngine.outFile(ctx, "Scan_${System.currentTimeMillis()}.pdf")
-      // Fixed defaults: Original size, full-resolution quality, no
-      // watermark, no page numbers, no margins.
-      val options = PdfEngine.ImagesPdfOptions(
-        pageSize = "Original",
-        quality = "Original",
-        watermarkText = "",
-        watermarkOpacity = 25,
-        watermarkPosition = "centre",
-        pageNumbers = false,
-        marginsMm = 0
-      )
-      val file: File? = try {
-        withContext(Dispatchers.IO) {
-          PdfEngine.buildImagesPdf(ctx, pages.map { it.bitmap }, options) { done, total ->
-            scope.launch { progressText = "Page $done of $total" }
-          }
-        }
-      } catch (e: Exception) {
-        e.printStackTrace()
-        null
-      }
-      isProcessing = false
-      progressText = ""
-      if (file != null) saveFile(file)
-      else Toast.makeText(ctx, "Failed to create PDF", Toast.LENGTH_SHORT).show()
-    }
-  }
-
-  if (showFilters) {
-    FilterPickerDialog(
-      selected = filterMode,
-      theme = theme,
-      onPick = { mode -> vibrate(); editor.applyFilter(safeSelected, mode); showFilters = false },
-      onDismiss = { showFilters = false }
-    )
-  }
-  if (showAdjust) {
-    BrightnessDialog(
-      value = brightness,
-      theme = theme,
-      onValueChange = { brightness = it },
-      onApply = {
-        showAdjust = false
-        if (selectedPage != null) {
-          editor.replacePage(safeSelected, ImagePageEditor.adjustBrightness(selectedPage.bitmap, brightness))
-          brightness = 0f
-        }
-      },
-      onDismiss = { showAdjust = false; brightness = 0f }
-    )
-  }
-  if (showAddSource) {
-    AddPageSourceDialog(
-      theme = theme,
-      onCamera = { showAddSource = false; requestCamera() },
-      onGallery = { showAddSource = false; galleryLauncher.launch("image/*") },
-      onDismiss = { showAddSource = false }
-    )
-  }
-
-  if (showDone && doneFile != null) {
-    DoneScreen(
-      file = doneFile!!,
-      theme = theme,
-      onBackHome = onBack,
-      onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") }
-    )
-    return
-  }
-
-  // Camera first: while no pages exist yet the camera opens directly.
-  // Batch scan: onCaptured only appends (or replaces the retake page
-  // after a successful capture) — the camera stays open until closed.
-  if (showCamera) {
-    ScanCameraScreen(
-      theme = theme,
-      onCaptured = { bmp ->
-        scope.launch(Dispatchers.IO) {
-          val f = File(ctx.cacheDir, "scan_${System.currentTimeMillis()}.jpg")
-          FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-          // Scanned pages default to the Enhance filter.
-          val enhanced = ImagePageEditor.applyFilter(bmp, 3)
-          val uri = Uri.fromFile(f)
-          withContext(Dispatchers.Main) {
-            val target = retakeIndex
-            if (target != null && target in pages.indices) {
-              // Retake: replace only now that the capture succeeded.
-              vm.filterOriginals.remove(pages[target].uri)
-              editor.replacePage(target, enhanced, newOriginal = bmp)
-              retakeIndex = null
-            } else {
-              val firstNew = pages.size
-              vm.filterOriginals[uri] = bmp
-              vm.filterModes[uri] = 3
-              vm.setPages(pages + PageItem(uri, enhanced), selectFirstNew = firstNew)
-            }
-          }
-        }
-      },
-      onGallery = {
-        showCamera = false
-        galleryLauncher.launch("image/*")
-      },
-      onClose = { showCamera = false; retakeIndex = null }
-    )
-    return
-  }
-
-  ToolScreenContainer("Scan to PDF", theme, onBack) {
-    if (pages.isEmpty()) {
-      Text("Point the camera at a page, or pick pages from the gallery.", fontSize = Ds.BODY_SP.sp, color = theme.text)
-      Spacer(Modifier.height(Ds.s16))
-      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        ChamiPrimaryButton(text = "Camera", onClick = { vibrate(); requestCamera() }, modifier = Modifier.weight(1f))
-        ChamiSecondaryButton(text = "Gallery", onClick = { vibrate(); galleryLauncher.launch("image/*") }, modifier = Modifier.weight(1f))
-      }
-      Spacer(Modifier.height(Ds.s16))
-      HintText("Tap the shutter to take a photo — nothing is captured automatically.")
-    } else if (selectedPage != null) {
-      ScanAdobePreview(
-        theme = theme,
-        page = selectedPage,
-        pageIndex = safeSelected,
-        pageCount = pages.size,
-        isProcessing = isProcessing,
-        progressText = progressText,
-        onPrev = { if (safeSelected > 0) vm.select(safeSelected - 1) },
-        onNext = { if (safeSelected < pages.lastIndex) vm.select(safeSelected + 1) },
-        onRetake = { vibrate(); retakeIndex = safeSelected; requestCamera() },
-        onRotate = {
-          vibrate()
-          vm.filterOriginals.remove(selectedPage.uri)
-          editor.replacePage(safeSelected, ImagePageEditor.rotate90(selectedPage.bitmap), newOriginal = null)
-        },
-        onFilter = { showFilters = true },
-        onAdjust = { showAdjust = true },
-        onClean = {
-          vibrate()
-          editor.applyFilter(safeSelected, 3)
-          Toast.makeText(ctx, "Cleaned", Toast.LENGTH_SHORT).show()
-        },
-        onDelete = { vibrate(); vm.deleteAt(safeSelected) },
-        onKeepScanning = { vibrate(); requestCamera() },
-        onSavePdf = { if (!isProcessing) { vibrate(); buildPdf() } },
-        onCropApply = { quad ->
-          pages.getOrNull(safeSelected)?.let { pg ->
-            val cropped = ImagePageEditor.cropToQuad(pg.bitmap, quad)
-            vm.filterOriginals.remove(pg.uri)
-            editor.replacePage(safeSelected, cropped, newOriginal = cropped)
-          }
-        },
-        pages = pages,
-        onSelectPage = { vm.select(it) },
-        onMovePage = { from, to -> vm.movePage(from, to) },
-        onAddPages = { vibrate(); requestCamera() }
-      )
-    }
-  }
-}
-
-// Adobe Scan-style preview for Scan to PDF (user reference, restyled
-// Executive Emerald — green border, never Adobe blue). Preview with
-// the detected-edge border + draggable corner and edge-midpoint
-// handles; releasing a drag applies the document crop (perspective
-// corrected, as in Adobe Scan). Left-corner tools (Crop, Delete,
-// Filter, Adjust) and bottom page previews match Images to PDF;
-// toolbar keeps only Retake / Rotate / Clean so nothing duplicates.
-// Pager pill, Auto-detect / No crop chips, bottom bar Keep scanning
-// + pill Save PDF.
-@Composable
-fun ScanAdobePreview(
-  theme: ChamiTheme,
-  page: PageItem,
-  pageIndex: Int,
-  pageCount: Int,
-  isProcessing: Boolean,
-  progressText: String,
-  onPrev: () -> Unit,
-  onNext: () -> Unit,
-  onRetake: () -> Unit,
-  onRotate: () -> Unit,
-  onFilter: () -> Unit,
-  onAdjust: () -> Unit,
-  onClean: () -> Unit,
-  onDelete: () -> Unit,
-  onKeepScanning: () -> Unit,
-  onSavePdf: () -> Unit,
-  onCropApply: (List<Offset>) -> Unit,
-  pages: List<PageItem>,
-  onSelectPage: (Int) -> Unit,
-  onMovePage: (Int, Int) -> Unit,
-  onAddPages: () -> Unit
-) {
-  val bitmap = page.bitmap
-  val density = LocalDensity.current
-  // "auto" = detected edge border with handles (default, Crop highlighted);
-  // "none" = full page, no border.
-  var cropMode by remember(bitmap) { mutableStateOf("auto") }
-  var quad by remember(bitmap) { mutableStateOf(ImagePageEditor.detectDocumentQuad(bitmap)) }
-  var activeHandle by remember { mutableStateOf<Int?>(null) }
-
-  fun fullQuad() = listOf(Offset(0f, 0f), Offset(1f, 0f), Offset(1f, 1f), Offset(0f, 1f))
-  fun isFull(q: List<Offset>): Boolean {
-    val f = fullQuad()
-    return q.zip(f).all { (a, b) -> (a - b).getDistance() < 0.02f }
-  }
-
-  Column(Modifier.fillMaxSize()) {
-    // Preview with the draggable edge border.
-    BoxWithConstraints(
-      Modifier
-        .weight(1f)
-        .fillMaxWidth()
-        .clip(RoundedCornerShape(Ds.s8))
-        .background(theme.card)
-        .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s8))
-    ) {
-      val boxW = with(density) { maxWidth.toPx() }
-      val boxH = with(density) { maxHeight.toPx() }
-      val imgAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
-      val boxAspect = boxW / boxH.coerceAtLeast(1f)
-      val dispW = if (boxAspect > imgAspect) boxH * imgAspect else boxW
-      val dispH = if (boxAspect > imgAspect) boxH else boxW / imgAspect
-      val offX = (boxW - dispW) / 2f
-      val offY = (boxH - dispH) / 2f
-      fun toPx(p: Offset) = Offset(offX + p.x * dispW, offY + p.y * dispH)
-      fun handlePoints(): List<Offset> {
-        val c = quad.map { toPx(it) }
-        return c + listOf((c[0] + c[1]) / 2f, (c[1] + c[2]) / 2f, (c[2] + c[3]) / 2f, (c[3] + c[0]) / 2f)
-      }
-      val touchR = with(density) { 24.dp.toPx() }
-
-      fun moveHandle(handle: Int, dxPx: Float, dyPx: Float) {
-        val fx = dxPx / dispW
-        val fy = dyPx / dispH
-        val q = quad.toMutableList()
-        fun clampPt(p: Offset) = Offset(p.x.coerceIn(0f, 1f), p.y.coerceIn(0f, 1f))
-        when (handle) {
-          in 0..3 -> q[handle] = clampPt(q[handle] + Offset(fx, fy))
-          4 -> { q[0] = clampPt(q[0] + Offset(0f, fy)); q[1] = clampPt(q[1] + Offset(0f, fy)) }
-          5 -> { q[1] = clampPt(q[1] + Offset(fx, 0f)); q[2] = clampPt(q[2] + Offset(fx, 0f)) }
-          6 -> { q[2] = clampPt(q[2] + Offset(0f, fy)); q[3] = clampPt(q[3] + Offset(0f, fy)) }
-          7 -> { q[3] = clampPt(q[3] + Offset(fx, 0f)); q[0] = clampPt(q[0] + Offset(fx, 0f)) }
-        }
-        quad = q
-      }
-
-      Box(
-        Modifier.fillMaxSize().pointerInput(bitmap) {
-          detectDragGestures(
-            onDragStart = { off ->
-              val pts = handlePoints()
-              activeHandle = pts.withIndex()
-                .minByOrNull { (_, p) -> (p - off).getDistance() }
-                ?.takeIf { (_, p) -> (p - off).getDistance() <= touchR }?.index
-            },
-            onDragEnd = {
-              val h = activeHandle
-              activeHandle = null
-              if (h != null && cropMode == "auto" && !isFull(quad)) onCropApply(quad)
-            },
-            onDragCancel = { activeHandle = null },
-            onDrag = { change, dragAmount ->
-              change.consume()
-              activeHandle?.let { moveHandle(it, dragAmount.x, dragAmount.y) }
-            }
-          )
-        }
-      ) {
-        Image(
-          bitmap = bitmap.asImageBitmap(),
-          contentDescription = "Page ${pageIndex + 1}",
-          modifier = Modifier.fillMaxSize(),
-          contentScale = ContentScale.Fit
-        )
-        if (cropMode == "auto") {
-          androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-            val pts = quad.map { toPx(it) }
-            val borderPath = androidx.compose.ui.graphics.Path().apply {
-              moveTo(pts[0].x, pts[0].y)
-              for (i in 1 until 4) lineTo(pts[i].x, pts[i].y)
-              close()
-            }
-            // Dim everything outside the frame.
-            val dimPath = androidx.compose.ui.graphics.Path().apply {
-              addRect(androidx.compose.ui.geometry.Rect(Offset.Zero, size))
-              addPath(borderPath)
-            }
-            dimPath.fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
-            drawPath(dimPath, Color.Black.copy(alpha = 0.35f))
-            drawPath(borderPath, ChamiColors.brightGreen, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 5f))
-            val cornerR = with(density) { 11.dp.toPx() }
-            val midR = with(density) { 8.dp.toPx() }
-            handlePoints().forEachIndexed { i, p ->
-              val r = if (i < 4) cornerR else midR
-              drawCircle(Color.White, radius = r, center = p)
-              drawCircle(ChamiColors.darkGreen, radius = r, center = p, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
-            }
-          }
-        }
-      }
-      // Left-corner tools, same order as Images to PDF: Crop on top,
-      // then Delete, Filter, Adjust. Crop turns the detected-edge
-      // border + handles back on (Auto-detect).
-      Column(
-        Modifier.align(Alignment.TopStart).padding(Ds.s8),
-        verticalArrangement = Arrangement.spacedBy(Ds.s8)
-      ) {
-        PreviewActionButton(Icons.Filled.Crop, "Crop", {
-          cropMode = "auto"
-          quad = ImagePageEditor.detectDocumentQuad(bitmap)
-        })
-        PreviewActionButton(Icons.Filled.Delete, "Delete this page", onDelete)
-        PreviewActionButton(Icons.Filled.Filter, "Filter", onFilter)
-        PreviewActionButton(Icons.Filled.Tune, "Adjust brightness", onAdjust)
-      }
-    }
-
-    Spacer(Modifier.height(Ds.s12))
-    // Pager pill with arrows.
-    Row(
-      Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.Center,
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      ChamiIconButton(icon = Icons.Filled.ChevronLeft, description = "Previous page", onClick = onPrev)
-      Box(
-        Modifier
-          .clip(RoundedCornerShape(50))
-          .background(theme.card)
-          .border(1.dp, theme.cardBorder, RoundedCornerShape(50))
-          .padding(horizontal = Ds.s16, vertical = Ds.s8),
-        contentAlignment = Alignment.Center
-      ) {
-        Text("Page ${pageIndex + 1} of $pageCount", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
-      }
-      ChamiIconButton(icon = Icons.Filled.ChevronRight, description = "Next page", onClick = onNext)
-    }
-    Spacer(Modifier.height(Ds.s12))
-    // Auto-detect / No crop chips.
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-      ChamiCompactChip("Auto-detect", cropMode == "auto", {
-        cropMode = "auto"
-        quad = ImagePageEditor.detectDocumentQuad(bitmap)
-      })
-      Spacer(Modifier.width(Ds.s8))
-      ChamiCompactChip("No crop", cropMode == "none", {
-        cropMode = "none"
-        quad = fullQuad()
-      })
-    }
-    Spacer(Modifier.height(Ds.s12))
-    // Toolbar: Retake, Rotate, Clean only — Crop / Filters / Adjust
-    // live in the left-corner tools above (same as Images to PDF), so
-    // nothing is duplicated.
-    Row(
-      Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-      horizontalArrangement = Arrangement.spacedBy(Ds.s4)
-    ) {
-      ScanToolItem(theme, Icons.Filled.PhotoCamera, "Retake", false, onRetake)
-      ScanToolItem(theme, Icons.Filled.Rotate90DegreesCcw, "Rotate", false, onRotate)
-      ScanToolItem(theme, Icons.Filled.AutoFixHigh, "Clean", false, onClean)
-    }
-    if (isProcessing) {
-      Spacer(Modifier.height(Ds.s12))
-      LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-      Spacer(Modifier.height(Ds.s4))
-      Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
-    }
-    Spacer(Modifier.height(Ds.s12))
-    // Page previews at the bottom, just like Images to PDF: tap a
-    // thumbnail to change the big preview, drag to reorder, "+" opens
-    // the camera to keep scanning.
-    PageThumbnailStrip(
-      pages = pages,
-      selectedIndex = pageIndex,
-      theme = theme,
-      onSelect = onSelectPage,
-      onMove = onMovePage,
-      onAddPages = onAddPages
-    )
-    Spacer(Modifier.height(Ds.s12))
-    // Bottom bar: Keep scanning (left) + pill Save PDF (right).
-    Row(
-      Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.SpaceBetween,
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      TextButton(onClick = onKeepScanning) {
-        Text("Keep scanning", fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = theme.primary)
-      }
-      Button(
-        onClick = onSavePdf,
-        enabled = !isProcessing,
-        modifier = Modifier.height(Ds.secondaryButtonHeight),
-        shape = RoundedCornerShape(50),
-        colors = ButtonDefaults.buttonColors(
-          containerColor = ChamiColors.brightGreen,
-          contentColor = Color.White,
-          disabledContainerColor = ChamiColors.lightGreen
-        ),
-        contentPadding = PaddingValues(horizontal = Ds.s24, vertical = 0.dp)
-      ) {
-        Text("Save PDF", fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
-      }
-    }
-  }
-}
-
-// One toolbar item in the Scan preview: icon over a label, 64dp wide,
-// highlighted (light-green circle) when selected.
-@Composable
-private fun ScanToolItem(theme: ChamiTheme, icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
-  Column(
-    Modifier.width(64.dp).clickable { onClick() }.padding(vertical = Ds.s4),
-    horizontalAlignment = Alignment.CenterHorizontally
-  ) {
-    Box(
-      Modifier.size(Ds.minTouch).background(if (selected) ChamiColors.lightGreen else Color.Transparent, CircleShape),
-      contentAlignment = Alignment.Center
-    ) {
-      Icon(icon, contentDescription = label, tint = if (selected) ChamiColors.darkGreen else ChamiColors.deepGreen, modifier = Modifier.size(24.dp))
-    }
-    Spacer(Modifier.height(Ds.s4))
-    Text(
-      label,
-      fontSize = Ds.NAV_SP.sp,
-      fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-      color = if (selected) ChamiColors.darkGreen else theme.text,
-      maxLines = 1
-    )
-  }
-}
-
 
 // 3. PDF TO IMAGES — JPG (default) / PNG, resolution Screen 150 /
 // High 300 (default) / Print 600 DPI, page range with live validation,

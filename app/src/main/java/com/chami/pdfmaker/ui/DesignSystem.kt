@@ -63,13 +63,18 @@ object Ds {
     val s32: Dp = 32.dp
 
     const val TITLE_SP = 20
+    // FIX 2026-11-18 (Fix 7): the ONE font scale — screen title 20,
+    // section title 16, body/option 14, caption/hint 12. WORDMARK_SP
+    // is the single large display size (brand wordmark, big "+" glyph).
+    // No other literal font sizes anywhere in the app.
+    const val WORDMARK_SP = 32
     const val SECTION_SP = 16
     const val TILE_SP = 14
     const val BODY_SP = 14
-    const val BUTTON_SP = 15
+    const val BUTTON_SP = 14
     const val HINT_SP = 12
     const val META_SP = 12
-    const val NAV_SP = 11
+    const val NAV_SP = 12
 
     val tileRadius: Dp = 12.dp
     val buttonRadius: Dp = 10.dp

@@ -6,7 +6,6 @@
     <string name="simple_tools">シンプルツール</string>
     <string name="smart_tools">スマートツール</string>
     <string name="images_to_pdf">画像をPDFに</string>
-    <string name="scan_to_pdf">スキャンをPDFに</string>
     <string name="merge_pdf">PDFを結合</string>
     <string name="split_pdf">PDFを分割</string>
     <string name="protect_pdf">PDFを保護</string>

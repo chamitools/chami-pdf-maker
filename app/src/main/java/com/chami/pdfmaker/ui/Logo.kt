@@ -75,7 +75,7 @@ fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
           "CHAMI",
           fontFamily = PixelFont,
           fontWeight = FontWeight.ExtraBold,
-          fontSize = 32.sp,
+          fontSize = Ds.WORDMARK_SP.sp,
           letterSpacing = 1.sp,
           color = theme.text
         )
@@ -90,7 +90,7 @@ fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
             "PRO",
             fontFamily = PixelFont,
             fontWeight = FontWeight.Bold,
-            fontSize = 11.sp,
+            fontSize = Ds.HINT_SP.sp,
             color = theme.textOnPrimary
           )
         }
@@ -101,7 +101,7 @@ fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
         "PROFESSIONAL PDF & SCANNER SUITE",
         fontFamily = PixelFont,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 10.sp,
+        fontSize = Ds.HINT_SP.sp,
         letterSpacing = 1.2.sp,
         color = theme.textSecondary
       )
@@ -136,14 +136,14 @@ fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
         Text(
           statusText,
           fontFamily = PixelFont,
-          fontSize = 11.sp,
+          fontSize = Ds.HINT_SP.sp,
           color = theme.textSecondary
         )
         Text(
           "${(fill * 100).toInt()}%",
           fontFamily = PixelFont,
           fontWeight = FontWeight.Bold,
-          fontSize = 11.sp,
+          fontSize = Ds.HINT_SP.sp,
           color = theme.primary
         )
       }

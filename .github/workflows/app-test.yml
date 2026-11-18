@@ -1,0 +1,66 @@
+name: App Test (human-user journey)
+
+# Human-user test pass, 2026-11-18 (Run #151, HEAD 9e87166).
+# Runs the Robolectric unit tests AND the instrumented tests on a real
+# emulator (API 34, google_apis, x86_64):
+#  - EngineUnitTest (testDebugUnitTest): engine logic without PdfRenderer.
+#  - EngineRoundTripTest (connectedDebugAndroidTest): Images to PDF fixed
+#    A4 595x842, merge/split round-trips, resize, compress, protect/unlock.
+#  - HomeJourneyTest (connectedDebugAndroidTest): Home -> every tool
+#    screen -> back, group order, no Scan tile, CHAMI PRO once, empty
+#    states, disabled slide reason.
+# Picker flows (gallery / file picker) cannot be driven by Compose
+# tests; the engine behind them is covered by EngineRoundTripTest.
+# NOTE: the app sets FLAG_SECURE, so any screenshots taken on failure
+# will be BLACK — read the test XML / logcat instead of screenshots.
+# NOTE: there is no gradlew in this repo; the build uses
+# gradle/actions/setup-gradle with gradle-version 9.3.1, same as
+# build-apk.yml. Do NOT add a wrapper here.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Generate debug keystore
+        run: |
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Run unit + emulator tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          ram-size: 4096
+          heap-size: 512
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: gradle testDebugUnitTest connectedDebugAndroidTest --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-test-reports
+          path: |
+            app/build/test-results/
+            app/build/reports/
+            app/build/outputs/androidTest-results/
+          if-no-files-found: warn

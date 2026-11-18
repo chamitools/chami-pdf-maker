@@ -93,10 +93,10 @@ class MainActivity : ComponentActivity() {
 
       // Home grouping — Option A (user decision 2026-11-14), replacing
       // the rejected Simple Tools (7) / Smart Tools (4) split.
-      val makePdfTools = listOf(
-        ToolItem("img_pdf", "Images to PDF", R.drawable.tool_ic_01_images_to_pdf, "CREATE"),
-        ToolItem("scan", "Scan to PDF", R.drawable.tool_ic_02_scan_to_pdf, "CREATE"),
-      )
+      // FIX 2026-11-18: Scan to PDF REMOVED (user decision) — the
+      // "Make a PDF" group would have been left with a single tile, so
+      // it is gone too: Images to PDF moves into "Images & Reading",
+      // which now fills a full 3-tile row. 10 tools.
       val fixPdfTools = listOf(
         ToolItem("merge", "Merge PDF", R.drawable.tool_ic_05_merge_pdf, "EDIT"),
         ToolItem("split", "Split PDF", R.drawable.tool_ic_06_split_pdf, "EDIT"),
@@ -109,11 +109,11 @@ class MainActivity : ComponentActivity() {
         ToolItem("ocr", "OCR Text", R.drawable.tool_ic_11_ocr_text, "EXTRACT"),
       )
       val imagesReadingTools = listOf(
+        ToolItem("img_pdf", "Images to PDF", R.drawable.tool_ic_01_images_to_pdf, "CREATE"),
         ToolItem("resize", "Image Resizer", R.drawable.tool_ic_09_image_resizer, "PHOTO"),
         ToolItem("reader", "PDF Reader", R.drawable.tool_ic_10_pdf_reader, "VIEW"),
       )
       val toolGroups = listOf(
-        "Make a PDF" to makePdfTools,
         "Fix a PDF" to fixPdfTools,
         "Convert" to convertTools,
         "Images & Reading" to imagesReadingTools,
@@ -279,13 +279,12 @@ class MainActivity : ComponentActivity() {
             }
           }
         } else if (activeTool != null) {
-          // 11 tools only. Dead routes are NOT wired: text_pdf (Word
+          // 10 tools only. Dead routes are NOT wired: text_pdf (Word
           // editor), editor (PDF Editor), Passport Photo and PDF to Text
           // screens exist as dead code elsewhere but are never opened
           // from here — an unknown id just returns to Home.
           when (activeTool) {
             "img_pdf" -> ImagesToPdfScreen(theme) { activeTool = null }
-            "scan" -> ScanToPdfScreen(theme) { activeTool = null }
             "protect" -> ProtectPdfScreen(theme) { activeTool = null }
             "pdf_img" -> PdfToImagesScreen(theme) { activeTool = null }
             "split" -> SplitPdfScreen(theme) { activeTool = null }

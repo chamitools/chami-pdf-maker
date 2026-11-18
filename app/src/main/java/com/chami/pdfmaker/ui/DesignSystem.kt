@@ -163,8 +163,7 @@ fun ChamiIconButton(
     }
 }
 
-/** Small chip — 36dp, 12sp. Used for the Scan preview Auto-detect /
- *  No crop chips under the pager. */
+/** Small chip — 36dp, 12sp. Small toggle chip for option rows. */
 @Composable
 fun ChamiCompactChip(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(

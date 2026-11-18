@@ -100,6 +100,79 @@ object PdfCompress {
     return if (bytes < 0) 0L else bytes / 1024L
   }
 
+  // Real MIME type of an image Uri ("image/png", "image/jpeg",
+  // "image/webp", ...). Prefers the resolver's type; falls back to the
+  // image header's own MIME so file:// Uris work too. Null when the
+  // format cannot be determined. Used by the format-aware keep-smaller
+  // path (#15) — never guess a MIME from the output file's extension.
+  fun imageMimeType(ctx: Context, uri: Uri): String? {
+    return try {
+      ctx.contentResolver.getType(uri)?.takeIf { it.startsWith("image/") }
+        ?: run {
+          val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+          ctx.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, opts)
+          }
+          opts.outMimeType
+        }
+    } catch (_: Exception) { null }
+  }
+
+  data class ImageCompressResult(
+    val ok: Boolean,
+    val outFile: File,
+    val keptOriginal: Boolean,
+    val mimeType: String
+  )
+
+  // FORMAT-AWARE keep-smaller for compressed IMAGES (#15, report
+  // item 15). If `compressed` (a .jpg holding JPEG bytes) is NOT
+  // smaller than the original, the original is kept — in a file whose
+  // extension matches the original's REAL format, so extension, bytes
+  // and MIME always agree. A kept PNG original lands in a sibling
+  // .png file (the oversized .jpg is deleted); a kept JPEG original
+  // is copied over the .jpg output (formats agree); an original whose
+  // format cannot be determined keeps the valid JPEG bytes instead of
+  // risking unknown bytes in a .jpg file. Returns the file that
+  // actually holds the result plus its MIME type — callers must use
+  // the returned outFile/mimeType, not assume the .jpg name.
+  // If the compressed file is already smaller, it is returned as-is.
+  fun keepSmallerImage(ctx: Context, originalUri: Uri, compressed: File): ImageCompressResult {
+    return try {
+      val origBytes = originalSizeBytes(ctx, originalUri)
+      if (!compressed.exists()) return ImageCompressResult(false, compressed, false, "image/jpeg")
+      if (origBytes <= 0 || compressed.length() <= origBytes) {
+        return ImageCompressResult(true, compressed, false, "image/jpeg")
+      }
+      val mime = imageMimeType(ctx, originalUri)
+      val ext = when (mime) {
+        "image/png" -> "png"
+        "image/webp" -> "webp"
+        "image/jpeg" -> "jpg"
+        else -> null
+      }
+      if (ext == null) {
+        // Unknown original format: keep the valid JPEG bytes rather
+        // than copying unknown bytes into a .jpg file.
+        return ImageCompressResult(true, compressed, false, "image/jpeg")
+      }
+      val target = if (ext == "jpg") {
+        compressed
+      } else {
+        File(compressed.parentFile, compressed.nameWithoutExtension + ".$ext")
+      }
+      ctx.contentResolver.openInputStream(originalUri)?.use { input ->
+        FileOutputStream(target).use { o -> input.copyTo(o) }
+      }
+      if (target != compressed) {
+        try { compressed.delete() } catch (_: Exception) {}
+      }
+      ImageCompressResult(true, target, true, mime)
+    } catch (_: Exception) {
+      ImageCompressResult(compressed.exists(), compressed, false, "image/jpeg")
+    }
+  }
+
   // Compress a PDF by re-rendering every page as a JPEG image.
   //
   // HONEST LIMIT — TEXT IS NOT PRESERVED. This re-renders each page to

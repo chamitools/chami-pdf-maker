@@ -390,10 +390,11 @@ fun DoneScreen(
       modifier = Modifier
         .fillMaxWidth()
         .height(Ds.secondaryButtonHeight),
-      colors = ButtonDefaults.buttonColors(
-        containerColor = Color.Transparent,
-        contentColor = ChamiColors.darkGreen
-      ),
+      // UI OVERHAUL 2026-11-18: the old transparent button read as a
+      // dead label next to the two solid buttons — same secondary
+      // outline style as Share, so all three actions look tappable.
+      colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = ChamiColors.darkGreen),
+      border = androidx.compose.foundation.BorderStroke(1.5.dp, ChamiColors.darkGreen),
       shape = RoundedCornerShape(Ds.buttonRadius)
     ) {
       Icon(Icons.Filled.Home, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(24.dp))

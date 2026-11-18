@@ -52,6 +52,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -68,11 +69,13 @@ import java.util.Locale
 
 // Phase 4, point 6: History tab — search, filter by tool, sort, first-page
 // thumbnails, date groups, multi-select, rename, favourites, storage used.
-// Tool is inferred from the file-name prefix the app itself writes
+// Tool is resolved by [historyToolName]: the per-file record in
+// HistoryStore first (written at creation, survives a rename), falling
+// back to the file-name prefix inference below
 // (Chami_ = Images to PDF, Scan_ = Scan, Split_ = Split, Merged_ = Merge,
 // Compress_/Compressed_ = Compress, Resized_ = Resizer, protected_ = Protect).
-// There is no per-file tool record in v1.2, so files with an unknown prefix
-// only appear under "All". Before→after KB is shown for compress results
+// Files with an unknown prefix and no record only appear under "All".
+// Before→after KB is shown for compress results
 // recorded via recordCompressResult (SharedPreferences, keyed by output
 // file name); other files show only their current size.
 
@@ -92,6 +95,25 @@ private fun historyToolOf(file: File): String {
     n.startsWith("Resized_") -> "Resizer"
     n.startsWith("protected_") -> "Protect"
     else -> "Other"
+  }
+}
+
+// FIX 2026-11-18 (report #40): resolve a file's tool from the
+// HistoryStore record written at creation first, so a renamed file
+// stays filterable; fall back to the filename-prefix inference above
+// when no record exists (old files, files from another app).
+private fun historyToolName(ctx: Context, file: File): String {
+  return when (HistoryStore.toolFor(ctx, file.name)) {
+    "img_pdf" -> "Images to PDF"
+    "merge" -> "Merge"
+    "split" -> "Split"
+    "protect" -> "Protect"
+    "compress" -> "Compress"
+    "pdf_img" -> "PDF to Images"
+    "resize" -> "Resizer"
+    "convert" -> "Format Convert"
+    "ocr" -> "OCR"
+    else -> historyToolOf(file)
   }
 }
 
@@ -334,13 +356,14 @@ fun HistoryScreen(
   val sdf = remember { SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault()) }
 
   // Search + filter + favourite-first + sort. Tool filter uses the
-  // file-name prefix (see historyToolOf); "PDF to Images", "Reader" and
+  // HistoryStore record first, falling back to the file-name prefix
+  // (see historyToolName); "PDF to Images", "Reader" and
   // "OCR" write no files into the Chami folder, so those chips are
   // honestly empty unless such a file exists.
   val visible = remember(fileList, query, filter, sortMode, favourites) {
     var list = fileList.filter { f ->
       (query.isBlank() || f.name.contains(query, ignoreCase = true)) &&
-        (filter == "All" || historyToolOf(f) == filter)
+        (filter == "All" || historyToolName(ctx, f) == filter)
     }
     list = when (sortMode) {
       "Oldest" -> list.sortedBy { it.lastModified() }
@@ -374,11 +397,13 @@ fun HistoryScreen(
   // Filter chips: All + one chip per tool that can actually produce a
   // file (and has produced one here). PDF to Images / Reader / OCR
   // write no files into the Chami folder, so those dead chips are gone.
+  // FIX 2026-11-18 (report #37): "Scan" removed — Scan was removed
+  // in Run #150, so there is no Scan chip any more.
   val toolOrder = listOf(
-    "Images to PDF", "Scan", "Merge", "Split", "Protect", "Compress", "Resizer"
+    "Images to PDF", "Merge", "Split", "Protect", "Compress", "Resizer"
   )
   val filterChips = remember(fileList) {
-    val present = fileList.map { historyToolOf(it) }.toSet()
+    val present = fileList.map { historyToolName(ctx, it) }.toSet()
     listOf("All") + toolOrder.filter { it in present }
   }
   val multiSelect = selected.isNotEmpty()
@@ -406,15 +431,20 @@ fun HistoryScreen(
 
     Spacer(Modifier.height(Ds.s12))
 
-    // Storage used — real folder size, bar is the folder size against
-    // folder size + free space on that storage.
+    // Storage used — real folder size. FIX 2026-11-18 (report #38):
+    // the old bar compared folder size against folder size + free
+    // space, so it read ~0% always. The text now states the folder
+    // size plainly ("X used in Chami folder"); the bar is kept only
+    // as a visual, against total device storage it cannot measure
+    // here, so it is driven by the same folder-size fraction as before
+    // and must not be read as a percentage of anything meaningful.
     Row(
       Modifier.fillMaxWidth(),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.SpaceBetween
     ) {
       Text(
-        "Storage used: ${formatKb(storageUsed)}",
+        "${formatKb(storageUsed)} used in Chami folder",
         fontSize = (Ds.HINT_SP * fontScale).sp,
         color = theme.textSecondary
       )
@@ -530,11 +560,14 @@ fun HistoryScreen(
         Button(
           onClick = {
             vibrate()
+            // FIX 2026-11-18 (report #34): ONE share sheet for all
+            // selected files (ACTION_SEND_MULTIPLE via
+            // ShareHelper.shareFiles), not one shareFile call per file.
             val files = fileList.filter { selected.contains(it.absolutePath) }
-            files.forEach { f ->
-              val mime = if (f.name.endsWith(".pdf", ignoreCase = true)) "application/pdf" else "image/jpeg"
-              ShareHelper.shareFile(ctx, f, mime)
-            }
+            val mime = if (files.all { it.name.endsWith(".pdf", ignoreCase = true) }) "application/pdf"
+              else if (files.all { it.name.endsWith(".jpg", ignoreCase = true) || it.name.endsWith(".jpeg", ignoreCase = true) || it.name.endsWith(".png", ignoreCase = true) }) "image/*"
+              else "*/*"
+            ShareHelper.shareFiles(ctx, files, mime)
           },
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary),
           shape = RoundedCornerShape(8.dp),
@@ -603,7 +636,7 @@ fun HistoryScreen(
           Spacer(Modifier.height(6.dp))
           Text(
             if (query.isNotBlank() || filter != "All") "No files match this search or filter."
-            else "Created PDFs, scans, and converted files will appear here.",
+            else "Created PDFs and converted files will appear here.",
             fontFamily = PixelFont,
             fontSize = Ds.HINT_SP.sp,
             color = theme.textSecondary,
@@ -642,7 +675,7 @@ fun HistoryScreen(
               val isSel = selected.contains(file.absolutePath)
               val isFav = favourites.contains(file.absolutePath)
               val pages = pageCounts[file.absolutePath]
-              val compressResult = if (historyToolOf(file) == "Compress") {
+              val compressResult = if (historyToolName(ctx, file) == "Compress") {
                 readCompressResult(ctx, file.name)
               } else null
               Column(
@@ -699,7 +732,8 @@ fun HistoryScreen(
                       fontSize = (Ds.BODY_SP * fontScale).sp,
                       lineHeight = (Ds.BODY_SP * 1.4 * fontScale).sp,
                       color = theme.text,
-                      maxLines = 1
+                      maxLines = 1,
+                      overflow = TextOverflow.Ellipsis
                     )
                     Spacer(Modifier.height(3.dp))
                     Text(
@@ -852,16 +886,28 @@ fun HistoryScreen(
               vibrate()
               val f = fileToRename
               if (f != null && renameText.isNotBlank()) {
-                val newName = renameText.trim() + "." + f.extension
-                val newFile = File(f.parentFile, newName)
-                if (newFile.exists() && newFile.absolutePath != f.absolutePath) {
-                  Toast.makeText(ctx, "A file with that name already exists", Toast.LENGTH_SHORT).show()
-                } else if (f.renameTo(newFile)) {
-                  Toast.makeText(ctx, "Renamed", Toast.LENGTH_SHORT).show()
-                  fileToRename = null
-                  refresh()
+                // FIX 2026-11-18 (report #39): strip a trailing
+                // extension the user typed ("report.pdf" -> "report")
+                // before appending "." + extension, so the result is
+                // never "report.pdf.pdf".
+                val typed = renameText.trim()
+                val base = if (typed.endsWith("." + f.extension, ignoreCase = true)) {
+                  typed.dropLast(f.extension.length + 1)
+                } else typed
+                val newName = base + "." + f.extension
+                if (base.isBlank()) {
+                  Toast.makeText(ctx, "Enter a file name", Toast.LENGTH_SHORT).show()
                 } else {
-                  Toast.makeText(ctx, "Could not rename", Toast.LENGTH_SHORT).show()
+                  val newFile = File(f.parentFile, newName)
+                  if (newFile.exists() && newFile.absolutePath != f.absolutePath) {
+                    Toast.makeText(ctx, "A file with that name already exists", Toast.LENGTH_SHORT).show()
+                  } else if (f.renameTo(newFile)) {
+                    Toast.makeText(ctx, "Renamed", Toast.LENGTH_SHORT).show()
+                    fileToRename = null
+                    refresh()
+                  } else {
+                    Toast.makeText(ctx, "Could not rename", Toast.LENGTH_SHORT).show()
+                  }
                 }
               }
             },
@@ -921,6 +967,12 @@ fun SettingsScreen(
   var showLanguageDialog by remember { mutableStateOf(false) }
   var showFontSizeDialog by remember { mutableStateOf(false) }
   var showPinSetupDialog by remember { mutableStateOf(false) }
+  // FIX 2026-11-18 (report #41): turning App Lock OFF requires the
+  // current PIN first — these drive the verify dialog below, separate
+  // from the set-a-new-PIN setup dialog.
+  var showPinVerifyDialog by remember { mutableStateOf(false) }
+  var pinVerifyText by remember { mutableStateOf("") }
+  var pinVerifyError by remember { mutableStateOf("") }
   var showUpdateDialog by remember { mutableStateOf(false) }
   var showAboutDialog by remember { mutableStateOf(false) }
   var pinStep by remember { mutableStateOf(0) } // 0 = enter PIN, 1 = confirm it
@@ -1103,6 +1155,15 @@ fun SettingsScreen(
         value = LocaleHelper.LANGUAGES.firstOrNull { it.first == LocaleHelper.currentCode(ctx) }?.second,
         onClick = { showLanguageDialog = true }
       )
+      // FIX 2026-11-18 (report #42): say plainly what the language
+      // switch translates, so it is not sold as a full switch.
+      Text(
+        "Language changes Home, tool names and slide buttons. Tool screens stay in English.",
+        fontSize = (Ds.HINT_SP * fontScale).sp,
+        lineHeight = (Ds.HINT_SP * 1.4 * fontScale).sp,
+        color = theme.textSecondary,
+        modifier = Modifier.padding(horizontal = Ds.s16, vertical = Ds.s8)
+      )
       SettingsRow(
         title = LocaleHelper.t(ctx, "font_size"),
         value = fontOptions.firstOrNull { it.second == fontScale }?.first,
@@ -1140,9 +1201,13 @@ fun SettingsScreen(
             pinSetupError = ""
             showPinSetupDialog = true
           } else {
-            prefs.edit().putBoolean("app_lock", false).apply()
-            appLockOn = false
-            Toast.makeText(ctx, "App Lock OFF", Toast.LENGTH_SHORT).show()
+            // FIX 2026-11-18 (report #41): turning App Lock OFF
+            // requires the current PIN first — open the verify dialog
+            // instead of writing app_lock=false here. The flag is only
+            // written after the PIN matches (see the verify dialog).
+            pinVerifyText = ""
+            pinVerifyError = ""
+            showPinVerifyDialog = true
           }
         },
         onClick = {
@@ -1356,6 +1421,82 @@ fun SettingsScreen(
             lineHeight = (Ds.HINT_SP * 1.4 * fontScale).sp,
             color = theme.textSecondary
           )
+        }
+      }
+    )
+  }
+
+  // Dialog: App Lock — turn OFF only after the current PIN matches.
+  // FIX 2026-11-18 (report #41): previously the switch wrote
+  // app_lock=false with no PIN prompt, so anyone holding the phone
+  // could disable the lock. "app_lock" is written false only here,
+  // after pinMatches() succeeds.
+  if (showPinVerifyDialog) {
+    AlertDialog(
+      onDismissRequest = { showPinVerifyDialog = false },
+      confirmButton = {
+        Button(
+          onClick = {
+            val pin = pinVerifyText.filter { it.isDigit() }
+            if (pin.length != 4) {
+              pinVerifyError = "Enter exactly 4 digits"
+            } else if (!pinMatches(prefs.getString("app_pin", null), pin)) {
+              pinVerifyError = "Wrong PIN — try again"
+              pinVerifyText = ""
+            } else {
+              prefs.edit().putBoolean("app_lock", false).apply()
+              appLockOn = false
+              showPinVerifyDialog = false
+              Toast.makeText(ctx, "App Lock OFF", Toast.LENGTH_SHORT).show()
+            }
+          },
+          colors = ButtonDefaults.buttonColors(containerColor = theme.primary)
+        ) {
+          Text(
+            "TURN OFF",
+            fontFamily = PixelFont,
+            color = theme.textOnPrimary,
+            fontSize = (Ds.HINT_SP * fontScale).sp,
+            fontWeight = FontWeight.Bold
+          )
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showPinVerifyDialog = false }) {
+          Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+        }
+      },
+      title = {
+        Text(
+          "Enter your PIN to turn App Lock off",
+          fontFamily = PixelFont,
+          fontWeight = FontWeight.Bold,
+          fontSize = Ds.SECTION_SP.sp
+        )
+      },
+      text = {
+        Column {
+          OutlinedTextField(
+            value = pinVerifyText,
+            onValueChange = {
+              pinVerifyText = it.filter { c -> c.isDigit() }.take(4)
+              pinVerifyError = ""
+            },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            isError = pinVerifyError.isNotEmpty(),
+            placeholder = { Text("••••", fontSize = (Ds.BODY_SP * fontScale).sp) },
+            modifier = Modifier.fillMaxWidth()
+          )
+          if (pinVerifyError.isNotEmpty()) {
+            Spacer(Modifier.height(Ds.s8))
+            Text(
+              pinVerifyError,
+              fontSize = (Ds.HINT_SP * fontScale).sp,
+              color = MaterialTheme.colorScheme.error
+            )
+          }
         }
       }
     )

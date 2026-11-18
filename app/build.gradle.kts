@@ -100,13 +100,8 @@ dependencies {
   implementation("com.google.mlkit:text-recognition:16.0.0")
   implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
   // Phase 6: ads removed — play-services-ads dependency deleted (no code imports it).
-  // Phase 6: CameraX for the in-app Scan camera (ScanCameraScreen).
-  // Versions come from gradle/libs.versions.toml (1.5.0 — newer stable than
-  // 1.4.2, fits minSdk 26 / targetSdk 36). No OpenCV (deferred).
-  implementation(libs.androidx.camera.core)
-  implementation(libs.androidx.camera.camera2)
-  implementation(libs.androidx.camera.lifecycle)
-  implementation(libs.androidx.camera.view)
+  // FIX 2026-11-18: CameraX dependencies REMOVED with Scan to PDF
+  // (the only tool that used the in-app camera).
 
   testImplementation(libs.junit)
   testImplementation(libs.androidx.core)

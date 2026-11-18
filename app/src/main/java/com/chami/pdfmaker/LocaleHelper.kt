@@ -77,7 +77,7 @@ object LocaleHelper {
     "en" to mapOf(
       "home" to "Home", "history" to "History", "settings" to "Settings",
       "simple_tools" to "SIMPLE TOOLS", "smart_tools" to "SMART TOOLS",
-      "images_to_pdf" to "Images to PDF", "scan_to_pdf" to "Scan to PDF",
+      "images_to_pdf" to "Images to PDF",
       "merge_pdf" to "Merge PDF", "split_pdf" to "Split PDF",
       "protect_pdf" to "Protect PDF", "compress_kb" to "Compress KB",
       "pdf_to_images" to "PDF to Images", "image_resizer" to "Image Resizer",
@@ -92,7 +92,7 @@ object LocaleHelper {
     "hi" to mapOf(
       "home" to "होम", "history" to "इतिहास", "settings" to "सेटिंग्स",
       "simple_tools" to "सरल टूल्स", "smart_tools" to "स्मार्ट टूल्स",
-      "images_to_pdf" to "इमेज से PDF", "scan_to_pdf" to "स्कैन से PDF",
+      "images_to_pdf" to "इमेज से PDF",
       "merge_pdf" to "PDF मिलाएँ", "split_pdf" to "PDF अलग करें",
       "protect_pdf" to "PDF सुरक्षित करें", "compress_kb" to "KB कम करें",
       "pdf_to_images" to "PDF से इमेज", "image_resizer" to "इमेज रिसाइज़र",
@@ -107,7 +107,7 @@ object LocaleHelper {
     "es" to mapOf(
       "home" to "Inicio", "history" to "Historial", "settings" to "Ajustes",
       "simple_tools" to "HERRAMIENTAS SIMPLES", "smart_tools" to "HERRAMIENTAS INTELIGENTES",
-      "images_to_pdf" to "Imágenes a PDF", "scan_to_pdf" to "Escanear a PDF",
+      "images_to_pdf" to "Imágenes a PDF",
       "merge_pdf" to "Unir PDF", "split_pdf" to "Dividir PDF",
       "protect_pdf" to "Proteger PDF", "compress_kb" to "Comprimir KB",
       "pdf_to_images" to "PDF a imágenes", "image_resizer" to "Redimensionar imagen",
@@ -122,7 +122,7 @@ object LocaleHelper {
     "fr" to mapOf(
       "home" to "Accueil", "history" to "Historique", "settings" to "Réglages",
       "simple_tools" to "OUTILS SIMPLES", "smart_tools" to "OUTILS INTELLIGENTS",
-      "images_to_pdf" to "Images en PDF", "scan_to_pdf" to "Scanner en PDF",
+      "images_to_pdf" to "Images en PDF",
       "merge_pdf" to "Fusionner PDF", "split_pdf" to "Diviser PDF",
       "protect_pdf" to "Protéger PDF", "compress_kb" to "Compresser Ko",
       "pdf_to_images" to "PDF en images", "image_resizer" to "Redimensionner image",
@@ -137,7 +137,7 @@ object LocaleHelper {
     "de" to mapOf(
       "home" to "Start", "history" to "Verlauf", "settings" to "Einstellungen",
       "simple_tools" to "EINFACHE TOOLS", "smart_tools" to "SMARTE TOOLS",
-      "images_to_pdf" to "Bilder zu PDF", "scan_to_pdf" to "Scannen zu PDF",
+      "images_to_pdf" to "Bilder zu PDF",
       "merge_pdf" to "PDF zusammenführen", "split_pdf" to "PDF teilen",
       "protect_pdf" to "PDF schützen", "compress_kb" to "KB komprimieren",
       "pdf_to_images" to "PDF zu Bildern", "image_resizer" to "Bildgröße ändern",
@@ -152,7 +152,7 @@ object LocaleHelper {
     "pt" to mapOf(
       "home" to "Início", "history" to "Histórico", "settings" to "Configurações",
       "simple_tools" to "FERRAMENTAS SIMPLES", "smart_tools" to "FERRAMENTAS INTELIGENTES",
-      "images_to_pdf" to "Imagens para PDF", "scan_to_pdf" to "Digitalizar para PDF",
+      "images_to_pdf" to "Imagens para PDF",
       "merge_pdf" to "Unir PDF", "split_pdf" to "Dividir PDF",
       "protect_pdf" to "Proteger PDF", "compress_kb" to "Compactar KB",
       "pdf_to_images" to "PDF para imagens", "image_resizer" to "Redimensionar imagem",
@@ -167,7 +167,7 @@ object LocaleHelper {
     "ar" to mapOf(
       "home" to "الرئيسية", "history" to "السجل", "settings" to "الإعدادات",
       "simple_tools" to "أدوات بسيطة", "smart_tools" to "أدوات ذكية",
-      "images_to_pdf" to "صور إلى PDF", "scan_to_pdf" to "مسح إلى PDF",
+      "images_to_pdf" to "صور إلى PDF",
       "merge_pdf" to "دمج PDF", "split_pdf" to "تقسيم PDF",
       "protect_pdf" to "حماية PDF", "compress_kb" to "ضغط KB",
       "pdf_to_images" to "PDF إلى صور", "image_resizer" to "تغيير حجم الصورة",
@@ -182,7 +182,7 @@ object LocaleHelper {
     "zh" to mapOf(
       "home" to "首页", "history" to "历史记录", "settings" to "设置",
       "simple_tools" to "简单工具", "smart_tools" to "智能工具",
-      "images_to_pdf" to "图片转 PDF", "scan_to_pdf" to "扫描转 PDF",
+      "images_to_pdf" to "图片转 PDF",
       "merge_pdf" to "合并 PDF", "split_pdf" to "拆分 PDF",
       "protect_pdf" to "保护 PDF", "compress_kb" to "压缩 KB",
       "pdf_to_images" to "PDF 转图片", "image_resizer" to "图片尺寸调整",
@@ -197,7 +197,7 @@ object LocaleHelper {
     "ru" to mapOf(
       "home" to "Главная", "history" to "История", "settings" to "Настройки",
       "simple_tools" to "ПРОСТЫЕ ИНСТРУМЕНТЫ", "smart_tools" to "УМНЫЕ ИНСТРУМЕНТЫ",
-      "images_to_pdf" to "Изображения в PDF", "scan_to_pdf" to "Сканировать в PDF",
+      "images_to_pdf" to "Изображения в PDF",
       "merge_pdf" to "Объединить PDF", "split_pdf" to "Разделить PDF",
       "protect_pdf" to "Защитить PDF", "compress_kb" to "Сжать KB",
       "pdf_to_images" to "PDF в изображения", "image_resizer" to "Изменить размер",
@@ -212,7 +212,7 @@ object LocaleHelper {
     "ja" to mapOf(
       "home" to "ホーム", "history" to "履歴", "settings" to "設定",
       "simple_tools" to "シンプルツール", "smart_tools" to "スマートツール",
-      "images_to_pdf" to "画像をPDFに", "scan_to_pdf" to "スキャンをPDFに",
+      "images_to_pdf" to "画像をPDFに",
       "merge_pdf" to "PDFを結合", "split_pdf" to "PDFを分割",
       "protect_pdf" to "PDFを保護", "compress_kb" to "KBを圧縮",
       "pdf_to_images" to "PDFを画像に", "image_resizer" to "画像リサイズ",

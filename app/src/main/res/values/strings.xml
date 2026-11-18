@@ -6,7 +6,6 @@
     <string name="simple_tools">SIMPLE TOOLS</string>
     <string name="smart_tools">SMART TOOLS</string>
     <string name="images_to_pdf">Images to PDF</string>
-    <string name="scan_to_pdf">Scan to PDF</string>
     <string name="merge_pdf">Merge PDF</string>
     <string name="split_pdf">Split PDF</string>
     <string name="protect_pdf">Protect PDF</string>

@@ -1,6 +1,7 @@
 package com.chami.pdfmaker
 
 import android.content.Context
+import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
@@ -41,7 +42,7 @@ import com.chami.pdfmaker.theme.*
 import com.chami.pdfmaker.ui.*
 import kotlinx.coroutines.launch
 
-data class ToolItem(val id: String, val title: String, val iconRes: Int, val category: String = "CORE")
+data class ToolItem(val id: String, val title: String, val iconRes: Int, val category: String = "CORE", val titleKey: String = "")
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(b: Bundle?) {
@@ -69,6 +70,10 @@ class MainActivity : ComponentActivity() {
       var activeTool by remember { mutableStateOf<String?>(null) }
       var currentTab by remember { mutableStateOf("Home") }
       var readerFile by remember { mutableStateOf<java.io.File?>(null) }
+      // FIX 2026-11-18 (report #27): the file the Reader hands to
+      // Split / Merge / Compress, so the target tool opens with it
+      // already selected instead of asking the user to re-pick it.
+      var pendingToolFileUri by remember { mutableStateOf<Uri?>(null) }
       val haptic = LocalHapticFeedback.current
       val scope = rememberCoroutineScope()
       val homeGridState = rememberLazyGridState()
@@ -101,25 +106,29 @@ class MainActivity : ComponentActivity() {
       // the main tool — "Images & Reading" goes first, so Images to PDF
       // is the very first tile on Home. Group order below is deliberate.
       val fixPdfTools = listOf(
-        ToolItem("merge", "Merge PDF", R.drawable.tool_ic_05_merge_pdf, "EDIT"),
-        ToolItem("split", "Split PDF", R.drawable.tool_ic_06_split_pdf, "EDIT"),
-        ToolItem("protect", "Protect PDF", R.drawable.tool_ic_03_protect_pdf, "SECURITY"),
-        ToolItem("compress", "Compress KB", R.drawable.tool_ic_04_compress_kb, "OPTIMIZE"),
+        ToolItem("merge", "Merge PDF", R.drawable.tool_ic_05_merge_pdf, "EDIT", "merge_pdf"),
+        ToolItem("split", "Split PDF", R.drawable.tool_ic_06_split_pdf, "EDIT", "split_pdf"),
+        ToolItem("protect", "Protect PDF", R.drawable.tool_ic_03_protect_pdf, "SECURITY", "protect_pdf"),
+        ToolItem("compress", "Compress KB", R.drawable.tool_ic_04_compress_kb, "OPTIMIZE", "compress_kb"),
       )
       val convertTools = listOf(
-        ToolItem("pdf_img", "PDF to Images", R.drawable.tool_ic_07_pdf_to_images, "CONVERT"),
-        ToolItem("convert", "Format Convert", R.drawable.tool_ic_14_format_convert, "PHOTO"),
-        ToolItem("ocr", "OCR Text", R.drawable.tool_ic_11_ocr_text, "EXTRACT"),
+        ToolItem("pdf_img", "PDF to Images", R.drawable.tool_ic_07_pdf_to_images, "CONVERT", "pdf_to_images"),
+        ToolItem("convert", "Format Convert", R.drawable.tool_ic_14_format_convert, "PHOTO", "format_convert"),
+        ToolItem("ocr", "OCR Text", R.drawable.tool_ic_11_ocr_text, "EXTRACT", "ocr"),
       )
       val imagesReadingTools = listOf(
-        ToolItem("img_pdf", "Images to PDF", R.drawable.tool_ic_01_images_to_pdf, "CREATE"),
-        ToolItem("resize", "Image Resizer", R.drawable.tool_ic_09_image_resizer, "PHOTO"),
-        ToolItem("reader", "PDF Reader", R.drawable.tool_ic_10_pdf_reader, "VIEW"),
+        ToolItem("img_pdf", "Images to PDF", R.drawable.tool_ic_01_images_to_pdf, "CREATE", "images_to_pdf"),
+        ToolItem("resize", "Image Resizer", R.drawable.tool_ic_09_image_resizer, "PHOTO", "image_resizer"),
+        ToolItem("reader", "PDF Reader", R.drawable.tool_ic_10_pdf_reader, "VIEW", "pdf_reader"),
       )
+      // FIX 2026-11-18 (report #42): group headings are LocaleHelper
+      // keys, not literal English — "group_images_reading" and
+      // "group_fix_pdf" are added to the English map by the Locale
+      // worker; "convert" already exists in every language.
       val toolGroups = listOf(
-        "Images & Reading" to imagesReadingTools,
-        "Fix a PDF" to fixPdfTools,
-        "Convert" to convertTools,
+        "group_images_reading" to imagesReadingTools,
+        "group_fix_pdf" to fixPdfTools,
+        "convert" to convertTools,
       )
 
       @Composable
@@ -145,8 +154,11 @@ class MainActivity : ComponentActivity() {
             contentScale = ContentScale.Fit
           )
           Spacer(Modifier.height(Ds.s8))
+          // FIX 2026-11-18 (report #42): tile titles use the translated
+          // tool-name keys; the English title stays as the fallback
+          // when a key has no translation.
           Text(
-            t.title,
+            if (t.titleKey.isNotBlank()) LocaleHelper.t(ctx, t.titleKey) else t.title,
             fontSize = Ds.TILE_SP.sp,
             fontWeight = FontWeight.Medium,
             lineHeight = (Ds.TILE_SP * 1.4).sp,
@@ -287,16 +299,22 @@ class MainActivity : ComponentActivity() {
           // screens exist as dead code elsewhere but are never opened
           // from here — an unknown id just returns to Home.
           when (activeTool) {
-            "img_pdf" -> ImagesToPdfScreen(theme) { activeTool = null }
-            "protect" -> ProtectPdfScreen(theme) { activeTool = null }
-            "pdf_img" -> PdfToImagesScreen(theme) { activeTool = null }
-            "split" -> SplitPdfScreen(theme) { activeTool = null }
-            "merge" -> MergePdfScreen(theme) { activeTool = null }
-            "compress" -> CompressKbScreen(theme) { activeTool = null }
-            "resize" -> ResizeConvertScreen(theme, title = "Image Resizer") { activeTool = null }
-            "convert" -> ResizeConvertScreen(theme, title = "Format Convert") { activeTool = null }
-            "ocr" -> OcrScreen(theme) { activeTool = null }
-            "reader" -> PdfReaderScreen(theme, initialFile = readerFile, onOpenTool = { activeTool = it }) { activeTool = null; readerFile = null }
+            // FIX 2026-11-18 (report #4): every tool screen gets
+            // onOpenPdfInReader, so a Done "Open" on a PDF goes to the
+            // inbuilt Reader instead of an external viewer. Reader
+            // hand-off (report #27): onOpenTool carries the current
+            // PDF's Uri into Split / Merge / Compress via
+            // pendingToolFileUri, consumed once by the target tool.
+            "img_pdf" -> ImagesToPdfScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "protect" -> ProtectPdfScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "pdf_img" -> PdfToImagesScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "split" -> SplitPdfScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "merge" -> MergePdfScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "compress" -> CompressKbScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "resize" -> ResizeConvertScreen(theme, title = "Image Resizer", onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "convert" -> ResizeConvertScreen(theme, title = "Format Convert", onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "ocr" -> OcrScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
+            "reader" -> PdfReaderScreen(theme, initialFile = readerFile, onOpenTool = { tool, uri -> pendingToolFileUri = uri; activeTool = tool }) { activeTool = null; readerFile = null }
             else -> { activeTool = null }
           }
         } else {
@@ -380,7 +398,7 @@ class MainActivity : ComponentActivity() {
                       toolGroups.forEach { (heading, tools) ->
                         item(span = { GridItemSpan(3) }) {
                           Text(
-                            heading,
+                            LocaleHelper.t(ctx, heading),
                             fontFamily = PixelFont,
                             fontWeight = FontWeight.Bold,
                             fontSize = Ds.SECTION_SP.sp,

@@ -233,7 +233,7 @@ class MainActivity : ComponentActivity() {
                 "UNLOCK",
                 fontFamily = PixelFont,
                 color = theme.textOnPrimary,
-                fontSize = 13.sp,
+                fontSize = Ds.BODY_SP.sp,
                 fontWeight = FontWeight.Bold
               )
             }
@@ -342,7 +342,7 @@ class MainActivity : ComponentActivity() {
                         "PRO",
                         fontFamily = PixelFont,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp,
+                        fontSize = Ds.HINT_SP.sp,
                         color = theme.textOnPrimary
                       )
                     }
@@ -397,7 +397,7 @@ class MainActivity : ComponentActivity() {
 
               // Bottom navigation — real Material vector icons, never
               // emoji. Home is a proper house, NOT a lightning bolt.
-              // Bar 64dp + system inset, labels always visible (11sp),
+              // Bar 64dp + system inset, labels always visible (12sp, Ds.NAV_SP),
               // selected dark green / unselected grey.
               Row(
                 Modifier

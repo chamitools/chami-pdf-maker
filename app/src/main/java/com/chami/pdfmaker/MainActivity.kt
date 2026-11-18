@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chami.pdfmaker.theme.*
@@ -164,6 +165,7 @@ class MainActivity : ComponentActivity() {
             lineHeight = (Ds.TILE_SP * 1.4).sp,
             color = theme.text,
             maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center
           )
         }
@@ -176,6 +178,8 @@ class MainActivity : ComponentActivity() {
             Modifier
               .fillMaxSize()
               .background(theme.bg)
+              .statusBarsPadding()
+              .navigationBarsPadding()
               .padding(Ds.s24),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -267,7 +271,7 @@ class MainActivity : ComponentActivity() {
             // forgotten PIN requires reinstalling the app (stated at
             // setup in Settings). This dialog only says so.
             if (showForgotPin) {
-              AlertDialog(
+              ChamiAlertDialog(theme,
                 onDismissRequest = { showForgotPin = false },
                 title = {
                   Text(
@@ -407,7 +411,7 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(top = Ds.s24, bottom = Ds.s12)
                           )
                         }
-                        items(tools) { t -> ToolTile(t) }
+                        items(tools, key = { it.id }) { t -> ToolTile(t) }
                       }
                     }
                   }
@@ -418,14 +422,21 @@ class MainActivity : ComponentActivity() {
 
               // Bottom navigation — real Material vector icons, never
               // emoji. Home is a proper house, NOT a lightning bolt.
-              // Bar 64dp + system inset, labels always visible (12sp, Ds.NAV_SP),
-              // selected dark green / unselected grey.
-              Row(
+              // UI OVERHAUL 2026-11-18: the bar is exactly 64dp and the
+              // gesture-navigation inset sits BELOW it (on this wrapper),
+              // so the inset never squeezes the icons/labels inside the
+              // bar on gesture-nav phones. Labels always visible (12sp,
+              // Ds.NAV_SP), selected dark green / unselected grey.
+              Box(
                 Modifier
                   .fillMaxWidth()
-                  .height(Ds.bottomNavHeight)
                   .navigationBarsPadding()
-                  .clip(RoundedCornerShape(Ds.s16))
+              ) {
+                Row(
+                  Modifier
+                    .fillMaxWidth()
+                    .height(Ds.bottomNavHeight)
+                    .clip(RoundedCornerShape(Ds.s16))
                   .background(theme.card)
                   .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s16)),
                 horizontalArrangement = Arrangement.SpaceEvenly,
@@ -472,6 +483,7 @@ class MainActivity : ComponentActivity() {
                       maxLines = 1
                     )
                   }
+                }
                 }
               }
             }

@@ -6,7 +6,6 @@
     <string name="simple_tools">EINFACHE TOOLS</string>
     <string name="smart_tools">SMARTE TOOLS</string>
     <string name="images_to_pdf">Bilder zu PDF</string>
-    <string name="scan_to_pdf">Scannen zu PDF</string>
     <string name="merge_pdf">PDF zusammenführen</string>
     <string name="split_pdf">PDF teilen</string>
     <string name="protect_pdf">PDF schützen</string>

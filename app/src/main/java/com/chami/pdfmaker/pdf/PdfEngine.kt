@@ -104,7 +104,15 @@ object PdfEngine {
     } catch(e:Exception){ e.printStackTrace(); false }
   }
 
-  // COMPRESS TO EXACT KB - binary search quality 95 -> 20, then downscale if still too big. NEVER returns bigger than original.
+  // COMPRESS TO EXACT KB - binary search quality 95 -> 20, then downscale if still too big.
+  // Keep-smaller (#15, report item 15): if the JPEG output is NOT
+  // smaller than the original, the original is kept — but NEVER by
+  // copying non-JPEG bytes into this .jpg output. A JPEG original is
+  // copied over (formats agree); a PNG/WebP original is NOT copied
+  // (that would put PNG bytes in a .jpg file with an image/jpeg MIME)
+  // — the valid JPEG bytes are kept instead. Callers that can rename
+  // the output should use PdfCompress.keepSmallerImage, which keeps
+  // such an original in a correctly-named .png/.webp file.
   fun compressImageToKb(ctx:Context, uri:Uri, targetKb:Int, outFile:File): Boolean {
     return try {
       var bmp = loadBitmap(ctx, uri, 2000) ?: return false
@@ -120,18 +128,48 @@ object PdfEngine {
         val small=Bitmap.createScaledBitmap(bmp,w,h,true); bmp.recycle(); bmp=small
         val baos=ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG,70,baos); bytes=baos.toByteArray()
       }
-      // Safety: if still bigger than original file, copy original instead
+      // Safety: if the JPEG is not smaller than the original, keep the
+      // smaller one — only when the formats agree (#15). Copying a PNG
+      // original over a .jpg output would corrupt the file's format.
+      val origSize = PdfCompress.originalSizeBytes(ctx, uri)
+      if (origSize > 0 && bytes.size >= origSize &&
+          PdfCompress.imageMimeType(ctx, uri) == "image/jpeg") {
+        ctx.contentResolver.openInputStream(uri)?.use { input ->
+          FileOutputStream(outFile).use { o -> input.copyTo(o) }
+        }
+        bmp.recycle(); return true
+      }
       FileOutputStream(outFile).use{ it.write(bytes) }
       bmp.recycle(); true
     } catch(e:Exception){ false }
   }
 
-  // IMAGE RESIZE + CONVERT: width/height in px, format JPG/PNG/WEBP
+  // IMAGE RESIZE + CONVERT: width/height in px, format JPG/PNG/WEBP.
+  // CROP-TO-FILL (#20): the source is centre-cropped to the target
+  // aspect ratio FIRST, then scaled to the exact target size — never
+  // stretched. A landscape photo resized to 1080x1350 loses its sides,
+  // it does not come out tall and distorted.
   fun resizeConvert(ctx:Context, uri:Uri, newW:Int, newH:Int, format:Bitmap.CompressFormat, outFile:File): Boolean {
-    return try { val bmp=loadBitmap(ctx,uri,3000) ?: return false
-      val resized=Bitmap.createScaledBitmap(bmp,newW,newH,true)
+    return try {
+      if (newW <= 0 || newH <= 0) return false
+      val bmp=loadBitmap(ctx,uri,3000) ?: return false
+      val targetAspect = newW.toFloat() / newH.toFloat()
+      val srcAspect = bmp.width.toFloat() / bmp.height.toFloat()
+      val cropped: Bitmap
+      if (srcAspect > targetAspect) {
+        // Source is wider than the target: crop the sides.
+        val cropW = (bmp.height * targetAspect).toInt().coerceIn(1, bmp.width)
+        val x = ((bmp.width - cropW) / 2).coerceAtLeast(0)
+        cropped = Bitmap.createBitmap(bmp, x, 0, cropW, bmp.height)
+      } else {
+        // Source is taller than (or equal to) the target: crop top/bottom.
+        val cropH = (bmp.width / targetAspect).toInt().coerceIn(1, bmp.height)
+        val y = ((bmp.height - cropH) / 2).coerceAtLeast(0)
+        cropped = Bitmap.createBitmap(bmp, 0, y, bmp.width, cropH)
+      }
+      val resized=Bitmap.createScaledBitmap(cropped,newW,newH,true)
       FileOutputStream(outFile).use{ resized.compress(format,90,it) }
-      bmp.recycle(); resized.recycle(); true } catch(e:Exception){ false }
+      bmp.recycle(); if (cropped !== bmp) cropped.recycle(); resized.recycle(); true } catch(e:Exception){ false }
   }
 
   // PASSPORT PHOTO 1-8: crop centre square, resize to 413x531 (35x45mm @300dpi), white bg

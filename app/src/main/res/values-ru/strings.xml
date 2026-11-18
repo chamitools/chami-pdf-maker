@@ -6,7 +6,6 @@
     <string name="simple_tools">ПРОСТЫЕ ИНСТРУМЕНТЫ</string>
     <string name="smart_tools">УМНЫЕ ИНСТРУМЕНТЫ</string>
     <string name="images_to_pdf">Изображения в PDF</string>
-    <string name="scan_to_pdf">Сканировать в PDF</string>
     <string name="merge_pdf">Объединить PDF</string>
     <string name="split_pdf">Разделить PDF</string>
     <string name="protect_pdf">Защитить PDF</string>

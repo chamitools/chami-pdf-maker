@@ -1525,6 +1525,9 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 // per-page progress, images named NAME_p1, NAME_p2... The save folder
 // is asked ONCE and every image is saved there, then a Done screen
 // lists them all.
+// FIX 2026-11-18 (Fix 6): thumbnail grid of EVERY page — tap to
+// select/deselect, Select all / Clear. Extraction converts only the
+// selected pages inside the range (all selected = the old behaviour).
 @Composable
 fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
@@ -1534,6 +1537,14 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var pdfUri by remember { mutableStateOf<Uri?>(null) }
   var totalPages by remember { mutableStateOf(0) }
   var pageOnePreview by remember { mutableStateOf<Bitmap?>(null) }
+  // FIX 2026-11-18 (Fix 6): page selection. All pages are selected by
+  // default (same behaviour as before); tapping a thumbnail toggles
+  // it. Thumbnails render in the background, one page at a time, at
+  // small scale; picking another PDF cancels the old render job so
+  // stale thumbnails never land on the new document.
+  val selectedPages = remember { mutableStateListOf<Int>() }
+  val pageThumbs = remember { mutableStateMapOf<Int, Bitmap>() }
+  var thumbJob by remember { mutableStateOf<Job?>(null) }
   var isProcessing by remember { mutableStateOf(false) }
   var progressText by remember { mutableStateOf("") }
   var format by rememberSaveable { mutableStateOf("JPG") }
@@ -1561,15 +1572,24 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
     pageOnePreview = null
     showDone = false
     doneFiles = null
+    selectedPages.clear()
+    pageThumbs.clear()
     if (selected != null) {
-      scope.launch(Dispatchers.IO) {
+      thumbJob?.cancel()
+      thumbJob = scope.launch(Dispatchers.IO) {
         val n = PdfEngine.pageCount(ctx, selected)
         val bmp = PdfReader.renderPageBitmap(ctx, selected, 0, 2.0f)
         withContext(Dispatchers.Main) {
           totalPages = n
+          for (i in 1..n) selectedPages.add(i)
           pageOnePreview = bmp
           rangeFrom = "1"
           rangeTo = "$n"
+        }
+        // Thumbnails for every page, small scale, one at a time.
+        for (p in 1..n) {
+          val thumb = PdfReader.renderPageBitmap(ctx, selected, p - 1, 0.4f) ?: continue
+          withContext(Dispatchers.Main) { pageThumbs[p] = thumb }
         }
       }
     }
@@ -1578,7 +1598,12 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val fromInt = rangeFrom.toIntOrNull()
   val toInt = rangeTo.toIntOrNull()
   val rangeValid = pdfUri == null || (fromInt != null && toInt != null && fromInt in 1..totalPages && toInt in fromInt..totalPages)
-  val imageCount = if (rangeValid && fromInt != null && toInt != null) toInt - fromInt + 1 else 0
+  // Pages actually extracted: the selected pages inside the range.
+  // All selected + full range = the old behaviour (every page).
+  val effectivePages: List<Int> = if (rangeValid && fromInt != null && toInt != null) {
+    (fromInt..toInt).filter { it in selectedPages }
+  } else selectedPages.toList()
+  val imageCount = effectivePages.size
 
   fun extract() {
     val u = pdfUri ?: return
@@ -1586,12 +1611,14 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
       Toast.makeText(ctx, "Check the page range first", Toast.LENGTH_SHORT).show()
       return
     }
+    if (effectivePages.isEmpty()) {
+      Toast.makeText(ctx, "Select at least 1 page to extract", Toast.LENGTH_SHORT).show()
+      return
+    }
     isProcessing = true
     scope.launch {
       val dir = File(ctx.getExternalFilesDir(null), "Chami/Images_${System.currentTimeMillis()}")
       if (!dir.exists()) dir.mkdirs()
-      val from = fromInt ?: 1
-      val to = toInt ?: totalPages
       val dpi = when (resolution) { "Screen 150" -> 150; "Print 600" -> 600; else -> 300 }
       val scale = dpi / 72f
       val fmt = if (format == "PNG") Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
@@ -1599,8 +1626,8 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
       val base = baseNameOf(ctx, u, "PDF")
       val files = mutableListOf<File>()
       withContext(Dispatchers.IO) {
-        for (p in from..to) {
-          withContext(Dispatchers.Main) { progressText = "Image ${p - from + 1} of ${to - from + 1}" }
+        for ((idx, p) in effectivePages.withIndex()) {
+          withContext(Dispatchers.Main) { progressText = "Image ${idx + 1} of ${effectivePages.size}" }
           val bmp = PdfReader.renderPageBitmap(ctx, u, p - 1, scale) ?: continue
           val f = File(dir, "${base}_p$p.$ext")
           try {
@@ -1716,6 +1743,103 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
             fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold, color = theme.text
           )
         }
+        // FIX 2026-11-18 (Fix 6): thumbnail grid of EVERY page — tap
+        // to select/deselect. Same pattern as Split PDF's page grid
+        // (Select all / Clear + tick overlay), but with real page
+        // thumbnails, labelled Page N. Extraction converts only the
+        // selected pages inside the range above.
+        Spacer(Modifier.height(Ds.s16))
+        SectionText("Pages — tap to select", color = theme.text)
+        Spacer(Modifier.height(Ds.s8))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+          Text(
+            "${selectedPages.size}/$totalPages selected",
+            fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold, color = theme.text
+          )
+          Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+            TextButton(onClick = { vibrate(); selectedPages.clear(); for (i in 1..totalPages) selectedPages.add(i) }, modifier = Modifier.height(Ds.minTouch)) {
+              Text("Select all", color = theme.primary, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+            }
+            TextButton(onClick = { vibrate(); selectedPages.clear() }, modifier = Modifier.height(Ds.minTouch)) {
+              Text("Clear", color = theme.primary, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+            }
+          }
+        }
+        Spacer(Modifier.height(Ds.s8))
+        Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
+          (1..totalPages).chunked(3).forEach { rowPages ->
+            Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+              rowPages.forEach { p ->
+                val isSelected = selectedPages.contains(p)
+                val thumb = pageThumbs[p]
+                Column(
+                  Modifier.weight(1f).clickable {
+                    vibrate()
+                    if (isSelected) selectedPages.remove(p) else selectedPages.add(p)
+                  },
+                  horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                  Box(
+                    Modifier
+                      .fillMaxWidth()
+                      .aspectRatio(595f / 842f)
+                      .clip(RoundedCornerShape(Ds.s8))
+                      .background(theme.card)
+                      .border(
+                        2.dp,
+                        if (isSelected) theme.primary else theme.cardBorder,
+                        RoundedCornerShape(Ds.s8)
+                      ),
+                    contentAlignment = Alignment.Center
+                  ) {
+                    if (thumb != null) {
+                      Image(
+                        bitmap = thumb.asImageBitmap(),
+                        contentDescription = "Page $p",
+                        modifier = Modifier.fillMaxSize().padding(Ds.s4),
+                        contentScale = ContentScale.Fit
+                      )
+                    } else {
+                      Text("…", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
+                    }
+                    if (isSelected) {
+                      Box(
+                        Modifier
+                          .align(Alignment.TopEnd)
+                          .padding(Ds.s4)
+                          .size(22.dp)
+                          .clip(CircleShape)
+                          .background(theme.primary)
+                          .border(1.dp, Color.White, CircleShape),
+                        contentAlignment = Alignment.Center
+                      ) {
+                        Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(14.dp))
+                      }
+                    }
+                  }
+                  Spacer(Modifier.height(Ds.s4))
+                  Text(
+                    "Page $p",
+                    fontSize = Ds.HINT_SP.sp,
+                    color = if (isSelected) theme.text else theme.textSecondary,
+                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                  )
+                }
+              }
+              // Pad a short last row so the cells keep their width.
+              if (rowPages.size < 3) {
+                repeat(3 - rowPages.size) { Spacer(Modifier.weight(1f)) }
+              }
+            }
+          }
+        }
+        if (selectedPages.isEmpty()) {
+          Spacer(Modifier.height(Ds.s8))
+          Text(
+            "No pages selected — tap thumbnails to choose which pages to extract.",
+            fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed
+          )
+        }
       }
 
       Spacer(Modifier.height(Ds.s16))
@@ -1729,7 +1853,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
     SlideToAction(
       label = "Slide to Extract",
       theme = theme,
-      enabled = !isProcessing && pdfUri != null && rangeValid,
+      enabled = !isProcessing && pdfUri != null && rangeValid && effectivePages.isNotEmpty(),
       onSlideComplete = { vibrate(); extract() }
     )
   }

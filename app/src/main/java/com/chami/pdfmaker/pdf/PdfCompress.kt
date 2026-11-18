@@ -167,7 +167,7 @@ object PdfCompress {
       if (target != compressed) {
         try { compressed.delete() } catch (_: Exception) {}
       }
-      ImageCompressResult(true, target, true, mime)
+      ImageCompressResult(true, target, true, mime ?: "image/jpeg")
     } catch (_: Exception) {
       ImageCompressResult(compressed.exists(), compressed, false, "image/jpeg")
     }

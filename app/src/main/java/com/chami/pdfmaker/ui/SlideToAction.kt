@@ -3,6 +3,7 @@ package com.chami.pdfmaker.ui
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +41,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chami.pdfmaker.theme.ChamiTheme
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -87,6 +89,10 @@ fun SlideToAction(
   var dragOffset by remember { mutableFloatStateOf(0f) }
   var lastTickMilestone by remember { mutableIntStateOf(0) }
   var completed by remember { mutableStateOf(false) }
+  // FIX 2026-11-18 (report #45): tapping the track shows this hint
+  // briefly ("Drag the circle") and nudges the thumb part-way, so a
+  // tap is never a dead tap.
+  var showTapHint by remember { mutableStateOf(false) }
 
   val trackColor = if (enabled) ChamiColors.lightGreen else theme.cardBorder
   val thumbColor = if (enabled) ChamiColors.brightGreen else ChamiColors.secondaryText.copy(alpha = 0.6f)
@@ -111,7 +117,23 @@ fun SlideToAction(
         // Half the track height — the track is a pill, so the radius is
         // derived from its height, not a spacing token.
         .clip(RoundedCornerShape(trackHeight / 2))
-        .background(trackColor),
+        .background(trackColor)
+        // FIX 2026-11-18 (report #45): tapping the track/label is not
+        // a dead tap — when enabled it nudges the thumb ~35% toward
+        // the end and shows the "Drag the circle" hint briefly, then
+        // slides back. (When disabled the reason line below already
+        // explains why, so a tap does nothing extra.)
+        .clickable(enabled = enabled) {
+          if (maxOffset > 0f) {
+            showTapHint = true
+            animateOffsetTo(maxOffset * 0.35f)
+            scope.launch {
+              delay(1500)
+              showTapHint = false
+              animateOffsetTo(0f)
+            }
+          }
+        },
       contentAlignment = Alignment.Center
     ) {
       // Green fill that grows behind the thumb as it slides.
@@ -193,6 +215,15 @@ fun SlideToAction(
           modifier = Modifier.size(24.dp)
         )
       }
+    }
+    if (showTapHint && enabled) {
+      Spacer(Modifier.height(Ds.s4))
+      Text(
+        text = "Drag the circle",
+        fontSize = Ds.HINT_SP.sp,
+        lineHeight = (Ds.HINT_SP * 1.4).sp,
+        color = ChamiColors.deepGreen
+      )
     }
     if (!enabled) {
       Spacer(Modifier.height(Ds.s4))

@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -106,6 +108,11 @@ private val CONFETTI_COLORS = listOf(
  * is not supplied, PDFs are counted here with PdfRenderer (off the main
  * thread); non-PDF files show no page line. When [onShare] is not
  * supplied, sharing falls back to [ShareHelper.shareFile].
+ * FIX 2026-11-18: [savedLocationText] — when non-null, the card shows
+ * "Saved to: $savedLocationText" (the folder the user actually picked in
+ * the save picker) instead of the file's parent folder name. [onOpenPdfInReader]
+ * — when non-null and the file is a PDF, Open goes to the inbuilt Reader
+ * instead of [onOpen] (the external viewer).
  */
 @Composable
 fun DoneScreen(
@@ -114,7 +121,9 @@ fun DoneScreen(
   onBackHome: () -> Unit,
   onOpen: (File) -> Unit,
   onShare: ((File) -> Unit)? = null,
-  pageCount: Int? = null
+  pageCount: Int? = null,
+  savedLocationText: String? = null,
+  onOpenPdfInReader: ((File) -> Unit)? = null
 ) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
@@ -189,7 +198,10 @@ fun DoneScreen(
   }
 
   val isPdf = file.extension.lowercase() == "pdf"
-  val folderName = file.parentFile?.name ?: "Chami folder"
+  // FIX 2026-11-18 (#3): show the folder the user actually picked
+  // (savedLocationText) when the caller supplies it; fall back to the
+  // file's parent folder name as before.
+  val folderName = savedLocationText ?: (file.parentFile?.name ?: "Chami folder")
   val pages = countedPages
   val fileMeta = buildString {
     append(formatFileSize(file.length()))
@@ -201,6 +213,8 @@ fun DoneScreen(
     modifier = Modifier
       .fillMaxSize()
       .background(theme.bg)
+      .statusBarsPadding()
+      .navigationBarsPadding()
       .padding(horizontal = Ds.s16, vertical = Ds.s16),
     horizontalAlignment = Alignment.CenterHorizontally
   ) {
@@ -340,8 +354,12 @@ fun DoneScreen(
     Spacer(Modifier.weight(1f))
 
     // Actions, in spec order: Open / Share / Done (max 3).
+    // FIX 2026-11-18 (#4): a PDF opens in the inbuilt Reader when the
+    // caller supplies onOpenPdfInReader; otherwise Open behaves as before.
     Button(
-      onClick = { onOpen(file) },
+      onClick = {
+        if (isPdf && onOpenPdfInReader != null) onOpenPdfInReader(file) else onOpen(file)
+      },
       modifier = Modifier
         .fillMaxWidth()
         .height(Ds.primaryButtonHeight),

@@ -396,6 +396,10 @@ fun CropEditorDialog(
   // Free clears it. Straighten mode ignores it (corners move freely).
   var activeRatio by remember(bitmap) { mutableStateOf<Float?>(null) }
   val density = LocalDensity.current
+  // PERFORMANCE: wrap the bitmap once — every drag frame recomposes this
+  // dialog, and asImageBitmap() on every frame (main image + loupe) made
+  // the crop drag stutter on low-end phones.
+  val imageBitmap = remember(bitmap) { bitmap.asImageBitmap() }
 
   // Apply for the current mode: CUT by default, warp only in Straighten.
   fun applyCurrentMode(): Bitmap =
@@ -525,21 +529,38 @@ fun CropEditorDialog(
           }
           val ratio = activeRatio
           if (ratio != null) {
-            var w = r - l
-            var h = w / ratio
-            val availH = if (corner == 0 || corner == 1) b else 1f - t
-            if (h > availH) {
-              h = availH.coerceAtLeast(minSide)
-              w = h * ratio
-              when (corner) {
-                0, 3 -> l = r - w
-                else -> r = l + w
-              }
+            // FIX: same fraction-vs-pixel ratio bug as RectCropDialog —
+            // the crop's real ratio is (w*W)/(h*H) = (w/h)*imgAspect, so
+            // in fraction space the frame must keep w/h = ratio/imgAspect.
+            // The old code drove height from width only (h = w/ratio), so
+            // a mostly-vertical shrink barely moved the frame and the
+            // corner detached from the finger. Now the axis the finger
+            // moved most drives the resize, anchored at the opposite
+            // corner, so the ratio stays locked and the corner tracks the
+            // finger when shrinking, in both directions.
+            val imgAspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+            val fracRatio = ratio / imgAspect
+            val anchorX = if (corner == 0 || corner == 3) r else l
+            val anchorY = if (corner == 0 || corner == 1) b else t
+            val movesLeft = corner == 0 || corner == 3
+            val movesTop = corner == 0 || corner == 1
+            val availW = if (movesLeft) anchorX else 1f - anchorX
+            val availH = if (movesTop) anchorY else 1f - anchorY
+            val widthDriven = kotlin.math.abs(fx) >= kotlin.math.abs(fy) * fracRatio
+            val w: Float; val h: Float
+            if (widthDriven) {
+              val maxW = minOf(availW, availH * fracRatio).coerceAtLeast(minSide)
+              w = (r - l).coerceIn(minSide, maxW)
+              h = w / fracRatio
+            } else {
+              val maxH = minOf(availH, availW / fracRatio).coerceAtLeast(minSide)
+              h = (b - t).coerceIn(minSide, maxH)
+              w = h * fracRatio
             }
-            when (corner) {
-              0, 1 -> t = (b - h).coerceIn(0f, b - minSide)
-              else -> b = (t + h).coerceIn(t + minSide, 1f)
-            }
+            l = if (movesLeft) anchorX - w else anchorX
+            r = l + w
+            t = if (movesTop) anchorY - h else anchorY
+            b = t + h
           }
           cropRect = Rect(l, t, r, b)
           quad = quadFromRect(cropRect)
@@ -560,18 +581,23 @@ fun CropEditorDialog(
           }
           val ratio = activeRatio
           if (ratio != null) {
+            // Same fraction-vs-pixel fix as moveRectCorner: the frame must
+            // keep w/h = ratio/imgAspect in fraction space. Also fixed:
+            // clamping w/h to 1f without recomputing the other side broke
+            // the ratio at the image edge.
+            val fracRatio = ratio / (bitmap.width.toFloat() / bitmap.height.toFloat())
             if (edge == 0 || edge == 2) {
-              val h = b - t
-              var w = h * ratio
+              var h = b - t
+              var w = h * fracRatio
               val cx = (l + r) / 2f
-              if (w > 1f) { w = 1f }
+              if (w > 1f) { w = 1f; h = w / fracRatio }
               l = (cx - w / 2f).coerceIn(0f, 1f - w)
               r = l + w
             } else {
-              val w = r - l
-              var h = w / ratio
+              var w = r - l
+              var h = w / fracRatio
               val cy = (t + b) / 2f
-              if (h > 1f) { h = 1f }
+              if (h > 1f) { h = 1f; w = h * fracRatio }
               t = (cy - h / 2f).coerceIn(0f, 1f - h)
               b = t + h
             }
@@ -648,7 +674,7 @@ fun CropEditorDialog(
             }
         ) {
           Image(
-            bitmap = bitmap.asImageBitmap(),
+            bitmap = imageBitmap,
             contentDescription = "Page to crop",
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.FillBounds
@@ -765,7 +791,7 @@ fun CropEditorDialog(
               .border(2.dp, Color.White, CircleShape)
           ) {
             Image(
-              bitmap = bitmap.asImageBitmap(),
+              bitmap = imageBitmap,
               contentDescription = null,
               modifier = Modifier
                 .size(
@@ -799,6 +825,13 @@ fun CropEditorDialog(
         modifier = Modifier.fillMaxWidth()
       ) {
         CROP_RATIOS.forEach { opt ->
+          // FIX: the locked ratio's chip stays highlighted (filled with the
+          // theme colour) while a corner/edge is dragged — before, every
+          // chip looked identical, so there was no visible lock state.
+          // "Original" locks to the image's real aspect (opt.ratio is null
+          // for Original, so the image's own width/height is used).
+          val effRatio = opt.ratio ?: (bitmap.width.toFloat() / bitmap.height.toFloat())
+          val selected = if (opt.free) activeRatio == null else activeRatio == effRatio
           OutlinedButton(
             onClick = {
               if (opt.free) {
@@ -806,21 +839,22 @@ fun CropEditorDialog(
               } else {
                 // FIX 2026-11-18 (report #6, verified): "Original" is
                 // NOT the same as "Free" — it locks to the image's real
-                // aspect ratio (opt.ratio is null for Original, so the
-                // image's own width/height is used). "Free" stays
-                // unlocked (activeRatio = null above).
-                val effRatio = opt.ratio ?: (bitmap.width.toFloat() / bitmap.height.toFloat())
+                // aspect ratio. "Free" stays unlocked (activeRatio = null
+                // above).
                 activeRatio = effRatio
                 cropRect = ratioRect(effRatio); quad = quadFromRect(cropRect)
               }
             },
             modifier = Modifier.weight(1f).height(Ds.minTouch),
             shape = RoundedCornerShape(Ds.buttonRadius),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.7f)),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+            border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) theme.primary else Color.White.copy(alpha = 0.7f)),
+            colors = ButtonDefaults.outlinedButtonColors(
+              containerColor = if (selected) theme.primary else Color.Transparent,
+              contentColor = if (selected) theme.textOnPrimary else Color.White
+            ),
             contentPadding = PaddingValues(0.dp)
           ) {
-            Text(opt.label, fontFamily = PixelFont, fontSize = Ds.NAV_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text(opt.label, fontFamily = PixelFont, fontSize = Ds.NAV_SP.sp, fontWeight = FontWeight.Bold, color = if (selected) theme.textOnPrimary else Color.White)
           }
         }
       }

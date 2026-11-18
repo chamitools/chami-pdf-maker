@@ -6,7 +6,6 @@
     <string name="simple_tools">FERRAMENTAS SIMPLES</string>
     <string name="smart_tools">FERRAMENTAS INTELIGENTES</string>
     <string name="images_to_pdf">Imagens para PDF</string>
-    <string name="scan_to_pdf">Digitalizar para PDF</string>
     <string name="merge_pdf">Unir PDF</string>
     <string name="split_pdf">Dividir PDF</string>
     <string name="protect_pdf">Proteger PDF</string>

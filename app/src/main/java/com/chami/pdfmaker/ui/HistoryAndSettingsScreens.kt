@@ -7,7 +7,6 @@ import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.painterResource
 import com.chami.pdfmaker.BuildConfig
 import com.chami.pdfmaker.pdf.PdfEngine
 import com.chami.pdfmaker.pdf.PdfReader
@@ -230,7 +229,12 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
 @Composable
 fun HistoryScreen(
   theme: ChamiTheme,
-  onOpenInReader: ((File) -> Unit)? = null,
+  // FIX 2026-11-18 (Fix 9): required, NOT nullable — a PDF tap in
+  // History must ALWAYS open the inbuilt PDF Reader. The old nullable
+  // default silently fell back to an external viewer whenever a caller
+  // forgot the callback; that fallback is gone for PDFs (images still
+  // open externally, the Reader is PDF-only).
+  onOpenInReader: (File) -> Unit,
   listState: LazyListState = rememberLazyListState(),
 ) {
   val ctx = LocalContext.current
@@ -484,7 +488,7 @@ fun HistoryScreen(
           listOf("Newest", "Oldest", "Biggest", "Name").forEach { mode ->
             DropdownMenuItem(
               text = {
-                Text(mode, fontFamily = PixelFont, fontSize = 12.sp, color = theme.text)
+                Text(mode, fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
               },
               onClick = { sortMode = mode; sortMenuOpen = false }
             )
@@ -518,7 +522,7 @@ fun HistoryScreen(
         Text(
           "${selected.size} selected",
           fontFamily = PixelFont,
-          fontSize = 12.sp,
+          fontSize = Ds.HINT_SP.sp,
           fontWeight = FontWeight.Bold,
           color = theme.text,
           modifier = Modifier.weight(1f)
@@ -536,7 +540,7 @@ fun HistoryScreen(
           shape = RoundedCornerShape(8.dp),
           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
         ) {
-          Text("SHARE", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          Text("SHARE", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
         Button(
           onClick = {
@@ -547,10 +551,10 @@ fun HistoryScreen(
           shape = RoundedCornerShape(8.dp),
           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
         ) {
-          Text("DELETE", fontFamily = PixelFont, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+          Text("DELETE", fontFamily = PixelFont, color = Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
         TextButton(onClick = { selected = emptySet() }) {
-          Text("CANCEL", fontFamily = PixelFont, fontSize = 11.sp, color = theme.text)
+          Text("CANCEL", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
         }
       }
     }
@@ -601,7 +605,7 @@ fun HistoryScreen(
             if (query.isNotBlank() || filter != "All") "No files match this search or filter."
             else "Created PDFs, scans, and converted files will appear here.",
             fontFamily = PixelFont,
-            fontSize = 12.sp,
+            fontSize = Ds.HINT_SP.sp,
             color = theme.textSecondary,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
           )
@@ -658,7 +662,7 @@ fun HistoryScreen(
                       if (multiSelect) {
                         selected = if (isSel) selected - file.absolutePath
                         else selected + file.absolutePath
-                      } else if (isPdf && onOpenInReader != null) {
+                      } else if (isPdf) {
                         // Tap opens the file in the inbuilt PDF Reader.
                         onOpenInReader(file)
                       } else {
@@ -737,7 +741,7 @@ fun HistoryScreen(
                       onDismissRequest = { menuFor = null }
                     ) {
                       DropdownMenuItem(
-                        text = { Text("Rename", fontFamily = PixelFont, fontSize = 12.sp, color = theme.text) },
+                        text = { Text("Rename", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
                         onClick = {
                           menuFor = null
                           renameText = file.nameWithoutExtension
@@ -745,22 +749,22 @@ fun HistoryScreen(
                         }
                       )
                       DropdownMenuItem(
-                        text = { Text("Share", fontFamily = PixelFont, fontSize = 12.sp, color = theme.text) },
+                        text = { Text("Share", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
                         onClick = {
                           menuFor = null
                           ShareHelper.shareFile(ctx, file, mime)
                         }
                       )
                       DropdownMenuItem(
-                        text = { Text("Open", fontFamily = PixelFont, fontSize = 12.sp, color = theme.text) },
+                        text = { Text("Open", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
                         onClick = {
                           menuFor = null
-                          if (isPdf && onOpenInReader != null) onOpenInReader(file)
+                          if (isPdf) onOpenInReader(file)
                           else ShareHelper.openFile(ctx, file, mime)
                         }
                       )
                       DropdownMenuItem(
-                        text = { Text("Delete", fontFamily = PixelFont, fontSize = 12.sp, color = MaterialTheme.colorScheme.error) },
+                        text = { Text("Delete", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = MaterialTheme.colorScheme.error) },
                         onClick = { menuFor = null; fileToDelete = file }
                       )
                     }
@@ -785,7 +789,7 @@ fun HistoryScreen(
             },
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
           ) {
-            Text("DELETE", fontFamily = PixelFont, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("DELETE", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
           }
         },
         dismissButton = {
@@ -794,13 +798,13 @@ fun HistoryScreen(
           }
         },
         title = {
-          Text("Delete Document?", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+          Text("Delete Document?", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
         },
         text = {
           Text(
             "Permanently delete \"${fileToDelete?.name}\"? This action cannot be undone.",
             fontFamily = PixelFont,
-            fontSize = 13.sp,
+            fontSize = Ds.BODY_SP.sp,
             color = theme.textSecondary
           )
         }
@@ -816,7 +820,7 @@ fun HistoryScreen(
             onClick = { vibrate(); deleteFiles(filesToDelete) },
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
           ) {
-            Text("DELETE ${filesToDelete.size}", fontFamily = PixelFont, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("DELETE ${filesToDelete.size}", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
           }
         },
         dismissButton = {
@@ -825,13 +829,13 @@ fun HistoryScreen(
           }
         },
         title = {
-          Text("Delete ${filesToDelete.size} files?", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+          Text("Delete ${filesToDelete.size} files?", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
         },
         text = {
           Text(
             "These files will be permanently deleted. This action cannot be undone.",
             fontFamily = PixelFont,
-            fontSize = 13.sp,
+            fontSize = Ds.BODY_SP.sp,
             color = theme.textSecondary
           )
         }
@@ -863,7 +867,7 @@ fun HistoryScreen(
             },
             colors = ButtonDefaults.buttonColors(containerColor = theme.primary)
           ) {
-            Text("RENAME", fontFamily = PixelFont, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("RENAME", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
           }
         },
         dismissButton = {
@@ -872,7 +876,7 @@ fun HistoryScreen(
           }
         },
         title = {
-          Text("Rename file", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+          Text("Rename file", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
         },
         text = {
           OutlinedTextField(
@@ -1085,64 +1089,11 @@ fun SettingsScreen(
       color = theme.text
     )
 
-    Spacer(Modifier.height(Ds.s16))
-
-    // Profile header: panda logo, CHAMI PRO, version. No share card —
-    // sharing lives on the Done screen and in History.
-    Row(
-      Modifier
-        .fillMaxWidth()
-        .clip(RoundedCornerShape(Ds.tileRadius))
-        .background(theme.card)
-        .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
-        .padding(Ds.s16),
-      verticalAlignment = Alignment.CenterVertically
-    ) {
-      Image(
-        painter = painterResource(id = com.chami.pdfmaker.R.drawable.chami_logo_asset),
-        contentDescription = "Chami panda logo",
-        modifier = Modifier.size(40.dp),
-        contentScale = ContentScale.Fit
-      )
-      Spacer(Modifier.width(Ds.s12))
-      Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Text(
-            "CHAMI",
-            fontFamily = PixelFont,
-            fontWeight = FontWeight.ExtraBold,
-            fontSize = (Ds.TITLE_SP * fontScale).sp,
-            lineHeight = (Ds.TITLE_SP * 1.4 * fontScale).sp,
-            color = theme.text
-          )
-          Spacer(Modifier.width(6.dp))
-          Box(
-            Modifier
-              .clip(RoundedCornerShape(4.dp))
-              .background(theme.primary)
-              .padding(horizontal = 5.dp, vertical = 1.dp)
-          ) {
-            Text(
-              "PRO",
-              fontFamily = PixelFont,
-              fontWeight = FontWeight.Bold,
-              fontSize = (10 * fontScale).sp,
-              color = theme.textOnPrimary
-            )
-          }
-        }
-        Text(
-          "Professional PDF Toolkit",
-          fontSize = (Ds.HINT_SP * fontScale).sp,
-          color = theme.textSecondary
-        )
-        Text(
-          "Version ${BuildConfig.VERSION_NAME}",
-          fontSize = (Ds.HINT_SP * fontScale).sp,
-          color = theme.textSecondary
-        )
-      }
-    }
+    // FIX 2026-11-18 (Fix 8): the duplicate CHAMI PRO header card is
+    // REMOVED. CHAMI PRO now appears exactly once in Settings: the top
+    // header above the tabs (MainActivity — panda logo + CHAMI + green
+    // PRO pill + "Professional PDF Toolkit"). The version shown here
+    // also lives in the About card below, so nothing is lost.
 
     // ---- General ----
     SectionHeading("General")
@@ -1239,7 +1190,7 @@ fun SettingsScreen(
         }
       },
       title = {
-        Text(LocaleHelper.t(ctx, "language"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+        Text(LocaleHelper.t(ctx, "language"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
       },
       text = {
         Column {
@@ -1286,7 +1237,7 @@ fun SettingsScreen(
         }
       },
       title = {
-        Text(LocaleHelper.t(ctx, "font_size"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+        Text(LocaleHelper.t(ctx, "font_size"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
       },
       text = {
         Column {
@@ -1372,7 +1323,7 @@ fun SettingsScreen(
           if (pinStep == 0) "Set a 4-digit PIN" else "Enter the PIN again",
           fontFamily = PixelFont,
           fontWeight = FontWeight.Bold,
-          fontSize = 17.sp
+          fontSize = Ds.SECTION_SP.sp
         )
       },
       text = {
@@ -1465,7 +1416,7 @@ fun SettingsScreen(
         }
       },
       title = {
-        Text("Check for Updates", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+        Text("Check for Updates", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
       },
       text = {
         Text(
@@ -1490,7 +1441,7 @@ fun SettingsScreen(
         }
       },
       title = {
-        Text("About", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+        Text("About", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
       },
       text = {
         Column {

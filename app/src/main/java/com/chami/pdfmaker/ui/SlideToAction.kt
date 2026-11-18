@@ -31,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -153,7 +154,13 @@ fun SlideToAction(
         fontSize = Ds.BUTTON_SP.sp,
         fontWeight = FontWeight.SemiBold,
         lineHeight = (Ds.BUTTON_SP * 1.4).sp,
-        color = labelColor
+        color = labelColor,
+        // UI OVERHAUL 2026-11-18: the label used to sit under the
+        // sliding thumb and read as overlapped text — it now fades
+        // (GPU alpha only) as the thumb covers it.
+        modifier = Modifier.graphicsLayer {
+          alpha = 1f - (dragOffset / maxOffset.coerceAtLeast(1f)) * 0.75f
+        }
       )
       Box(
         modifier = Modifier

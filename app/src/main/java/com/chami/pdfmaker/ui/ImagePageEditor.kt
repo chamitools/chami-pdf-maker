@@ -1018,14 +1018,14 @@ fun PageList(
                 .border(1.dp, Color.White, CircleShape),
               contentAlignment = Alignment.Center
             ) {
-              Text("✓", fontFamily = PixelFont, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+              Text("✓", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
             }
           }
         }
         Spacer(Modifier.height(4.dp))
-        Text("Page ${index + 1}", fontFamily = PixelFont, fontSize = 10.sp, color = theme.text)
+        Text("Page ${index + 1}", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
         if (page.cropped) {
-          Text("Edited", fontFamily = PixelFont, fontSize = 9.sp, color = theme.primary)
+          Text("Edited", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.primary)
         }
       }
     }
@@ -1041,7 +1041,7 @@ fun PageList(
           .clickable { onAddPages() },
         contentAlignment = Alignment.Center
       ) {
-        Text("+", fontFamily = PixelFont, fontSize = 36.sp, fontWeight = FontWeight.Bold, color = theme.primaryDark)
+        Text("+", fontFamily = PixelFont, fontSize = Ds.WORDMARK_SP.sp, fontWeight = FontWeight.Bold, color = theme.primaryDark)
       }
     }
   }

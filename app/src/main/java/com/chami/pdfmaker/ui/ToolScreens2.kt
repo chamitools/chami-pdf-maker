@@ -1893,7 +1893,7 @@ fun PdfReaderScreen(
   }
 
   if (showGoToPage) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showGoToPage = false },
       title = { Text("Go to page", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
       text = {
@@ -1922,7 +1922,7 @@ fun PdfReaderScreen(
   // Bookmarks dialog (opened from the three-dot menu): tap a page to
   // jump to it, X to delete the bookmark.
   if (showBookmarksDialog) {
-    AlertDialog(
+    ChamiAlertDialog(theme,
       onDismissRequest = { showBookmarksDialog = false },
       title = { Text("Bookmarks", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
       text = {
@@ -2043,7 +2043,7 @@ fun PdfReaderScreen(
               onValueChange = { searchQuery = it },
               label = { Text("Search text in PDF", fontSize = Ds.HINT_SP.sp) },
               singleLine = true,
-              modifier = Modifier.weight(1f).height(52.dp),
+              modifier = Modifier.weight(1f).height(Ds.primaryButtonHeight),
               shape = RoundedCornerShape(Ds.s8)
             )
             ChamiIconButton(
@@ -2094,23 +2094,32 @@ fun PdfReaderScreen(
         // list, page after page — no page-by-page flipping, no Prev /
         // Next buttons, no page-number strip.
         if (pdfLoadFailed) {
-          // FIX 2026-11-18 (report #24): a protected/corrupt PDF
-          // shows this error with a way out — never an infinite
-          // spinner.
+          // FIX 2026-11-18 (report #24) + UI OVERHAUL 2026-11-18: a
+          // protected/corrupt PDF shows a friendly banner with a way
+          // out — never an infinite spinner.
           Column(
             Modifier.weight(1f).fillMaxWidth(),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
           ) {
-            Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = ChamiColors.errorRed, modifier = Modifier.size(48.dp))
-            Spacer(Modifier.height(Ds.s16))
-            Text(UNOPENABLE_PDF_MESSAGE, fontSize = Ds.BODY_SP.sp, color = theme.text)
+            ChamiErrorBanner(
+              theme = theme,
+              title = "Couldn't open this file",
+              message = UNOPENABLE_PDF_MESSAGE
+            )
             Spacer(Modifier.height(Ds.s16))
             ChamiPrimaryButton(text = "Back", onClick = { vibrate(); onBack() }, modifier = Modifier.fillMaxWidth())
           }
         } else if (totalPages == 0) {
-          Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = theme.primary)
+          // UI OVERHAUL 2026-11-18: skeleton page + label instead of a
+          // bare spinner on a blank screen while the document opens.
+          Column(
+            Modifier.weight(1f).fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+          ) {
+            PageSkeletonLoader()
+            Spacer(Modifier.height(Ds.s16))
+            Text("Opening document…", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
           }
         } else {
           LazyColumn(
@@ -2119,7 +2128,9 @@ fun PdfReaderScreen(
             verticalArrangement = Arrangement.spacedBy(Ds.s12),
             contentPadding = PaddingValues(vertical = Ds.s8)
           ) {
-            items(totalPages) { idx ->
+            // UI OVERHAUL 2026-11-18: keyed items so scroll position
+            // and per-page state survive recomposition.
+            items(totalPages, key = { it }) { idx ->
               ReaderPageView(
                 theme = theme,
                 uri = pdfUri!!,
@@ -2219,10 +2230,13 @@ private fun ReaderPageView(
       contentAlignment = Alignment.Center
     ) {
       val shown = bmp
+      // PERFORMANCE (UI overhaul): wrap once — this page recomposes on
+      // every zoom/pan frame and re-wrapping the bitmap each time
+      // dropped frames on low-end phones.
+      val shownImage = remember(shown) { shown?.asImageBitmap() }
       if (shown == null) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1f / 1.414f), contentAlignment = Alignment.Center) {
-          CircularProgressIndicator(color = theme.primary)
-        }
+        // UI OVERHAUL 2026-11-18: skeleton page instead of a bare spinner.
+        PageSkeletonLoader(Modifier.fillMaxWidth())
       } else {
         val nightFilter = if (isNightMode) {
           androidx.compose.ui.graphics.ColorFilter.colorMatrix(
@@ -2237,7 +2251,7 @@ private fun ReaderPageView(
           )
         } else null
         Image(
-          bitmap = shown.asImageBitmap(),
+          bitmap = shownImage!!,
           contentDescription = "Page ${pageIndex + 1}",
           colorFilter = nightFilter,
           modifier = Modifier

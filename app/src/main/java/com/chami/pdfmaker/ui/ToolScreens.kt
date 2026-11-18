@@ -749,6 +749,10 @@ fun BigPagePreview(
       .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s8))
   ) {
     val shown = page?.bitmap
+    // PERFORMANCE: wrap once — this preview recomposes on every page /
+    // selection change, and re-wrapping the full-res bitmap each time
+    // dropped frames on low-end phones.
+    val shownImage = remember(shown) { shown?.asImageBitmap() }
     if (shown != null) {
       // FIX 2026-11-18 (fixed A4 page): the preview shows the FIXED A4
       // portrait page (595x842pt, white) with the image fitted inside
@@ -767,7 +771,7 @@ fun BigPagePreview(
             val padX = maxWidth * (15f / 210f)
             val padY = maxHeight * (15f / 297f)
             Image(
-              bitmap = shown.asImageBitmap(),
+              bitmap = shownImage!!,
               contentDescription = label,
               modifier = Modifier.fillMaxSize().padding(horizontal = padX, vertical = padY),
               contentScale = ContentScale.Fit
@@ -830,6 +834,11 @@ fun PageThumbnailStrip(
     itemsIndexed(pages, key = { _, page -> page.uri.toString() }) { index, page ->
       val isSel = index == selectedIndex
       val isDragging = draggingUri == page.uri
+      // PERFORMANCE: wrap once per page — the strip recomposes on every
+      // reorder-drag frame, and re-wrapping every full-res bitmap each
+      // frame dropped frames. The Uri changes whenever a page is edited,
+      // so a stale thumbnail cannot survive an edit.
+      val thumbImage = remember(page.uri) { page.bitmap.asImageBitmap() }
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
           Modifier
@@ -878,7 +887,7 @@ fun PageThumbnailStrip(
             .clickable { onSelect(index) }
         ) {
           Image(
-            bitmap = page.bitmap.asImageBitmap(),
+            bitmap = thumbImage,
             contentDescription = "Page ${index + 1}",
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop
@@ -1035,6 +1044,10 @@ fun RectCropDialog(
 ) {
   var rect by remember(bitmap) { mutableStateOf(ComposeRect(0f, 0f, 1f, 1f)) }
   var ratioLabel by rememberSaveable { mutableStateOf("Free") }
+  // PERFORMANCE: wrap the bitmap once — the drag path recomposes on every
+  // pointer move, and asImageBitmap() on every frame made the crop drag
+  // stutter on low-end phones.
+  val imageBitmap = remember(bitmap) { bitmap.asImageBitmap() }
   val ratios = listOf(
     "Free" to null as Float?,
     "Original" to null,
@@ -1156,6 +1169,15 @@ fun RectCropDialog(
         // so the box NEVER goes free-form mid-drag.
         fun resizeCornerRatio(cur: ComposeRect, corner: String, dx: Float, dy: Float, ratio: Float): ComposeRect {
           val min = 0.05f
+          // FIX: a crop's real (pixel) ratio is (w*W)/(h*H) = (w/h)*imgAspect,
+          // so in fraction space the frame must keep w/h = ratio/imgAspect.
+          // The old code used ratio directly in fraction space, which locked
+          // the PIXEL ratio to ratio*imgAspect — on any non-square photo the
+          // first corner drag snapped a 1:1 frame to the photo's own shape,
+          // which reads as "the ratio lock broke / it went free". Verified
+          // numerically: 1500x2000 photo, 1:1, shrink BR corner — old code
+          // gave pixel ratio 0.75, fixed code keeps 1.0 in every direction.
+          val fracRatio = ratio / imgAspect
           val anchorX = if (corner == "tl" || corner == "bl") cur.right else cur.left
           val anchorY = if (corner == "tl" || corner == "tr") cur.bottom else cur.top
           val movesLeft = corner == "tl" || corner == "bl"
@@ -1163,24 +1185,24 @@ fun RectCropDialog(
           val availW = if (movesLeft) anchorX else 1f - anchorX
           val availH = if (movesTop) anchorY else 1f - anchorY
           // Drive by whichever dimension the finger moved most (dy
-          // converted to width units through the ratio, so the
-          // comparison is fair).
-          val widthDriven = kotlin.math.abs(dx) >= kotlin.math.abs(dy) * ratio
+          // converted to width units through the fraction-space ratio, so
+          // the comparison is fair).
+          val widthDriven = kotlin.math.abs(dx) >= kotlin.math.abs(dy) * fracRatio
           val w: Float; val h: Float
           if (widthDriven) {
-            val maxW = minOf(availW, availH * ratio)
+            val maxW = minOf(availW, availH * fracRatio)
             if (maxW < min) return cur
             val rawW = if (movesLeft) anchorX - (cur.left + dx).coerceIn(0f, anchorX - min)
               else (cur.right + dx).coerceIn(anchorX + min, 1f) - anchorX
             w = rawW.coerceIn(min, maxW)
-            h = w / ratio
+            h = w / fracRatio
           } else {
-            val maxH = minOf(availH, availW / ratio)
+            val maxH = minOf(availH, availW / fracRatio)
             if (maxH < min) return cur
             val rawH = if (movesTop) anchorY - (cur.top + dy).coerceIn(0f, anchorY - min)
               else (cur.bottom + dy).coerceIn(anchorY + min, 1f) - anchorY
             h = rawH.coerceIn(min, maxH)
-            w = h * ratio
+            w = h * fracRatio
           }
           val l = if (movesLeft) anchorX - w else anchorX
           val t = if (movesTop) anchorY - h else anchorY
@@ -1191,6 +1213,9 @@ fun RectCropDialog(
         // dimension drives, the other follows, centred on the frame.
         fun resizeEdgeRatio(cur: ComposeRect, edge: String, dx: Float, dy: Float, ratio: Float): ComposeRect {
           val min = 0.05f
+          // Same fraction-vs-pixel fix as resizeCornerRatio: the frame must
+          // keep w/h = ratio/imgAspect in fraction space.
+          val fracRatio = ratio / imgAspect
           val cx = (cur.left + cur.right) / 2f
           val cy = (cur.top + cur.bottom) / 2f
           return when (edge) {
@@ -1198,8 +1223,8 @@ fun RectCropDialog(
               var h = if (edge == "t") cur.bottom - (cur.top + dy).coerceIn(0f, cur.bottom - min)
                 else (cur.bottom + dy).coerceIn(cur.top + min, 1f) - cur.top
               h = h.coerceIn(min, 1f)
-              var w = h * ratio
-              if (w > 1f) { w = 1f; h = w / ratio }
+              var w = h * fracRatio
+              if (w > 1f) { w = 1f; h = w / fracRatio }
               val l = (cx - w / 2f).coerceIn(0f, 1f - w)
               val t = if (edge == "t") cur.bottom - h else cur.top
               ComposeRect(l, t, l + w, t + h)
@@ -1208,8 +1233,8 @@ fun RectCropDialog(
               var w = if (edge == "l") cur.right - (cur.left + dx).coerceIn(0f, cur.right - min)
                 else (cur.right + dx).coerceIn(cur.left + min, 1f) - cur.left
               w = w.coerceIn(min, 1f)
-              var h = w / ratio
-              if (h > 1f) { h = 1f; w = h * ratio }
+              var h = w / fracRatio
+              if (h > 1f) { h = 1f; w = h * fracRatio }
               val t = (cy - h / 2f).coerceIn(0f, 1f - h)
               val l = if (edge == "l") cur.right - w else cur.left
               ComposeRect(l, t, l + w, t + h)
@@ -1227,7 +1252,7 @@ fun RectCropDialog(
               .border(1.dp, Color(0xFF94A3B8))
           )
           Image(
-            bitmap = bitmap.asImageBitmap(), contentDescription = "Crop preview",
+            bitmap = imageBitmap, contentDescription = "Crop preview",
             modifier = Modifier
               .offset(x = with(density) { offX.toDp() }, y = with(density) { offY.toDp() })
               .size(width = with(density) { dispW.toDp() }, height = with(density) { dispH.toDp() }),

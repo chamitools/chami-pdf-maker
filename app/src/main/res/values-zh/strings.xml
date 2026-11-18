@@ -6,7 +6,6 @@
     <string name="simple_tools">简单工具</string>
     <string name="smart_tools">智能工具</string>
     <string name="images_to_pdf">图片转 PDF</string>
-    <string name="scan_to_pdf">扫描转 PDF</string>
     <string name="merge_pdf">合并 PDF</string>
     <string name="split_pdf">拆分 PDF</string>
     <string name="protect_pdf">保护 PDF</string>

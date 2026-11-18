@@ -1,5 +1,10 @@
 package com.chami.pdfmaker.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -7,14 +12,20 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -22,17 +33,22 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.chami.pdfmaker.theme.ChamiTheme
 
 /** Executive Emerald — exact spec §2 values (the only theme). */
 object ChamiColors {
@@ -111,9 +127,15 @@ fun PixelTitle(text: String, sizeSp: Int = Ds.TITLE_SP, color: Color = ChamiColo
 }
 
 @Composable
-fun TitleText(text: String, color: Color = ChamiColors.deepGreen) {
+fun TitleText(
+    text: String,
+    color: Color = ChamiColors.deepGreen,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE
+) {
     Text(text, fontSize = Ds.TITLE_SP.sp, fontWeight = FontWeight.Bold,
-        lineHeight = (Ds.TITLE_SP * 1.4).sp, color = color)
+        lineHeight = (Ds.TITLE_SP * 1.4).sp, color = color,
+        modifier = modifier, maxLines = maxLines, overflow = TextOverflow.Ellipsis)
 }
 
 @Composable
@@ -247,5 +269,123 @@ fun PreviewActionButton(icon: ImageVector, description: String, onClick: () -> U
                 .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(4.dp))
                 .padding(horizontal = Ds.s4)
         )
+    }
+}
+
+/**
+ * UI OVERHAUL 2026-11-18 (Indus Appstore): every dialog in the app
+ * goes through here instead of a bare Material3 AlertDialog, so no
+ * dialog ever shows the default system look (grey container, 28dp
+ * corners). Same slots as AlertDialog — the only differences are the
+ * branded container (theme card), the 16dp dialog radius and zero
+ * tonal elevation. Behaviour and call-site logic are unchanged.
+ */
+@Composable
+fun ChamiAlertDialog(
+    theme: ChamiTheme,
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: (@Composable () -> Unit)? = null,
+    title: (@Composable () -> Unit)? = null,
+    text: (@Composable () -> Unit)? = null
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = confirmButton,
+        dismissButton = dismissButton,
+        title = title,
+        text = text,
+        shape = RoundedCornerShape(Ds.dialogRadius),
+        containerColor = theme.card,
+        tonalElevation = 0.dp
+    )
+}
+
+/**
+ * UI OVERHAUL 2026-11-18 (Indus Appstore): friendly inline error
+ * banner — an icon + plain-language message + optional action — used
+ * wherever a failure used to be a bare Toast or a silent no-op, so
+ * the user always sees what went wrong and what to do next.
+ */
+@Composable
+fun ChamiErrorBanner(
+    theme: ChamiTheme,
+    title: String,
+    message: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Ds.tileRadius))
+            .background(Color(0xFFFEE2E2))
+            .border(1.dp, Color(0xFFFECACA), RoundedCornerShape(Ds.tileRadius))
+            .padding(Ds.s16),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Filled.ErrorOutline,
+            contentDescription = null,
+            tint = ChamiColors.errorRed,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(Modifier.width(Ds.s12))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(Ds.s4))
+            Text(message, fontSize = Ds.HINT_SP.sp, lineHeight = (Ds.HINT_SP * 1.4).sp, color = theme.textSecondary)
+        }
+        if (actionLabel != null && onAction != null) {
+            Spacer(Modifier.width(Ds.s12))
+            ChamiSecondaryButton(text = actionLabel, onClick = onAction, modifier = Modifier.defaultMinSize(minHeight = Ds.minTouch))
+        }
+    }
+}
+
+/**
+ * UI OVERHAUL 2026-11-18 (Indus Appstore): skeleton loader shaped
+ * like an A4 page — used instead of a bare spinner while a document
+ * or page renders, so loading never looks like a blank white screen.
+ * The pulse is a GPU alpha animation only (no layout work per frame).
+ */
+@Composable
+fun PageSkeletonLoader(modifier: Modifier = Modifier) {
+    val pulse by rememberInfiniteTransition(label = "skeleton").animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.7f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "skeletonAlpha"
+    )
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(1f / 1.414f)
+            .clip(RoundedCornerShape(Ds.s8))
+            .background(Color(0xFFEDF2F7)),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(Modifier.height(Ds.s24))
+        Box(
+            Modifier
+                .fillMaxWidth(0.7f)
+                .height(Ds.s12)
+                .graphicsLayer { alpha = pulse }
+                .clip(RoundedCornerShape(Ds.s4))
+                .background(Color(0xFFCBD5E1))
+        )
+        Spacer(Modifier.height(Ds.s12))
+        repeat(4) {
+            Box(
+                Modifier
+                    .fillMaxWidth(0.85f)
+                    .height(Ds.s8)
+                    .graphicsLayer { alpha = pulse }
+                    .clip(RoundedCornerShape(Ds.s4))
+                    .background(Color(0xFFCBD5E1))
+            )
+            Spacer(Modifier.height(Ds.s8))
+        }
     }
 }

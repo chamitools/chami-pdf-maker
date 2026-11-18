@@ -869,8 +869,9 @@ fun CropEditorDialog(
   }
 }
 
-// Shared page list used by BOTH Images to PDF and Scan to PDF, so the
-// behaviour is identical in both tools. Phase 6 reorder:
+// Shared page list (currently unused — no screen calls it since Scan
+// to PDF was removed; kept because it compiles and may be reused).
+// Phase 6 reorder:
 // - NO "PREVIEW (X PAGES):" header, NO "Hold a page, then drag it to
 //   move it." line, NO drag handle, NO arrow buttons, NO CROP/REMOVE
 //   buttons on the cards (crop/delete/filter/adjust now live as icons

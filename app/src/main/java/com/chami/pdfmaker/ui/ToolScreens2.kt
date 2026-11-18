@@ -26,10 +26,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -58,6 +62,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -67,6 +72,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -1872,9 +1878,14 @@ fun PdfReaderScreen(
 
 // One page of the continuous reader: renders lazily at the given
 // scale and caches the bitmap (at most 12 pages kept, farthest from
-// the viewed page evicted first). Pinch-zoom only engages while the
-// page is already zoomed, so vertical scrolling works at 100%;
-// double-tap toggles zoom, Fit in the ⋮ menu resets it.
+// the viewed page evicted first). FIX 2026-11-18 (Fix 10): pinch zoom
+// works from 100% — the old code only attached its gesture detector
+// while already zoomed (pointerInput(zoom > 1f)), so a two-finger
+// pinch at 100% did nothing. The new detector is always on: two
+// fingers down = pinch (takes priority over the list scroll, zoom is
+// centred on the fingers); one finger while zoomed = pan the page;
+// one finger at 100% = not consumed, so the list scrolls normally.
+// Double-tap still toggles zoom, Fit in the ⋮ menu still resets it.
 @Composable
 private fun ReaderPageView(
   theme: ChamiTheme,
@@ -1889,6 +1900,12 @@ private fun ReaderPageView(
   val ctx = LocalContext.current
   var bmp by remember(uri, pageIndex) { mutableStateOf<Bitmap?>(cache[pageIndex]) }
   var pan by remember { mutableStateOf(Offset.Zero) }
+  var pageSize by remember { mutableStateOf(IntSize.Zero) }
+  // FIX 2026-11-18 (Fix 10): pointerInput blocks run once and capture
+  // stale values — the old code read the `zoom` parameter inside them,
+  // so pinch math (and the double-tap toggle) used the zoom from first
+  // composition. Read the live zoom through rememberUpdatedState.
+  val currentZoom by rememberUpdatedState(zoom)
   LaunchedEffect(uri, pageIndex, scale) {
     cache[pageIndex]?.let { bmp = it; return@LaunchedEffect }
     val rendered = withContext(Dispatchers.IO) { PdfReader.renderPageBitmap(ctx, uri, pageIndex, scale) }
@@ -1937,26 +1954,79 @@ private fun ReaderPageView(
           modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(shown.width.toFloat() / shown.height.toFloat())
+            .onSizeChanged { pageSize = it }
             .graphicsLayer(
               scaleX = zoom,
               scaleY = zoom,
               translationX = pan.x,
               translationY = pan.y
             )
-            .pointerInput(zoom > 1f) {
-              if (zoom > 1f) {
-                detectTransformGestures { _, panChange, zoomChange, _ ->
-                  val z = (zoom * zoomChange).coerceIn(1f, 5f)
-                  onZoomChange(z)
-                  pan += panChange
-                  if (z == 1f) pan = Offset.Zero
-                }
+            // FIX 2026-11-18 (Fix 10): pinch zoom, always on. Two
+            // fingers = pinch (consumed, so the LazyColumn cannot
+            // scroll underneath); one finger while zoomed = pan the
+            // page (consumed); one finger at 100% = left unconsumed
+            // so the list scrolls normally. Zoom is centred on the
+            // fingers: pan is corrected so the point under the pinch
+            // centroid stays under it, and pan is clamped so the page
+            // can never be dragged off-screen entirely.
+            .pointerInput(Unit) {
+              awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                do {
+                  val event = awaitPointerEvent()
+                  val pressed = event.changes.count { it.pressed }
+                  val canceled = event.changes.any { it.isConsumed }
+                  if (!canceled) {
+                    if (pressed >= 2) {
+                      val zoomChange = event.calculateZoom()
+                      val panChange = event.calculatePan()
+                      val centroid = event.calculateCentroid(useCurrent = true)
+                      val z = (currentZoom * zoomChange).coerceIn(1f, 5f)
+                      if (z == 1f) {
+                        onZoomChange(1f)
+                        pan = Offset.Zero
+                      } else {
+                        val k = z / currentZoom
+                        val centre = Offset(pageSize.width / 2f, pageSize.height / 2f)
+                        val q = centroid - centre - pan
+                        var next = pan + panChange + q * (1f - k)
+                        if (pageSize.width > 0 && pageSize.height > 0) {
+                          val maxX = pageSize.width * (z - 1f) / 2f
+                          val maxY = pageSize.height * (z - 1f) / 2f
+                          next = Offset(
+                            next.x.coerceIn(-maxX, maxX),
+                            next.y.coerceIn(-maxY, maxY)
+                          )
+                        }
+                        pan = next
+                        onZoomChange(z)
+                      }
+                      event.changes.forEach { it.consume() }
+                    } else if (pressed == 1 && currentZoom > 1f) {
+                      val panChange = event.calculatePan()
+                      if (panChange != Offset.Zero) {
+                        var next = pan + panChange
+                        if (pageSize.width > 0 && pageSize.height > 0) {
+                          val maxX = pageSize.width * (currentZoom - 1f) / 2f
+                          val maxY = pageSize.height * (currentZoom - 1f) / 2f
+                          next = Offset(
+                            next.x.coerceIn(-maxX, maxX),
+                            next.y.coerceIn(-maxY, maxY)
+                          )
+                        }
+                        pan = next
+                        event.changes.forEach { it.consume() }
+                      }
+                    }
+                    // One finger at 100%: nothing consumed — the list scrolls.
+                  }
+                } while (event.changes.any { it.pressed })
               }
             }
             .pointerInput(Unit) {
               detectTapGestures(
                 onDoubleTap = {
-                  if (zoom > 1f) onZoomChange(1f)
+                  if (currentZoom > 1f) onZoomChange(1f)
                   else onZoomChange(2.5f)
                 }
               )

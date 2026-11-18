@@ -430,7 +430,10 @@ fun ToolScreenContainer(
         onClick = { vibrate(); onBack() }
       )
       Spacer(Modifier.width(Ds.s8))
-      TitleText(title, color = theme.text)
+      // UI OVERHAUL 2026-11-18: the title takes the remaining width
+      // and ellipsises at Large font instead of pushing the back
+      // button or clipping.
+      TitleText(title, color = theme.text, modifier = Modifier.weight(1f), maxLines = 1)
     }
     Spacer(Modifier.height(Ds.s16))
     content()
@@ -458,7 +461,10 @@ fun PrimaryButton(
     ),
     shape = RoundedCornerShape(Ds.buttonRadius)
   ) {
-    Text(text, color = theme.textOnPrimary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+    // UI OVERHAUL 2026-11-18: the label used to stay white when
+    // disabled — white on the light-grey disabled container is
+    // unreadable. Disabled text is now the secondary colour.
+    Text(text, color = if (enabled) theme.textOnPrimary else theme.textSecondary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
   }
 }
 
@@ -942,7 +948,7 @@ fun FilterPickerDialog(
   onDismiss: () -> Unit
 ) {
   val names = listOf("Original", "B&W", "Grayscale", "Enhance")
-  AlertDialog(
+  ChamiAlertDialog(theme,
     onDismissRequest = onDismiss,
     title = { Text("Filter", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
     text = {
@@ -965,7 +971,7 @@ fun FilterPickerDialog(
     // button only closes the dialog — label it "Close", not "Done".
     confirmButton = {
       TextButton(onClick = onDismiss) {
-        Text("Close", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+        Text("Close", color = theme.primaryDark, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
       }
     }
   )
@@ -980,7 +986,7 @@ fun BrightnessDialog(
   onDismiss: () -> Unit,
   bitmap: Bitmap? = null
 ) {
-  AlertDialog(
+  ChamiAlertDialog(theme,
     onDismissRequest = onDismiss,
     title = { Text("Adjust brightness", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
     text = {
@@ -1094,7 +1100,7 @@ fun RectCropDialog(
           },
           modifier = Modifier.height(Ds.minTouch)
         ) {
-          Text("Apply", color = ChamiColors.brightGreen, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+          Text("Apply", color = theme.primaryDark, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
         }
       }
       Spacer(Modifier.height(Ds.s8))
@@ -1962,10 +1968,10 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
           )
           Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
             TextButton(onClick = { vibrate(); selectedPages.clear(); for (i in 1..totalPages) selectedPages.add(i) }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Select all", color = theme.primary, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text("Select all", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
             TextButton(onClick = { vibrate(); selectedPages.clear() }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Clear", color = theme.primary, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text("Clear", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
           }
         }
@@ -2343,10 +2349,10 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
           )
           Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
             TextButton(onClick = { vibrate(); selectedPages.clear(); for (i in 1..totalPages) selectedPages.add(i) }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Select all", color = theme.primary, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text("Select all", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
             TextButton(onClick = { vibrate(); selectedPages.clear() }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Clear", color = theme.primary, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text("Clear", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
           }
         }

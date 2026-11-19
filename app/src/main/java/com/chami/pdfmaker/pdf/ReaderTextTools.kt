@@ -7,8 +7,18 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import java.io.*
 import java.security.MessageDigest
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
+import kotlin.math.ceil
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 // TOOL 14 - INBUILT PDF READER: render ONE page at a time, never load all pages.
 // In Compose: LazyColumn, for each page index call renderPageBitmap(ctx, uri, index, zoom)
@@ -40,6 +50,208 @@ object PdfReader {
     }
   }
   // Reader UI must have: Go to page input, Zoom +/- buttons, Night mode = invert with ColorMatrix (do NOT re-render), Search = use Tool 15 text + find page containing query.
+}
+
+
+// ------------------------------------------------------------------
+// READER SESSION (v1.3 reader rebuild).
+// ONE PdfRenderer is opened per document and kept open while the Reader
+// is on screen. The old code opened + closed a ParcelFileDescriptor and
+// a PdfRenderer for EVERY page render, which made scrolling lag.
+//  * PdfRenderer allows only one open page at a time and is not
+//    thread-safe, so every call goes through a Mutex.
+//  * All page sizes are read once at open, so the Reader can lay the
+//    list out with exact page heights (no jumping while pages load).
+//  * renderFit  = whole page, exactly `widthPx` wide (the list view).
+//  * renderRegion = ONLY the visible part of a page at the zoom level
+//    (sharp text at 5x, bitmap ~ screen size, never above 16M pixels).
+//  * pageText / search = OCR text cache per session (max 300 pages).
+//  * close() is safe to call while a render is running: the renderer
+//    is closed after the running render releases the lock.
+// ------------------------------------------------------------------
+
+/** A sharp crop of one page. (left, top) is the crop's position in "fit-width pixels";
+ *  draw the bitmap scaled by invScale to put it back over the fit-width page. */
+class PdfRegionTile(val bitmap: Bitmap, val left: Float, val top: Float, val invScale: Float)
+
+class PdfReaderSession private constructor(
+  private val pfd: ParcelFileDescriptor,
+  private val renderer: PdfRenderer,
+  private val widths: IntArray,
+  private val heights: IntArray
+) {
+  val pageCount: Int = widths.size
+  /** height / width of every page (rotation already applied by PdfRenderer). */
+  val aspects: FloatArray = FloatArray(widths.size) { i -> heights[i].toFloat() / widths[i].coerceAtLeast(1) }
+  fun aspect(page: Int): Float = if (page in aspects.indices) aspects[page] else 1.4142f
+
+  private val lock = Mutex()
+  @Volatile private var closed = false
+
+  private val pageTextCache = object : LinkedHashMap<Int, String>(64, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, String>?): Boolean = size > 300
+  }
+
+  companion object {
+    private val closer = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Opens the PDF. Returns null if it cannot be opened (corrupt, password-protected, no pages). */
+    suspend fun open(ctx: Context, uri: Uri): PdfReaderSession? = withContext(Dispatchers.IO) {
+      var pfd: ParcelFileDescriptor? = null
+      var renderer: PdfRenderer? = null
+      var session: PdfReaderSession? = null
+      try {
+        pfd = ctx.contentResolver.openFileDescriptor(uri, "r") ?: return@withContext null
+        renderer = PdfRenderer(pfd)
+        val n = renderer.pageCount
+        if (n <= 0) return@withContext null
+        val ws = IntArray(n)
+        val hs = IntArray(n)
+        for (i in 0 until n) {
+          ensureActive()
+          val p = renderer.openPage(i)
+          try { ws[i] = p.width; hs[i] = p.height } finally { p.close() }
+        }
+        session = PdfReaderSession(pfd, renderer, ws, hs)
+        session
+      } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        null
+      } catch (e: OutOfMemoryError) {
+        null
+      } finally {
+        if (session == null) {
+          try { renderer?.close() } catch (_: Exception) {}
+          try { pfd?.close() } catch (_: Exception) {}
+        }
+      }
+    }
+  }
+
+  /** Whole page, `widthPx` wide, height by the page's aspect. Capped at 16M pixels. */
+  suspend fun renderFit(page: Int, widthPx: Int): Bitmap? = withContext(Dispatchers.IO) {
+    lock.withLock {
+      if (closed || page !in 0 until pageCount || widthPx <= 0) return@withLock null
+      val (bw, bh) = capPixels(widthPx, (widthPx * aspects[page]).roundToInt())
+      renderLocked(page, bw, bh, null)
+    }
+  }
+
+  /**
+   * Only the part (left, top)-(right, bottom) of a page, in "fit-width pixels"
+   * (the page is `widthPx` wide at zoom 1), rendered at `zoom` so text is sharp.
+   * The bitmap is about screen size, never above 16M pixels.
+   */
+  suspend fun renderRegion(
+    page: Int, widthPx: Int,
+    left: Float, top: Float, right: Float, bottom: Float,
+    zoom: Float
+  ): PdfRegionTile? = withContext(Dispatchers.IO) {
+    lock.withLock {
+      if (closed || page !in 0 until pageCount || widthPx <= 0) return@withLock null
+      val regionW = right - left
+      val regionH = bottom - top
+      if (regionW < 1f || regionH < 1f) return@withLock null
+      var z = zoom
+      val pixels = (regionW * z).toDouble() * (regionH * z).toDouble()
+      if (pixels > 16_000_000.0) z *= sqrt(16_000_000.0 / pixels).toFloat()
+      val bw = ceil(regionW * z).toInt().coerceAtLeast(1)
+      val bh = ceil(regionH * z).toInt().coerceAtLeast(1)
+      // page points -> bitmap pixels
+      val s = (widthPx.toFloat() / widths[page].coerceAtLeast(1)) * z
+      val m = Matrix()
+      m.setScale(s, s)
+      m.postTranslate(-left * z, -top * z)
+      val bmp = renderLocked(page, bw, bh, m) ?: return@withLock null
+      PdfRegionTile(bmp, left, top, 1f / z)
+    }
+  }
+
+  private fun renderLocked(page: Int, bw: Int, bh: Int, matrix: Matrix?): Bitmap? {
+    var bmp: Bitmap? = null
+    var p: PdfRenderer.Page? = null
+    return try {
+      bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+      bmp.eraseColor(Color.WHITE)
+      p = renderer.openPage(page)
+      p.render(bmp, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+      val done = bmp
+      bmp = null
+      done
+    } catch (e: Exception) {
+      null
+    } catch (e: OutOfMemoryError) {
+      null
+    } finally {
+      bmp?.recycle()
+      try { p?.close() } catch (_: Exception) {}
+    }
+  }
+
+  /** OCR text of one page (0-based), cached for the life of the session. */
+  suspend fun pageText(page: Int): String {
+    synchronized(pageTextCache) { pageTextCache[page] }?.let { return it }
+    val bmp = withContext(Dispatchers.IO) {
+      lock.withLock {
+        if (closed || page !in 0 until pageCount) null
+        else {
+          val w = widths[page]; val h = heights[page]
+          val maxSide = maxOf(w, h)
+          val sc = if (maxSide > 1200) 1200f / maxSide else 1.5f
+          val (bw, bh) = capPixels((w * sc).toInt(), (h * sc).toInt())
+          renderLocked(page, bw, bh, null)
+        }
+      }
+    } ?: return ""
+    val text = try {
+      withContext(Dispatchers.IO) { ocrBitmapAnyLanguage(bmp) }
+    } finally {
+      bmp.recycle()
+    }
+    synchronized(pageTextCache) { pageTextCache[page] = text }
+    return text
+  }
+
+  /**
+   * Searches every page, starting at startPage0 and wrapping round, so the
+   * first match near the reader's current page is found first.
+   * onHit(page0) is called for each matching page; onProgress(done, total)
+   * after each page. Returns true if OCR read text on at least one page
+   * (false = OCR probably unavailable, do NOT report "no matches").
+   * Cancellation stops at the next page boundary.
+   */
+  suspend fun search(
+    query: String,
+    startPage0: Int,
+    onProgress: (done: Int, total: Int) -> Unit,
+    onHit: (page0: Int) -> Unit
+  ): Boolean {
+    if (query.isBlank() || pageCount == 0) return false
+    var anyText = false
+    val start = startPage0.coerceIn(0, pageCount - 1)
+    for (k in 0 until pageCount) {
+      coroutineContext.ensureActive()
+      val p = (start + k) % pageCount
+      val text = pageText(p)
+      if (text.isNotBlank()) anyText = true
+      if (text.contains(query, ignoreCase = true)) onHit(p)
+      onProgress(k + 1, pageCount)
+    }
+    return anyText
+  }
+
+  /** Safe to call from the UI thread; the renderer closes once any running render is done. */
+  fun close() {
+    if (closed) return
+    closed = true
+    closer.launch {
+      lock.withLock {
+        try { renderer.close() } catch (_: Exception) {}
+        try { pfd.close() } catch (_: Exception) {}
+      }
+    }
+  }
 }
 
 /** Shrinks (w, h) to fit maxPixels, preserving aspect. Used wherever a page bitmap is allocated. */

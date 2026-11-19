@@ -1,5 +1,4 @@
 package com.chami.pdfmaker.ui
-
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -8,8 +7,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
@@ -28,13 +27,12 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -44,12 +42,14 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -69,11 +69,15 @@ import androidx.compose.ui.geometry.Rect as ComposeRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -102,14 +106,19 @@ import com.chami.pdfmaker.LocaleHelper
 import com.chami.pdfmaker.pdf.*
 import com.chami.pdfmaker.theme.ChamiTheme
 import com.chami.pdfmaker.theme.ThemeManager
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
 
 // Final-audit: Merge renders page-1 bitmaps for at most this many
 // files; later rows show the grey placeholder (page counts are still
@@ -2162,6 +2171,57 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
 // zoomed page's edge changes page at the same zoom — the user is never
 // forced to zoom out to turn the page.
 @Composable
+private class ReaderSessionHolder {
+  var session: PdfReaderSession? = null
+  var gen: Int = 0
+  var disposed: Boolean = false
+}
+
+private class ReaderRegion(val tile: PdfRegionTile, val zoom: Float, val page: Int)
+
+private fun readerSha256(text: String): String {
+  val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+  val sb = StringBuilder()
+  for (b in digest) sb.append(String.format("%02x", b.toInt() and 0xFF))
+  return sb.toString()
+}
+
+private fun readerDisplayName(context: Context, pdfUri: Uri): String {
+  if (pdfUri.scheme == "content") {
+    try {
+      context.contentResolver.query(
+        pdfUri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+      )?.use { cursor ->
+        if (cursor.moveToFirst()) {
+          val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+          if (idx >= 0) cursor.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+      }
+    } catch (_: Exception) {}
+  }
+  return pdfUri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "pdf"
+}
+
+// Same keying scheme as the bookmarks (SHA-256 of the Uri + sanitised file name,
+// same "chami_bookmarks" prefs file); only the prefix differs ("last_" vs "bm_").
+private fun readerLastPageKey(context: Context, pdfUri: Uri): String =
+  "last_" + readerSha256(pdfUri.toString()) + "_" +
+    readerDisplayName(context, pdfUri).replace(Regex("[^A-Za-z0-9._-]"), "_")
+
+private fun readLastPage(context: Context, pdfUri: Uri): Int =
+  try {
+    context.getSharedPreferences("chami_bookmarks", Context.MODE_PRIVATE)
+      .getInt(readerLastPageKey(context, pdfUri), 0)
+  } catch (_: Exception) { 0 }
+
+private fun saveLastPage(context: Context, pdfUri: Uri, page0: Int) {
+  try {
+    context.getSharedPreferences("chami_bookmarks", Context.MODE_PRIVATE)
+      .edit().putInt(readerLastPageKey(context, pdfUri), page0).apply()
+  } catch (_: Exception) {}
+}
+
+@Composable
 fun PdfReaderScreen(
   theme: ChamiTheme,
   initialFile: File? = null,
@@ -2172,28 +2232,21 @@ fun PdfReaderScreen(
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
+  // Short-lived work that must finish even if the screen is left (opening the
+  // document, delayed bitmap recycling), so a session can never be leaked.
+  val bgScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+  val holder = remember { ReaderSessionHolder() }
+  var session by remember { mutableStateOf<PdfReaderSession?>(null) }
   var pdfUri by rememberSaveableUri(initialFile?.let { Uri.fromFile(it) })
   var totalPages by remember { mutableStateOf(0) }
   var currentPage by rememberSaveable { mutableStateOf(0) }
-  // Render scale: 2.0x at fit; raised (debounced) while zoomed so the
-  // zoomed page re-renders sharper instead of upscaling a bitmap.
-  var scale by rememberSaveable { mutableStateOf(2.0f) }
   var isNightMode by rememberSaveable { mutableStateOf(false) }
   var pageInput by rememberSaveable { mutableStateOf("1") }
   var zoom by rememberSaveable { mutableStateOf(1f) }
-  // PHONE FIX 2026-11-19 (issue 3): while zoomed the reader is a
-  // single-page view of the current page only (Google Drive style) —
-  // the old code applied the shared zoom to every page in the list.
+  // While zoomed the reader is a single-page view of the current page only.
   val zoomed = zoom > 1f
-  // FIX 2026-11-18 (report #23): byte-budgeted cache (see
-  // PageBitmapCache below) instead of a 12-page count cap.
-  val pageBitmapCache = remember { PageBitmapCache() }
-  // Continuous scroll (Google Drive style): the reader is one vertical
-  // list of pages; the current page follows the first visible page.
-  // Final-audit: the scroll state survives rotation via its Saver
-  // (plain rememberLazyListState lost the position); the scroll is
-  // restored to the saved page once the document loads (below).
   val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+  var viewport by remember { mutableStateOf(ComposeRect.Zero) }
   var showSearchBar by remember { mutableStateOf(false) }
   var showBookmarksDialog by remember { mutableStateOf(false) }
   var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -2202,9 +2255,6 @@ fun PdfReaderScreen(
   var searching by remember { mutableStateOf(false) }
   var searchProgress by remember { mutableStateOf("") }
   var searchJob by remember { mutableStateOf<Job?>(null) }
-  // M17: bookmarks survive rotation — rememberSaveable with a list
-  // saver (a plain remember list was lost on rotation, and the loader
-  // LaunchedEffect does not re-fire for the same Uri).
   val bookmarks = rememberSaveable(
     saver = listSaver(
       save = { it.toList() },
@@ -2214,17 +2264,17 @@ fun PdfReaderScreen(
   var showGoToPage by remember { mutableStateOf(false) }
   var goToInput by rememberSaveable { mutableStateOf("") }
   var showOverflow by remember { mutableStateOf(false) }
-  // FIX 2026-11-18 (report #24): a PDF that cannot be opened.
   var pdfLoadFailed by remember { mutableStateOf(false) }
-  // Same-PDF re-pick (report #24): the picker resets totalPages to 0
-  // for the same Uri, which would not re-fire LaunchedEffect(pdfUri)
-  // — this key forces the reload.
   var pdfReloadKey by remember { mutableStateOf(0) }
-  // FIX 2026-11-18 (report #25): recognised page text, cached in
-  // memory so repeat searches never re-OCR a page.
-  // L19: capped at 100 pages (oldest evicted first) — the cache used
-  // to grow one entry per searched page, unbounded, for the session.
-  val searchTextCache = remember { mutableStateMapOf<Int, String>() }
+
+  val recycleLater: (Bitmap) -> Unit = remember {
+    { b: Bitmap ->
+      bgScope.launch {
+        delay(400)
+        try { if (!b.isRecycled) b.recycle() } catch (_: Exception) {}
+      }
+    }
+  }
 
   fun vibrate() {
     if (tm.hapticOn()) {
@@ -2232,10 +2282,6 @@ fun PdfReaderScreen(
     }
   }
 
-  // FIX 2026-11-18 (report #27): the Uri handed to Split / Merge /
-  // Compress. The picker's own content Uri is passed as-is; a file
-  // opened from History/Done (a java.io.File) goes through
-  // FileProvider so the target tool gets a content Uri it can read.
   fun readerContentUri(): Uri? {
     val u = pdfUri ?: return null
     val f = initialFile
@@ -2253,19 +2299,9 @@ fun PdfReaderScreen(
       currentPage = page1Based - 1
       pageInput = "$page1Based"
       scope.launch {
-        // PHONE FIX 2026-11-19 (issue 3): while zoomed the list holds
-        // only the current page (index 0) — scrolling to page-1 would
-        // be out of range, so just snap the single item to the top;
-        // the focused item switches by currentPage alone.
         try { listState.scrollToItem(if (zoomed) 0 else page1Based - 1) } catch (_: Exception) {}
       }
     }
-  }
-
-  fun loadBookmarks() {
-    val u = pdfUri ?: return
-    bookmarks.clear()
-    bookmarks.addAll(getBookmarks(ctx, u))
   }
 
   fun toggleBookmark(page1Based: Int) {
@@ -2279,111 +2315,103 @@ fun PdfReaderScreen(
     }
   }
 
-  // Lazy search: render + OCR one page at a time, with progress and a
-  // cancel button. The job is cancelled between pages, so cancelling
-  // stops promptly instead of finishing the whole document.
-  // FIX 2026-11-18 (report #25): OCR runs ocrBitmapAnyLanguage
-  // (Latin + Devanagari, script-scored) straight on the rendered
-  // bitmap — no search_page_*.jpg temp files are written at all, so
-  // there is nothing to delete — and recognised text is cached in
-  // memory, so a repeat search never re-OCRs a page.
-  // FIX 2026-11-18 (report #26): "no matches" is only reported when
-  // OCR actually read text on some page; when no page yielded any
-  // text at all, the model is probably not downloaded yet.
+  // Opens ONE session per document. Any previous session is closed first; a
+  // result that arrives after the screen was left (or the file was changed) is
+  // closed immediately, so nothing is leaked.
+  fun openDocument(u: Uri) {
+    val gen = ++holder.gen
+    val old = holder.session
+    holder.session = null
+    session = null
+    old?.close()
+    totalPages = 0
+    pdfLoadFailed = false
+    bgScope.launch {
+      val s = PdfReaderSession.open(ctx, u)
+      if (holder.disposed || gen != holder.gen) {
+        s?.close()
+        return@launch
+      }
+      if (s == null) {
+        pdfLoadFailed = true
+        return@launch
+      }
+      val saved = withContext(Dispatchers.IO) { readLastPage(ctx, u) }
+      if (holder.disposed || gen != holder.gen) {
+        s.close()
+        return@launch
+      }
+      holder.session = s
+      session = s
+      val n = s.pageCount
+      val start = (if (currentPage > 0) currentPage else saved).coerceIn(0, n - 1)
+      currentPage = start
+      pageInput = "${start + 1}"
+      bookmarks.clear()
+      bookmarks.addAll(getBookmarks(ctx, u))
+      totalPages = n
+    }
+  }
+
+  // Search through the session: starts at the current page, wraps round, jumps
+  // to the first hit as soon as it is found. A false result means the text
+  // could not be read — it is never reported as "no matches".
   fun runSearch() {
     val q = searchQuery.trim()
-    val u = pdfUri
-    if (q.isEmpty() || u == null) return
+    val s = session
+    if (q.isEmpty() || s == null) return
     searchJob?.cancel()
     searching = true
     searchPages = emptyList()
     searchIndex = 0
+    searchProgress = ""
+    val startPage = currentPage
     searchJob = scope.launch {
       val hits = mutableListOf<Int>()
-      var anyTextFound = false
-      var renderer: android.graphics.pdf.PdfRenderer? = null
-      var pfd: android.os.ParcelFileDescriptor? = null
+      var firstHit = -1
+      var anyText = false
       try {
-        // M7: an encrypted PDF has no searchable text — say so plainly
-        // instead of silently returning empty results.
-        val encrypted = withContext(Dispatchers.IO) {
-          try { PdfProtector.isEncrypted(ctx, u) } catch (_: Exception) { false }
-        }
-        if (encrypted) {
-          withContext(Dispatchers.Main) {
-            searching = false
-            Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_reader_encrypted"), Toast.LENGTH_LONG).show()
-          }
-          return@launch
-        }
-        pfd = withContext(Dispatchers.IO) { ctx.contentResolver.openFileDescriptor(u, "r") }
-        if (pfd == null) {
-          withContext(Dispatchers.Main) { searching = false }
-          return@launch
-        }
-        renderer = android.graphics.pdf.PdfRenderer(pfd)
-        val count = renderer.pageCount
-        for (i in 0 until count) {
-          if (searchJob?.isActive == false) break
-          withContext(Dispatchers.Main) { searchProgress = LocaleHelper.t(ctx, "reader_search_progress").replace("{page}", "${i + 1}").replace("{total}", "$count") }
-          val cached = searchTextCache[i]
-          val text = cached ?: withContext(Dispatchers.IO) {
-            try {
-              val page = renderer!!.openPage(i)
-              val w = page.width; val h = page.height
-              val maxSide = maxOf(w, h)
-              val s = if (maxSide > 1200) 1200f / maxSide else 1.5f
-              val bmp = Bitmap.createBitmap((w * s).toInt(), (h * s).toInt(), Bitmap.Config.ARGB_8888)
-              bmp.eraseColor(AndroidColor.WHITE)
-              page.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-              page.close()
-              val t = ocrBitmapAnyLanguage(bmp)
-              bmp.recycle()
-              t
-            } catch (_: OutOfMemoryError) { "" }
-            catch (_: Exception) { "" }
-          }
-          if (cached == null) {
-            // L19: cap the cache — evict the oldest entry first.
-            if (searchTextCache.size >= 100) {
-              searchTextCache.keys.firstOrNull()?.let { searchTextCache.remove(it) }
+        anyText = s.search(
+          q, startPage,
+          onProgress = { done, total ->
+            searchProgress = LocaleHelper.t(ctx, "reader_search_progress")
+              .replace("{page}", "$done").replace("{total}", "$total")
+          },
+          onHit = { p0 ->
+            hits.add(p0 + 1)
+            if (firstHit < 0) {
+              firstHit = p0 + 1
+              jumpToPage(p0 + 1)
             }
-            searchTextCache[i] = text
           }
-          if (text.isNotBlank()) anyTextFound = true
-          if (text.contains(q, ignoreCase = true)) hits.add(i + 1)
-        }
-      } catch (e: kotlinx.coroutines.CancellationException) {
-        // M16: a cancelled search shows no results and no "No matches"
-        // toast — clear the partial state and rethrow so the tail code
-        // below never runs.
+        )
+      } catch (e: CancellationException) {
         searching = false
         searchPages = emptyList()
         throw e
       } catch (_: Exception) {
-      } finally {
-        try { renderer?.close() } catch (_: Exception) {}
-        try { pfd?.close() } catch (_: Exception) {}
       }
       searching = false
-      searchPages = hits
-      searchIndex = 0
-      if (hits.isNotEmpty()) jumpToPage(hits[0])
-      else if (!anyTextFound) Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_unavailable"), Toast.LENGTH_LONG).show()
-      else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_no_matches").replace("{q}", q), Toast.LENGTH_SHORT).show()
+      val sorted = hits.sorted()
+      searchPages = sorted
+      searchIndex = sorted.indexOf(firstHit).coerceAtLeast(0)
+      if (sorted.isEmpty()) {
+        if (!anyText) Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_unavailable"), Toast.LENGTH_LONG).show()
+        else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_no_matches").replace("{q}", q), Toast.LENGTH_SHORT).show()
+      }
     }
   }
 
   val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selected ->
     pdfUri = selected
     if (selected != null) {
-      pageBitmapCache.clear()
       totalPages = 0
       pdfLoadFailed = false
       pdfReloadKey++
-      searchTextCache.clear()
       currentPage = 0
       pageInput = "1"
+      searchJob?.cancel()
+      searching = false
       searchPages = emptyList()
       bookmarks.clear()
       scope.launch { try { listState.scrollToItem(0) } catch (_: Exception) {} }
@@ -2392,27 +2420,43 @@ fun PdfReaderScreen(
 
   LaunchedEffect(pdfUri, pdfReloadKey) {
     val u = pdfUri ?: return@LaunchedEffect
-    if (totalPages == 0) {
-      totalPages = withContext(Dispatchers.IO) { PdfEngine.pageCount(ctx, u) }
-      // FIX 2026-11-18 (report #24): a 0-page count means the PDF
-      // cannot be opened — show the error state, never a spinner.
-      pdfLoadFailed = totalPages == 0
-    }
-    loadBookmarks()
+    openDocument(u)
   }
 
-  // Final-audit: restore the scroll position to the saved page after
-  // rotation / process death, once the document has loaded.
+  // Never leak the session: closed when the screen leaves the composition.
+  DisposableEffect(Unit) {
+    onDispose {
+      holder.disposed = true
+      holder.gen++
+      holder.session?.close()
+      holder.session = null
+      searchJob?.cancel()
+    }
+  }
+
+  val leave: () -> Unit = {
+    holder.session?.close()
+    onBack()
+  }
+
+  // Resume reading: remember the last page of this file.
+  LaunchedEffect(currentPage, totalPages) {
+    val u = pdfUri
+    if (u != null && totalPages > 0) {
+      delay(400)
+      withContext(Dispatchers.IO) { saveLastPage(ctx, u, currentPage) }
+    }
+  }
+
+  // Restore the scroll position once the document has loaded.
   LaunchedEffect(totalPages) {
     if (totalPages > 0 && !zoomed && currentPage in 1 until totalPages) {
       try { listState.scrollToItem(currentPage) } catch (_: Exception) {}
     }
   }
 
-  // The current page follows the first visible page in the scroll.
-  // PHONE FIX 2026-11-19 (issue 3): NOT while zoomed — the zoomed
-  // list holds a single item, so firstVisibleItemIndex is always 0
-  // and the old code would have reset currentPage to page 1.
+  // The current page follows the first visible page (not while zoomed: the
+  // zoomed list holds a single item).
   val firstVisiblePage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
   LaunchedEffect(firstVisiblePage) {
     if (totalPages > 0 && !zoomed) {
@@ -2421,31 +2465,13 @@ fun PdfReaderScreen(
     }
   }
 
-  // Re-render sharper after the pinch ends (debounced): render scale
-  // follows the display zoom, capped at 3x — FIX 2026-11-18 (report
-  // #23): at 2.0x * 5x zoom one A4 page is ~50 MB, and 12 such pages
-  // OOM a 4 GB phone. The byte-budgeted cache is the other half.
-  LaunchedEffect(zoom) {
-    delay(300)
-    scale = (2.0f * zoom).coerceIn(2.0f, 3.0f)
-  }
-
-  // PHONE FIX 2026-11-19 (issue 3): entering zoomed mode snaps the
-  // focused page to the top of the viewport; leaving it restores the
-  // continuous list at the same page. The delay lets the full list
-  // recompose first — scrolling to the page before that throws (the
-  // zoomed list has only one item) and the position would be lost.
+  // Entering zoomed mode snaps the focused page to the top; leaving it
+  // restores the continuous list at the same page.
   LaunchedEffect(zoomed) {
     try {
       if (zoomed) listState.scrollToItem(0)
       else if (totalPages > 0) { delay(100); listState.scrollToItem(currentPage) }
     } catch (_: Exception) {}
-  }
-
-  androidx.compose.runtime.DisposableEffect(Unit) {
-    onDispose {
-      pageBitmapCache.clear()
-    }
   }
 
   if (showGoToPage) {
@@ -2479,8 +2505,6 @@ fun PdfReaderScreen(
     )
   }
 
-  // Bookmarks dialog (opened from the three-dot menu): tap a page to
-  // jump to it, X to delete the bookmark.
   if (showBookmarksDialog) {
     ChamiAlertDialog(theme,
       onDismissRequest = { showBookmarksDialog = false },
@@ -2511,18 +2535,15 @@ fun PdfReaderScreen(
     )
   }
 
-  ToolScreenContainer(LocaleHelper.t(ctx, "pdf_reader"), theme, onBack) {
+  ToolScreenContainer(LocaleHelper.t(ctx, "pdf_reader"), theme, leave) {
     if (pdfUri == null) {
       Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        // Phase 6: shared empty state, then the open button.
         ToolEmptyState(Icons.Filled.PictureAsPdf, LocaleHelper.t(ctx, "btn_select_pdf"), theme)
         Spacer(Modifier.height(Ds.s16))
         ChamiPrimaryButton(text = LocaleHelper.t(ctx, "reader_open_pdf"), onClick = { vibrate(); picker.launch("application/pdf") }, modifier = Modifier.fillMaxWidth())
       }
     } else {
       Column(Modifier.fillMaxSize()) {
-        // Phase 6: slim top bar (Google Drive style) in the shared
-        // card — page indicator + the three-dot menu only.
         ToolCard(theme, padding = Ds.s8) {
           Row(
             Modifier.fillMaxWidth(),
@@ -2590,10 +2611,9 @@ fun PdfReaderScreen(
               )
             }
           }
-          } // top-bar Row
-        } // ToolCard
+          }
+        }
 
-        // Search bar — only when opened from the ⋮ menu.
         if (showSearchBar) {
           Spacer(Modifier.height(Ds.s8))
           Row(
@@ -2634,8 +2654,6 @@ fun PdfReaderScreen(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.SpaceBetween
             ) {
-              // L20: truncate the page list — the first 10 pages plus a
-              // "+N more" count, not one giant wrapping Text.
               val shownSearchPages = searchPages.take(10)
               val moreSearchPages = searchPages.size - shownSearchPages.size
               val foundText = LocaleHelper.t(ctx, "reader_found_on_pages")
@@ -2660,13 +2678,8 @@ fun PdfReaderScreen(
           }
         }
 
-        // FULL SCROLL (Google Drive style): one continuous vertical
-        // list, page after page — no page-by-page flipping, no Prev /
-        // Next buttons, no page-number strip.
+        val activeSession = session
         if (pdfLoadFailed) {
-          // FIX 2026-11-18 (report #24) + UI OVERHAUL 2026-11-18: a
-          // protected/corrupt PDF shows a friendly banner with a way
-          // out — never an infinite spinner.
           Column(
             Modifier.weight(1f).fillMaxWidth(),
             verticalArrangement = Arrangement.Center,
@@ -2678,11 +2691,9 @@ fun PdfReaderScreen(
               message = UNOPENABLE_PDF_MESSAGE
             )
             Spacer(Modifier.height(Ds.s16))
-            ChamiPrimaryButton(text = LocaleHelper.t(ctx, "reader_back"), onClick = { vibrate(); onBack() }, modifier = Modifier.fillMaxWidth())
+            ChamiPrimaryButton(text = LocaleHelper.t(ctx, "reader_back"), onClick = { vibrate(); leave() }, modifier = Modifier.fillMaxWidth())
           }
-        } else if (totalPages == 0) {
-          // UI OVERHAUL 2026-11-18: skeleton page + label instead of a
-          // bare spinner on a blank screen while the document opens.
+        } else if (totalPages == 0 || activeSession == null) {
           Column(
             Modifier.weight(1f).fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -2694,29 +2705,24 @@ fun PdfReaderScreen(
         } else {
           LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
+            modifier = Modifier
+              .weight(1f)
+              .fillMaxWidth()
+              .onGloballyPositioned { viewport = it.boundsInWindow() },
             verticalArrangement = Arrangement.spacedBy(Ds.s12),
             contentPadding = PaddingValues(vertical = Ds.s8)
           ) {
-            // UI OVERHAUL 2026-11-18: keyed items so scroll position
-            // and per-page state survive recomposition.
-            // PHONE FIX 2026-11-19 (issue 3): while zoomed, show ONLY
-            // the current page (Google Drive style) — the old code
-            // rendered every page with the same shared zoom, so all
-            // pages zoomed together and none filled the screen. The
-            // focused item is keyed by page, so changing page while
-            // zoomed swaps the item and its pan resets.
             if (zoomed) {
               items(1, key = { currentPage }) {
                 ReaderPageView(
                   theme = theme,
-                  uri = pdfUri!!,
+                  session = activeSession,
                   pageIndex = currentPage,
-                  scale = scale,
                   zoom = zoom,
                   onZoomChange = { zoom = it },
                   isNightMode = isNightMode,
-                  cache = pageBitmapCache,
+                  viewport = viewport,
+                  recycle = recycleLater,
                   isFocused = true,
                   onRequestPageChange = { target ->
                     if (target in 0 until totalPages) {
@@ -2731,13 +2737,13 @@ fun PdfReaderScreen(
               items(totalPages, key = { it }) { idx ->
                 ReaderPageView(
                   theme = theme,
-                  uri = pdfUri!!,
+                  session = activeSession,
                   pageIndex = idx,
-                  scale = scale,
                   zoom = zoom,
                   onZoomChange = { zoom = it },
                   isNightMode = isNightMode,
-                  cache = pageBitmapCache,
+                  viewport = viewport,
+                  recycle = recycleLater,
                   isFocused = false,
                   onRequestPageChange = { target -> jumpToPage(target + 1) }
                 )
@@ -2750,276 +2756,272 @@ fun PdfReaderScreen(
   }
 }
 
-// FIX 2026-11-18 (report #23): byte-budgeted page-bitmap cache.
-// The old cache kept up to 12 pages regardless of size — at 2.5x zoom
-// one A4 page is ~50 MB, so 12 pages could reach ~600 MB and OOM a
-// 4 GB phone. This cache caps TOTAL bytes (~150 MB) and evicts the
-// page farthest from the one being rendered first.
-private class PageBitmapCache(private val maxBytes: Long = 150L * 1024L * 1024L) {
-  private val map = LinkedHashMap<Int, Bitmap>(16, 0.75f, true)
-  private var bytes = 0L
-
-  @Synchronized
-  fun get(page: Int): Bitmap? = map[page]
-
-  @Synchronized
-  fun put(page: Int, bmp: Bitmap, currentPage: Int) {
-    map[page]?.let { bytes -= it.allocationByteCount.toLong() }
-    map[page] = bmp
-    bytes += bmp.allocationByteCount.toLong()
-    while (bytes > maxBytes && map.size > 1) {
-      val farthest = map.keys.filter { it != page }.maxByOrNull { kotlin.math.abs(it - currentPage) } ?: break
-      val evicted = map.remove(farthest) ?: break
-      bytes -= evicted.allocationByteCount.toLong()
-      try { evicted.recycle() } catch (_: Exception) {}
-    }
-  }
-
-  @Synchronized
-  fun clear() {
-    map.values.forEach { try { it.recycle() } catch (_: Exception) {} }
-    map.clear()
-    bytes = 0L
-  }
-}
-
-// One page of the continuous reader: renders lazily at the given
-// scale and caches the bitmap (byte-budgeted cache, ~150 MB max,
-// farthest page evicted first). FIX 2026-11-18 (Fix 10): pinch zoom
-// works from 100% — the old code only attached its gesture detector
-// while already zoomed (pointerInput(zoom > 1f)), so a two-finger
-// pinch at 100% did nothing. The new detector is always on: two
-// fingers down = pinch (takes priority over the list scroll, zoom is
-// centred on the fingers); one finger while zoomed = pan the page;
-// one finger at 100% = not consumed, so the list scrolls normally.
-// Double-tap still toggles zoom, Fit in the ⋮ menu still resets it.
-// PHONE FIX 2026-11-19 (issue 3): while zoomed the parent shows only
-// this page and the page is NOT clipped to its fit-width box, so the
-// zoomed page can overflow its layout rect and fill the viewport
-// instead of showing a crop inside the same small rectangle.
-// PHONE FIX 2026-11-19 (issue 4): a one-finger drag that cannot pan
-// the page any further (already at the edge) is NOT consumed — past
-// 72dp it becomes a page change at the same zoom via
-// onRequestPageChange, so the user is never forced to zoom out.
+// One page of the continuous reader. The box height comes from the session's
+// exact page aspect, so the list never jumps while pages load. Unzoomed it
+// shows renderFit at the list width; zoomed (focused single page) the fit
+// bitmap is only a placeholder and the VISIBLE part of the page is re-rendered
+// with renderRegion so text stays sharp. Night mode is a ColorMatrix applied
+// when drawing — nothing is re-rendered. Bitmaps are recycled when they scroll
+// off-screen or are replaced.
 @Composable
 private fun ReaderPageView(
   theme: ChamiTheme,
-  uri: Uri,
+  session: PdfReaderSession,
   pageIndex: Int,
-  scale: Float,
   zoom: Float,
   onZoomChange: (Float) -> Unit,
   isNightMode: Boolean,
-  cache: PageBitmapCache,
+  viewport: ComposeRect,
+  recycle: (Bitmap) -> Unit,
   isFocused: Boolean = false,
   onRequestPageChange: ((Int) -> Unit)? = null
 ) {
   val ctx = LocalContext.current
-  var bmp by remember(uri, pageIndex) { mutableStateOf<Bitmap?>(cache.get(pageIndex)) }
+  var bmp by remember(session, pageIndex) { mutableStateOf<Bitmap?>(null) }
+  var region by remember(session, pageIndex) { mutableStateOf<ReaderRegion?>(null) }
   var pan by remember { mutableStateOf(Offset.Zero) }
   var pageSize by remember { mutableStateOf(IntSize.Zero) }
-  // FIX 2026-11-18 (Fix 10): pointerInput blocks run once and capture
-  // stale values — the old code read the `zoom` parameter inside them,
-  // so pinch math (and the double-tap toggle) used the zoom from first
-  // composition. Read the live zoom through rememberUpdatedState.
+  var boxPos by remember { mutableStateOf(Offset.Zero) }
   val currentZoom by rememberUpdatedState(zoom)
-  // PHONE FIX 2026-11-19 (issue 4): the edge-swipe page change must
-  // read the live callback / page index, not the values captured when
-  // pointerInput(Unit) first ran (same stale-capture trap as Fix 10).
   val currentPageChange by rememberUpdatedState(onRequestPageChange)
   val currentPageIndex by rememberUpdatedState(pageIndex)
-  // PHONE FIX 2026-11-19 (issue 4): how far one gesture must drag
-  // past the page edge before it becomes a page change, not a wobble.
   val edgeSwipeThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
   val currentEdgeThreshold by rememberUpdatedState(edgeSwipeThresholdPx)
-  LaunchedEffect(uri, pageIndex, scale) {
-    cache.get(pageIndex)?.let { bmp = it; return@LaunchedEffect }
-    val rendered = withContext(Dispatchers.IO) { PdfReader.renderPageBitmap(ctx, uri, pageIndex, scale) }
-    if (rendered != null) {
-      cache.put(pageIndex, rendered, pageIndex)
-      bmp = rendered
+  val latestBmp by rememberUpdatedState(bmp)
+  val latestRegion by rememberUpdatedState(region)
+
+  val paint = remember(isNightMode) {
+    Paint(Paint.FILTER_BITMAP_FLAG).apply {
+      if (isNightMode) {
+        colorFilter = ColorMatrixColorFilter(
+          android.graphics.ColorMatrix(
+            floatArrayOf(
+              -1f, 0f, 0f, 0f, 255f,
+              0f, -1f, 0f, 0f, 255f,
+              0f, 0f, -1f, 0f, 255f,
+              0f, 0f, 0f, 1f, 0f
+            )
+          )
+        )
+      }
     }
   }
+  val drawMatrix = remember { android.graphics.Matrix() }
+
+  DisposableEffect(Unit) {
+    onDispose {
+      latestBmp?.let(recycle)
+      latestRegion?.tile?.bitmap?.let(recycle)
+    }
+  }
+
+  // Whole page at the list width (placeholder while zoomed).
+  LaunchedEffect(session, pageIndex, pageSize.width) {
+    val w = pageSize.width
+    if (w <= 0) return@LaunchedEffect
+    delay(50) // skip pages that are only flicked past
+    val rendered = session.renderFit(pageIndex, w)
+    if (rendered != null) {
+      val old = bmp
+      bmp = rendered
+      if (old != null) recycle(old)
+    }
+  }
+
+  // Zoomed: render ONLY the visible part of the page at the zoom level.
+  LaunchedEffect(session, pageIndex, pageSize, zoom, pan, boxPos, viewport, isFocused) {
+    val z = zoom
+    val w = pageSize.width
+    val h = pageSize.height
+    if (!isFocused || z <= 1.01f || w <= 0 || h <= 0 || viewport.width <= 0f || viewport.height <= 0f) {
+      region?.let { recycle(it.tile.bitmap) }
+      region = null
+      return@LaunchedEffect
+    }
+    val pw = w.toFloat()
+    val ph = h.toFloat()
+    val cx = pw / 2f
+    val cy = ph / 2f
+    // viewport (window px) -> page-layout px, inverting scale-about-centre + pan
+    val vl = viewport.left - boxPos.x
+    val vr = viewport.right - boxPos.x
+    val vt = viewport.top - boxPos.y
+    val vb = viewport.bottom - boxPos.y
+    val visL = (cx + (vl - cx - pan.x) / z).coerceIn(0f, pw)
+    val visR = (cx + (vr - cx - pan.x) / z).coerceIn(0f, pw)
+    val visT = (cy + (vt - cy - pan.y) / z).coerceIn(0f, ph)
+    val visB = (cy + (vb - cy - pan.y) / z).coerceIn(0f, ph)
+    if (visR - visL < 1f || visB - visT < 1f) return@LaunchedEffect
+
+    val cur = region
+    if (cur != null && cur.page == pageIndex && kotlin.math.abs(cur.zoom - z) / z < 0.02f) {
+      val t = cur.tile
+      val tr = t.left + t.bitmap.width * t.invScale
+      val tb = t.top + t.bitmap.height * t.invScale
+      if (t.left <= visL + 0.5f && t.top <= visT + 0.5f && tr >= visR - 0.5f && tb >= visB - 0.5f) {
+        return@LaunchedEffect
+      }
+    }
+
+    delay(150) // debounce pinch / pan
+    val mx = (visR - visL) * 0.15f
+    val my = (visB - visT) * 0.15f
+    val tile = session.renderRegion(
+      pageIndex, w,
+      (visL - mx).coerceAtLeast(0f), (visT - my).coerceAtLeast(0f),
+      (visR + mx).coerceAtMost(pw), (visB + my).coerceAtMost(ph),
+      z
+    )
+    if (tile != null) {
+      val old = region
+      region = ReaderRegion(tile, z, pageIndex)
+      if (old != null) {
+        withFrameNanos { }
+        withFrameNanos { }
+        recycle(old.tile.bitmap)
+      }
+    }
+  }
+
   LaunchedEffect(zoom) { if (zoom == 1f) pan = Offset.Zero }
-  // PHONE FIX 2026-11-19 (issue 4): a new page starts unpanned — the
-  // zoomed pan of the previous page must not carry over to it.
   LaunchedEffect(pageIndex) { pan = Offset.Zero }
+
   Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
     Box(
       Modifier
         .fillMaxWidth()
-        // PHONE FIX 2026-11-19 (issue 3): while zoomed the page must
-        // be allowed to overflow its fit-width layout box and fill
-        // the viewport — the old clip() cut the scaled image back to
-        // the unzoomed rectangle, so zoom only ever showed a crop
-        // inside the same small box, with neighbours still visible.
-        // Unzoomed, the rounded clip stays.
+        .aspectRatio(1f / session.aspect(pageIndex))
         .then(if (isFocused) Modifier else Modifier.clip(RoundedCornerShape(Ds.tileRadius)))
-        .background(Color(0xFF121212)),
+        .background(Color(0xFF121212))
+        .onGloballyPositioned { if (isFocused) boxPos = it.positionInWindow() },
       contentAlignment = Alignment.Center
     ) {
-      val shown = bmp
-      // PERFORMANCE (UI overhaul): wrap once — this page recomposes on
-      // every zoom/pan frame and re-wrapping the bitmap each time
-      // dropped frames on low-end phones.
-      val shownImage = remember(shown) { shown?.asImageBitmap() }
-      if (shown == null) {
-        // UI OVERHAUL 2026-11-18: skeleton page instead of a bare spinner.
-        PageSkeletonLoader(Modifier.fillMaxWidth())
-      } else {
-        val nightFilter = if (isNightMode) {
-          androidx.compose.ui.graphics.ColorFilter.colorMatrix(
-            androidx.compose.ui.graphics.ColorMatrix(
-              floatArrayOf(
-                -1f, 0f, 0f, 0f, 255f,
-                0f, -1f, 0f, 0f, 255f,
-                0f, 0f, -1f, 0f, 255f,
-                0f, 0f, 0f, 1f, 0f
-              )
-            )
-          )
-        } else null
-        Image(
-          bitmap = shownImage!!,
-          contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${pageIndex + 1}"),
-          colorFilter = nightFilter,
-          modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(shown.width.toFloat() / shown.height.toFloat())
-            .onSizeChanged { pageSize = it }
-            .graphicsLayer(
-              scaleX = zoom,
-              scaleY = zoom,
-              translationX = pan.x,
-              translationY = pan.y
-            )
-            // FIX 2026-11-18 (Fix 10): pinch zoom, always on. Two
-            // fingers = pinch (consumed, so the LazyColumn cannot
-            // scroll underneath); one finger while zoomed = pan the
-            // page (consumed); one finger at 100% = left unconsumed
-            // so the list scrolls normally. Zoom is centred on the
-            // fingers: pan is corrected so the point under the pinch
-            // centroid stays under it, and pan is clamped so the page
-            // can never be dragged off-screen entirely.
-            .pointerInput(Unit) {
-              awaitEachGesture {
-                awaitFirstDown(requireUnconsumed = false)
-                // PHONE FIX 2026-11-19 (issue 4): per-gesture edge
-                // overscroll — reset every time a new gesture starts.
-                var edgeOverscroll = Offset.Zero
-                var edgePageChangeSent = false
-                do {
-                  val event = awaitPointerEvent()
-                  val pressed = event.changes.count { it.pressed }
-                  val canceled = event.changes.any { it.isConsumed }
-                  if (!canceled) {
-                    if (pressed >= 2) {
-                      val zoomChange = event.calculateZoom()
-                      val panChange = event.calculatePan()
-                      val centroid = event.calculateCentroid(useCurrent = true)
-                      val z = (currentZoom * zoomChange).coerceIn(1f, 5f)
-                      if (z == 1f) {
-                        onZoomChange(1f)
-                        pan = Offset.Zero
-                      } else {
-                        val k = z / currentZoom
-                        val centre = Offset(pageSize.width / 2f, pageSize.height / 2f)
-                        val q = centroid - centre - pan
-                        var next = pan + panChange + q * (1f - k)
-                        if (pageSize.width > 0 && pageSize.height > 0) {
-                          val maxX = pageSize.width * (z - 1f) / 2f
-                          val maxY = pageSize.height * (z - 1f) / 2f
-                          next = Offset(
-                            next.x.coerceIn(-maxX, maxX),
-                            next.y.coerceIn(-maxY, maxY)
-                          )
-                        }
-                        pan = next
-                        onZoomChange(z)
+      if (bmp == null) {
+        PageSkeletonLoader(Modifier.fillMaxSize())
+      }
+      Canvas(
+        Modifier
+          .fillMaxSize()
+          .onSizeChanged { pageSize = it }
+          .semantics {
+            contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${pageIndex + 1}")
+          }
+          .graphicsLayer {
+            scaleX = zoom
+            scaleY = zoom
+            translationX = pan.x
+            translationY = pan.y
+          }
+          // Pinch zoom (two fingers), pan while zoomed (one finger), and a
+          // swipe past the page edge changes page at the same zoom.
+          .pointerInput(Unit) {
+            awaitEachGesture {
+              awaitFirstDown(requireUnconsumed = false)
+              var edgeOverscroll = Offset.Zero
+              var edgePageChangeSent = false
+              do {
+                val event = awaitPointerEvent()
+                val pressed = event.changes.count { it.pressed }
+                val canceled = event.changes.any { it.isConsumed }
+                if (!canceled) {
+                  if (pressed >= 2) {
+                    val zoomChange = event.calculateZoom()
+                    val panChange = event.calculatePan()
+                    val centroid = event.calculateCentroid(useCurrent = true)
+                    val z = (currentZoom * zoomChange).coerceIn(1f, 5f)
+                    if (z == 1f) {
+                      onZoomChange(1f)
+                      pan = Offset.Zero
+                    } else {
+                      val k = z / currentZoom
+                      val centre = Offset(pageSize.width / 2f, pageSize.height / 2f)
+                      val q = centroid - centre - pan
+                      var next = pan + panChange + q * (1f - k)
+                      if (pageSize.width > 0 && pageSize.height > 0) {
+                        val maxX = pageSize.width * (z - 1f) / 2f
+                        val maxY = pageSize.height * (z - 1f) / 2f
+                        next = Offset(
+                          next.x.coerceIn(-maxX, maxX),
+                          next.y.coerceIn(-maxY, maxY)
+                        )
                       }
-                      // A pinch restarts any edge-swipe accumulation.
-                      edgeOverscroll = Offset.Zero
-                      edgePageChangeSent = false
-                      event.changes.forEach { it.consume() }
-                    } else if (pressed == 1 && currentZoom > 1f) {
-                      val panChange = event.calculatePan()
-                      if (panChange != Offset.Zero) {
-                        var next = pan + panChange
-                        if (pageSize.width > 0 && pageSize.height > 0) {
-                          val maxX = pageSize.width * (currentZoom - 1f) / 2f
-                          val maxY = pageSize.height * (currentZoom - 1f) / 2f
-                          next = Offset(
-                            next.x.coerceIn(-maxX, maxX),
-                            next.y.coerceIn(-maxY, maxY)
-                          )
-                        }
-                        val moved = next - pan
-                        pan = next
-                        if (moved != Offset.Zero) {
-                          // The page actually panned: consume the drag
-                          // and forget any earlier edge overscroll — a
-                          // fresh swipe past the edge starts clean, so
-                          // panning to the edge and then continuing the
-                          // SAME swipe still turns the page below.
-                          edgeOverscroll = Offset.Zero
-                          event.changes.forEach { it.consume() }
-                        } else {
-                          // PHONE FIX 2026-11-19 (issue 4): the page is
-                          // already at its edge, so this drag cannot pan
-                          // it any further. The old code consumed it
-                          // anyway, so the LazyColumn never saw the swipe
-                          // and the user was stuck on the page until they
-                          // zoomed fully out. Do NOT consume it: pile it
-                          // up, and once one straight swipe past the edge
-                          // passes 72dp, turn it into a page change at
-                          // the SAME zoom (never force a zoom-out). The
-                          // list also gets the unconsumed drag, so at the
-                          // document's first/last page it just
-                          // overscrolls instead of changing page.
-                          edgeOverscroll += panChange
-                          val threshold = currentEdgeThreshold
-                          if (!edgePageChangeSent &&
-                            (kotlin.math.abs(edgeOverscroll.x) >= threshold ||
-                              kotlin.math.abs(edgeOverscroll.y) >= threshold)
-                          ) {
-                            val verticalFirst = kotlin.math.abs(edgeOverscroll.y) >= kotlin.math.abs(edgeOverscroll.x)
-                            val delta = if (verticalFirst) {
-                              // Drag up past the bottom edge -> next
-                              // page; drag down past the top -> previous.
-                              if (edgeOverscroll.y < 0f) 1 else -1
-                            } else {
-                              // Drag left past the right edge -> next
-                              // page; drag right past the left -> previous.
-                              if (edgeOverscroll.x < 0f) 1 else -1
-                            }
-                            edgePageChangeSent = true
-                            edgeOverscroll = Offset.Zero
-                            currentPageChange?.invoke(currentPageIndex + delta)
+                      pan = next
+                      onZoomChange(z)
+                    }
+                    edgeOverscroll = Offset.Zero
+                    edgePageChangeSent = false
+                    event.changes.forEach { it.consume() }
+                  } else if (pressed == 1 && currentZoom > 1f) {
+                    val panChange = event.calculatePan()
+                    if (panChange != Offset.Zero) {
+                      var next = pan + panChange
+                      if (pageSize.width > 0 && pageSize.height > 0) {
+                        val maxX = pageSize.width * (currentZoom - 1f) / 2f
+                        val maxY = pageSize.height * (currentZoom - 1f) / 2f
+                        next = Offset(
+                          next.x.coerceIn(-maxX, maxX),
+                          next.y.coerceIn(-maxY, maxY)
+                        )
+                      }
+                      val moved = next - pan
+                      pan = next
+                      if (moved != Offset.Zero) {
+                        edgeOverscroll = Offset.Zero
+                        event.changes.forEach { it.consume() }
+                      } else {
+                        edgeOverscroll += panChange
+                        val threshold = currentEdgeThreshold
+                        if (!edgePageChangeSent &&
+                          (kotlin.math.abs(edgeOverscroll.x) >= threshold ||
+                            kotlin.math.abs(edgeOverscroll.y) >= threshold)
+                        ) {
+                          val verticalFirst = kotlin.math.abs(edgeOverscroll.y) >= kotlin.math.abs(edgeOverscroll.x)
+                          val delta = if (verticalFirst) {
+                            if (edgeOverscroll.y < 0f) 1 else -1
+                          } else {
+                            if (edgeOverscroll.x < 0f) 1 else -1
                           }
+                          edgePageChangeSent = true
+                          edgeOverscroll = Offset.Zero
+                          currentPageChange?.invoke(currentPageIndex + delta)
                         }
                       }
                     }
-                    // One finger at 100%: nothing consumed — the list scrolls.
                   }
-                } while (event.changes.any { it.pressed })
-              }
-            }
-            .pointerInput(Unit) {
-              detectTapGestures(
-                onDoubleTap = {
-                  if (currentZoom > 1f) onZoomChange(1f)
-                  else onZoomChange(2.5f)
                 }
-              )
-            },
-          contentScale = ContentScale.FillWidth
-        )
+              } while (event.changes.any { it.pressed })
+            }
+          }
+          .pointerInput(Unit) {
+            detectTapGestures(
+              onDoubleTap = {
+                if (currentZoom > 1f) onZoomChange(1f)
+                else onZoomChange(2.5f)
+              }
+            )
+          }
+      ) {
+        val nc = drawContext.canvas.nativeCanvas
+        val b = bmp
+        if (b != null && !b.isRecycled) {
+          drawMatrix.reset()
+          drawMatrix.setScale(size.width / b.width, size.height / b.height)
+          nc.drawBitmap(b, drawMatrix, paint)
+        }
+        val r = region
+        if (r != null && !r.tile.bitmap.isRecycled) {
+          drawMatrix.reset()
+          drawMatrix.setScale(r.tile.invScale, r.tile.invScale)
+          drawMatrix.postTranslate(r.tile.left, r.tile.top)
+          nc.drawBitmap(r.tile.bitmap, drawMatrix, paint)
+        }
       }
     }
     Spacer(Modifier.height(Ds.s4))
     Text(LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${pageIndex + 1}"), fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
   }
 }
+
 
 
 // Final-audit: password strength as a language-independent level.

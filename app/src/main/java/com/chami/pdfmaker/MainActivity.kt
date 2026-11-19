@@ -27,7 +27,6 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.snapshots.mutableStateSetOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,7 +97,7 @@ class MainActivity : ComponentActivity() {
       // enteredTiles remembers which tiles already played, so a tile
       // never re-animates when it scrolls back into view.
       val animationsOn = remember { animationsEnabled(ctx) }
-      val enteredTiles = remember { mutableStateSetOf<String>() }
+      val enteredTiles = remember { mutableStateOf(setOf<String>()) }
       // History keeps its scroll position across tab switches: the list
       // state lives here, not inside HistoryScreen.
       val historyListState = remember { androidx.compose.foundation.lazy.LazyListState() }
@@ -489,8 +488,8 @@ class MainActivity : ComponentActivity() {
                           ToolTile(
                             t,
                             enterDelayMs = flatTools.indexOf(t) * Ds.STAGGER_MS,
-                            animateIn = animationsOn && !enteredTiles.contains(t.id),
-                            onEntered = { enteredTiles.add(it) }
+                            animateIn = animationsOn && !enteredTiles.value.contains(t.id),
+                            onEntered = { enteredTiles.value += it }
                           )
                         }
                       }

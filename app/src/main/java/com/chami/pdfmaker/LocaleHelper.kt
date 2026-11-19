@@ -302,7 +302,7 @@ object LocaleHelper {
       "settings_section_general" to "General",
       "settings_section_security" to "Security",
       "settings_storage_value" to "{used} used • {cache} cache",
-      "settings_update_unavailable_body" to "This check needs the store app, which is not available on this device. You are on version {version}. Open the store listing on your phone to check for a newer version.",
+      "settings_update_unavailable_body" to "Could not open the website to check for updates. You are on version {version}. Visit chamitools.github.io/chami-pdf-maker-website to check for a newer version.",
       "toast_app_lock_off" to "App Lock OFF",
       "toast_app_lock_on" to "App Lock ON",
       "toast_cache_cleared" to "Cache cleared",

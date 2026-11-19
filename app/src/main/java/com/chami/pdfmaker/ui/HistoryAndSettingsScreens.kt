@@ -1292,9 +1292,12 @@ fun SettingsScreen(
 
   fun checkForUpdates() {
     try {
+      // FIX 2026-11-19: the app is not on Google Play, so the old
+      // market:// link went nowhere. Updates now open the website's
+      // download section, where the latest APK is.
       val intent = Intent(
         Intent.ACTION_VIEW,
-        Uri.parse("market://details?id=${ctx.packageName}")
+        Uri.parse("https://chamitools.github.io/chami-pdf-maker-website/#download-app")
       )
       if (intent.resolveActivity(ctx.packageManager) != null) {
         ctx.startActivity(intent)
@@ -1847,8 +1850,8 @@ fun SettingsScreen(
     )
   }
 
-  // Dialog: Check for Updates — shown only when the store app is not
-  // available, so the check cannot be faked as "latest version".
+  // Dialog: Check for Updates — shown only when no browser can open
+  // the website link, so the check cannot be faked as "latest version".
   if (showUpdateDialog) {
     ChamiAlertDialog(theme,
       onDismissRequest = { showUpdateDialog = false },

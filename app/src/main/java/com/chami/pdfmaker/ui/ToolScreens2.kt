@@ -22,11 +22,19 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -61,6 +69,7 @@ import androidx.compose.ui.geometry.Rect as ComposeRect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -72,6 +81,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
@@ -101,6 +111,168 @@ import java.io.FileOutputStream
 // Shares the helpers in ToolScreens.kt (same package).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Phase 5 — shared polish for the Merge / Compress / Protect screens in
+// this file: one section-header style (green accent bar, as on Home),
+// one card style, one segmented tab row, one empty state, and the
+// staggered enter fade for list rows. No behaviour change — these only
+// restyle what the three screens already render.
+// ---------------------------------------------------------------------------
+
+/** Phase 5: section header matching Home — 4dp green accent bar + bold
+ *  section text. `topPadding` is 0 inside cards, Ds.s16 between blocks. */
+@Composable
+private fun ToolSectionHeader(text: String, color: Color, topPadding: Dp = Ds.s16) {
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    modifier = Modifier.padding(top = topPadding, bottom = Ds.s12)
+  ) {
+    Box(
+      Modifier
+        .width(Ds.s4)
+        .height(Ds.s20)
+        .clip(RoundedCornerShape(Ds.pillRadius))
+        .background(ChamiColors.darkGreen)
+    )
+    Spacer(Modifier.width(Ds.s8))
+    SectionText(text, color = color)
+  }
+}
+
+/** Phase 5: the one card style for these screens — 12dp radius, card
+ *  background, 1dp border, 16dp padding by default. */
+@Composable
+private fun ToolCard(
+  theme: ChamiTheme,
+  modifier: Modifier = Modifier,
+  padding: Dp = Ds.s16,
+  horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+  content: @Composable ColumnScope.() -> Unit
+) {
+  Column(
+    modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(Ds.tileRadius))
+      .background(theme.card)
+      .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
+      .padding(padding),
+    horizontalAlignment = horizontalAlignment
+  ) {
+    content()
+  }
+}
+
+/** Phase 5: segmented tab row shared by Compress (Image/PDF) and
+ *  Protect (Protect/Unlock) — same card, same 48dp pills, same
+ *  selected green. Pills shrink slightly while pressed (Phase 3
+ *  pressScale); the labels are passed through unchanged. */
+@Composable
+private fun ToolTabRow(
+  tabs: List<String>,
+  selectedIndex: Int,
+  onSelect: (Int) -> Unit,
+  theme: ChamiTheme,
+  animOn: Boolean,
+  onTap: () -> Unit
+) {
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(Ds.tileRadius))
+      .background(theme.card)
+      .padding(Ds.s4),
+    horizontalArrangement = Arrangement.spacedBy(Ds.s4)
+  ) {
+    tabs.forEachIndexed { index, label ->
+      val interactionSource = remember { MutableInteractionSource() }
+      Box(
+        modifier = Modifier
+          .weight(1f)
+          .height(Ds.minTouch)
+          .clip(RoundedCornerShape(Ds.s8))
+          .background(if (selectedIndex == index) theme.primary else Color.Transparent)
+          .pressScale(animOn, interactionSource)
+          .clickable(
+            interactionSource = interactionSource,
+            indication = LocalIndication.current
+          ) { onTap(); onSelect(index) },
+        contentAlignment = Alignment.Center
+      ) {
+        Text(
+          label,
+          fontWeight = FontWeight.Bold,
+          fontSize = Ds.HINT_SP.sp,
+          color = if (selectedIndex == index) Color.White else theme.text
+        )
+      }
+    }
+  }
+}
+
+/** Phase 5: empty state for "no file yet" — icon + one line of
+ *  guidance, in the same card style. The text reuses an existing
+ *  LocaleHelper string (no new keys). */
+@Composable
+private fun ToolEmptyState(icon: ImageVector, text: String, theme: ChamiTheme) {
+  Column(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(Ds.tileRadius))
+      .background(theme.card)
+      .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
+      .padding(Ds.s16),
+    horizontalAlignment = Alignment.CenterHorizontally
+  ) {
+    Icon(icon, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(Ds.tileIconSize))
+    Spacer(Modifier.height(Ds.s8))
+    Text(text, fontSize = Ds.BODY_SP.sp, color = theme.textSecondary, textAlign = TextAlign.Center)
+  }
+}
+
+/** Phase 5: pulsing skeleton row while Merge previews render — same
+ *  900ms pulse as PageSkeletonLoader, GPU alpha only. 80dp matches
+ *  the file row (12dp padding + 56dp thumbnail). */
+@Composable
+private fun MergeRowSkeleton() {
+  val pulse by rememberInfiniteTransition(label = "mergeSkeleton").animateFloat(
+    initialValue = 0.35f, targetValue = 0.7f,
+    animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+    label = "mergeSkeletonAlpha"
+  )
+  Box(
+    Modifier
+      .fillMaxWidth()
+      .height(80.dp)
+      .clip(RoundedCornerShape(Ds.tileRadius))
+      .background(ChamiColors.skeletonBg)
+      .graphicsLayer { alpha = pulse }
+  )
+}
+
+/** Phase 5: staggered fade-up for list rows, mirroring the Home
+ *  tiles — fade + 16dp rise, Ds.STAGGER_MS apart, shared easing.
+ *  Instant (no motion) when animations are off. */
+@Composable
+private fun Modifier.toolEnterFade(index: Int, enabled: Boolean): Modifier {
+  var entered by remember { mutableStateOf(!enabled) }
+  LaunchedEffect(Unit) {
+    if (enabled) {
+      delay((index * Ds.STAGGER_MS).toLong())
+      entered = true
+    }
+  }
+  val density = LocalDensity.current
+  val alpha by animateFloatAsState(
+    targetValue = if (entered) 1f else 0f,
+    animationSpec = tween(Ds.ANIM_MS, easing = Ds.sharedEasing), label = "toolEnterAlpha"
+  )
+  val offsetY by animateFloatAsState(
+    targetValue = if (entered) 0f else with(density) { Ds.enterOffsetY.toPx() },
+    animationSpec = tween(Ds.ANIM_MS, easing = Ds.sharedEasing), label = "toolEnterOffset"
+  )
+  return this.graphicsLayer { this.alpha = alpha; translationY = offsetY }
+}
+
 @Composable
 fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
   val ctx = LocalContext.current
@@ -108,6 +280,8 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
   val density = LocalDensity.current
+  // Phase 5: motion gate for the staggered row enter animation.
+  val animOn = animationsEnabled(ctx)
   var pdfUris by rememberSaveableUriList()
   var pdfPreviews by remember { mutableStateOf<List<Pair<Int, Bitmap?>>>(emptyList()) }
   var initialConsumed by rememberSaveable { mutableStateOf(false) }
@@ -276,6 +450,16 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       )
       HintText("Merged pages are rendered as images — text in the merged file is not selectable.")
 
+      // Phase 5: empty state while no file is chosen yet.
+      if (pdfUris.isEmpty()) {
+        Spacer(Modifier.height(Ds.s16))
+        ToolEmptyState(
+          icon = Icons.Filled.PictureAsPdf,
+          text = LocaleHelper.t(ctx, "toast_merge_need_two"),
+          theme = theme
+        )
+      }
+
       if (pdfPreviews.isNotEmpty()) {
         Spacer(Modifier.height(Ds.s16))
         val totalCombinedPages = pdfPreviews.sumOf { it.first }
@@ -298,15 +482,17 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
             Row(
               Modifier
                 .fillMaxWidth()
+                // Phase 5: staggered fade-up on first appearance.
+                .toolEnterFade(index, animOn)
                 .graphicsLayer {
                   translationY = if (isDragging) dragOffsetY else 0f
                   scaleX = if (isDragging) 1.02f else 1f
                   scaleY = if (isDragging) 1.02f else 1f
                   shadowElevation = if (isDragging) 12f else 0f
                 }
-                .clip(RoundedCornerShape(Ds.s8))
+                .clip(RoundedCornerShape(Ds.tileRadius))
                 .background(theme.card)
-                .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s8))
+                .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
                 .pointerInput(rowUri) {
                   detectDragGesturesAfterLongPress(
                     onDragStart = {
@@ -332,18 +518,29 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
                     onDragCancel = { draggingUri = null; dragOffsetY = 0f }
                   )
                 }
-                .padding(Ds.s8),
+                .padding(Ds.s12),
               verticalAlignment = Alignment.CenterVertically
             ) {
-              Icon(Icons.Filled.DragHandle, contentDescription = "Drag to reorder", tint = theme.textSecondary, modifier = Modifier.size(24.dp))
+              Icon(Icons.Filled.DragHandle, contentDescription = "Drag to reorder", tint = theme.textSecondary, modifier = Modifier.size(Ds.iconSize))
               Spacer(Modifier.width(Ds.s8))
-              pair.second?.let { bmp ->
+              if (pair.second != null) {
                 Image(
-                  bitmap = bmp.asImageBitmap(),
+                  bitmap = pair.second!!.asImageBitmap(),
                   contentDescription = "PDF ${index + 1}",
                   modifier = Modifier.size(56.dp).clip(RoundedCornerShape(Ds.s4)),
                   contentScale = ContentScale.Fit
                 )
+              } else {
+                // Phase 5: grey placeholder until the page render lands.
+                Box(
+                  Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(Ds.s4))
+                    .background(ChamiColors.skeletonBg),
+                  contentAlignment = Alignment.Center
+                ) {
+                  Icon(Icons.Filled.PictureAsPdf, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(Ds.iconSize))
+                }
               }
               Spacer(Modifier.width(Ds.s12))
               Column(Modifier.weight(1f)) {
@@ -378,6 +575,10 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
                 }
               )
             }
+          }
+          // Phase 5: skeleton rows while the picked files still render.
+          if (pdfUris.isNotEmpty() && pdfPreviews.size < pdfUris.size) {
+            repeat(pdfUris.size - pdfPreviews.size) { MergeRowSkeleton() }
           }
         }
         // FIX 2026-11-18 (report #14): the long-press drag hint sits
@@ -423,6 +624,8 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
+  // Phase 5: motion gate for the tab-row press-scale.
+  val animOn = animationsEnabled(ctx)
 
   var selectedTab by rememberSaveable { mutableStateOf(0) } // 0: IMAGE, 1: PDF
   var quality by rememberSaveable { mutableStateOf(70) }
@@ -707,33 +910,15 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
 
   ToolScreenContainer("Compress KB", theme, onBack) {
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clip(RoundedCornerShape(Ds.s8))
-          .background(theme.card)
-          .padding(Ds.s4),
-        horizontalArrangement = Arrangement.spacedBy(Ds.s4)
-      ) {
-        listOf("Compress image" to 0, "Compress PDF" to 1).forEach { (label, tab) ->
-          Box(
-            modifier = Modifier
-              .weight(1f)
-              .height(Ds.minTouch)
-              .clip(RoundedCornerShape(Ds.s8))
-              .background(if (selectedTab == tab) theme.primary else Color.Transparent)
-              .clickable { vibrate(); selectedTab = tab },
-            contentAlignment = Alignment.Center
-          ) {
-            Text(
-              label,
-              fontWeight = FontWeight.Bold,
-              fontSize = Ds.HINT_SP.sp,
-              color = if (selectedTab == tab) Color.White else theme.text
-            )
-          }
-        }
-      }
+      // Phase 5: shared segmented tab row (same as Protect).
+      ToolTabRow(
+        tabs = listOf("Compress image", "Compress PDF"),
+        selectedIndex = selectedTab,
+        onSelect = { selectedTab = it },
+        theme = theme,
+        animOn = animOn,
+        onTap = { vibrate() }
+      )
 
       Spacer(Modifier.height(Ds.s16))
 
@@ -743,16 +928,21 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
           onClick = { vibrate(); imagePicker.launch("image/*") },
           modifier = Modifier.fillMaxWidth()
         )
+        // Phase 5: empty state while no image is chosen yet.
+        if (imageUris.isEmpty()) {
+          Spacer(Modifier.height(Ds.s16))
+          ToolEmptyState(
+            icon = Icons.Filled.Image,
+            text = LocaleHelper.t(ctx, "reason_select_images_first"),
+            theme = theme
+          )
+        }
         if (imagePreview != null) {
           Spacer(Modifier.height(Ds.s16))
-          SectionText("Original preview", color = theme.text)
-          Spacer(Modifier.height(Ds.s8))
-          Column(
-            modifier = Modifier
-              .fillMaxWidth()
-              .clip(RoundedCornerShape(Ds.s8))
-              .background(theme.card)
-              .padding(Ds.s12),
+          ToolSectionHeader("Original preview", theme.text)
+          ToolCard(
+            theme = theme,
+            padding = Ds.s12,
             horizontalAlignment = Alignment.CenterHorizontally
           ) {
             Image(
@@ -769,8 +959,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
           }
         }
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Target size", color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
+        ToolSectionHeader("Target size", theme.text)
         // Compact 2x2 grid (8dp gaps) — the old single Row was ~545dp
         // wide on a ~360dp screen, so chips ran off-screen and the
         // block looked spaced out. Same options, same behaviour.
@@ -841,23 +1030,44 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
           Spacer(Modifier.height(Ds.s8))
           Text(UNOPENABLE_PDF_MESSAGE, fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
         }
+        // Phase 5: empty state while no PDF is chosen yet.
+        if (pdfUri == null) {
+          Spacer(Modifier.height(Ds.s16))
+          ToolEmptyState(
+            icon = Icons.Filled.PictureAsPdf,
+            text = LocaleHelper.t(ctx, "reason_pick_pdf_first"),
+            theme = theme
+          )
+        }
         if (pdfUri != null) {
           Spacer(Modifier.height(Ds.s16))
           Row(
             modifier = Modifier
               .fillMaxWidth()
-              .clip(RoundedCornerShape(Ds.s8))
+              .clip(RoundedCornerShape(Ds.tileRadius))
               .background(theme.card)
-              .padding(Ds.s12),
+              .padding(Ds.s16),
             verticalAlignment = Alignment.CenterVertically
           ) {
-            pdfPreviewBmp?.let { bmp ->
+            if (pdfPreviewBmp != null) {
               Image(
-                bitmap = bmp.asImageBitmap(),
+                bitmap = pdfPreviewBmp!!.asImageBitmap(),
                 contentDescription = "PDF Preview",
                 modifier = Modifier.size(120.dp).clip(RoundedCornerShape(Ds.s8)),
                 contentScale = ContentScale.Fit
               )
+              Spacer(Modifier.width(Ds.s12))
+            } else {
+              // Phase 5: grey placeholder until the first page renders.
+              Box(
+                Modifier
+                  .size(120.dp)
+                  .clip(RoundedCornerShape(Ds.s8))
+                  .background(ChamiColors.skeletonBg),
+                contentAlignment = Alignment.Center
+              ) {
+                Icon(Icons.Filled.PictureAsPdf, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(Ds.iconSize))
+              }
               Spacer(Modifier.width(Ds.s12))
             }
             Column {
@@ -2534,6 +2744,8 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
+  // Phase 5: motion gate for the tab-row press-scale.
+  val animOn = animationsEnabled(ctx)
 
   var mode by rememberSaveable { mutableStateOf("Protect") }
 
@@ -2728,45 +2940,19 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
         .verticalScroll(rememberScrollState()),
       verticalArrangement = Arrangement.spacedBy(Ds.s16)
     ) {
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clip(RoundedCornerShape(Ds.s8))
-          .background(theme.card)
-          .padding(Ds.s4),
-        horizontalArrangement = Arrangement.spacedBy(Ds.s4)
-      ) {
-        listOf("Protect", "Unlock").forEach { m ->
-          Box(
-            modifier = Modifier
-              .weight(1f)
-              .height(Ds.minTouch)
-              .clip(RoundedCornerShape(Ds.s8))
-              .background(if (mode == m) theme.primary else Color.Transparent)
-              .clickable { vibrate(); mode = m },
-            contentAlignment = Alignment.Center
-          ) {
-            Text(
-              m.uppercase(),
-              fontWeight = FontWeight.Bold,
-              fontSize = Ds.HINT_SP.sp,
-              color = if (mode == m) Color.White else theme.text
-            )
-          }
-        }
-      }
+      // Phase 5: shared segmented tab row (same as Compress).
+      ToolTabRow(
+        tabs = listOf("PROTECT", "UNLOCK"),
+        selectedIndex = if (mode == "Protect") 0 else 1,
+        onSelect = { mode = if (it == 0) "Protect" else "Unlock" },
+        theme = theme,
+        animOn = animOn,
+        onTap = { vibrate() }
+      )
 
       if (mode == "Unlock") {
-        Column(
-          Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Ds.tileRadius))
-            .background(theme.card)
-            .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
-            .padding(Ds.s16)
-        ) {
-          SectionText("Unlock a protected PDF", color = theme.text)
-          Spacer(Modifier.height(Ds.s12))
+        ToolCard(theme = theme) {
+          ToolSectionHeader("Unlock a protected PDF", theme.text, topPadding = 0.dp)
           ChamiSecondaryButton(
             text = if (unlockUri == null) "Choose protected PDF" else "Change PDF file",
             onClick = { vibrate(); unlockPicker.launch("application/pdf") },
@@ -2808,16 +2994,8 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
           LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
         }
       } else {
-        Column(
-          Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Ds.tileRadius))
-            .background(theme.card)
-            .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
-            .padding(Ds.s16)
-        ) {
-          SectionText("1. Select PDF document", color = theme.text)
-          Spacer(Modifier.height(Ds.s12))
+        ToolCard(theme = theme) {
+          ToolSectionHeader("1. Select PDF document", theme.text, topPadding = 0.dp)
           ChamiSecondaryButton(
             text = if (selectedUri == null) "Choose PDF file" else "Change PDF file",
             onClick = { vibrate(); pdfPicker.launch("application/pdf") },
@@ -2845,11 +3023,12 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
                   contentScale = ContentScale.Crop
                 )
               } else {
+                // Phase 5: grey placeholder until the first page renders.
                 Box(
                   Modifier
                     .size(56.dp, 72.dp)
                     .clip(RoundedCornerShape(Ds.s8))
-                    .background(theme.card),
+                    .background(ChamiColors.skeletonBg),
                   contentAlignment = Alignment.Center
                 ) {
                   Icon(Icons.Filled.PictureAsPdf, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(24.dp))
@@ -2870,16 +3049,9 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
         }
 
         if (selectedUri != null) {
-          Column(
-            Modifier
-              .fillMaxWidth()
-              .clip(RoundedCornerShape(Ds.tileRadius))
-              .background(theme.card)
-              .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
-              .padding(Ds.s16)
-          ) {
-            SectionText("2. Set encryption password", color = theme.text)
-            Spacer(Modifier.height(Ds.s16))
+          ToolCard(theme = theme) {
+            ToolSectionHeader("2. Set encryption password", theme.text, topPadding = 0.dp)
+            Spacer(Modifier.height(Ds.s4))
             OutlinedTextField(
               value = password,
               onValueChange = { password = it },
@@ -2926,17 +3098,16 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
               }
             }
             Spacer(Modifier.height(Ds.s16))
-            SectionText("Permissions", color = theme.text)
-            Spacer(Modifier.height(Ds.s8))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            ToolSectionHeader("Permissions", theme.text, topPadding = 0.dp)
+            Row(Modifier.fillMaxWidth().defaultMinSize(minHeight = Ds.minTouch), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
               Text("Allow printing", fontSize = Ds.BODY_SP.sp, color = theme.text)
               Switch(checked = allowPrint, onCheckedChange = { allowPrint = it })
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth().defaultMinSize(minHeight = Ds.minTouch), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
               Text("Allow copying text", fontSize = Ds.BODY_SP.sp, color = theme.text)
               Switch(checked = allowCopy, onCheckedChange = { allowCopy = it })
             }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth().defaultMinSize(minHeight = Ds.minTouch), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
               Text("Allow editing", fontSize = Ds.BODY_SP.sp, color = theme.text)
               Switch(checked = allowEdit, onCheckedChange = { allowEdit = it })
             }

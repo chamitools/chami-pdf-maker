@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.provider.OpenableColumns
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -80,10 +81,31 @@ object PdfCompress {
     outFile: File
   ): PdfCompressResult = compressPdf(ctx, pdfUri, presetByLabel(label), outFile)
 
-  // Size of the file behind a content Uri, in bytes, counted by
-  // streaming (openInputStream().available() is unreliable).
-  // Returns -1 if the size cannot be read.
+  // Size of the file behind a Uri, in bytes. Cheap lookup first
+  // (L15): content:// -> OpenableColumns.SIZE, file:// -> File.length().
+  // The old code streamed the ENTIRE file just to count bytes, called
+  // per file in Merge refreshPreviews. Streaming count is kept only as
+  // a last resort when both lookups fail (unknown provider / no SIZE
+  // column). Returns -1 if the size cannot be read.
   fun originalSizeBytes(ctx: Context, uri: Uri): Long {
+    if (uri.scheme == "content") {
+      try {
+        ctx.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+          if (c.moveToFirst()) {
+            val idx = c.getColumnIndex(OpenableColumns.SIZE)
+            if (idx >= 0 && !c.isNull(idx)) {
+              val size = c.getLong(idx)
+              if (size >= 0) return size
+            }
+          }
+        }
+      } catch (_: Exception) { /* fall through to streaming count */ }
+    } else if (uri.scheme == "file") {
+      try {
+        val f = uri.path?.let { File(it) }
+        if (f != null && f.exists()) return f.length()
+      } catch (_: Exception) { /* fall through to streaming count */ }
+    }
     return try {
       var total = 0L
       val buf = ByteArray(8192)

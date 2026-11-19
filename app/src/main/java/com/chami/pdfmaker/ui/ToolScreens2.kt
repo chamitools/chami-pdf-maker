@@ -49,7 +49,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -77,6 +77,10 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -105,6 +109,11 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+
+// Final-audit: Merge renders page-1 bitmaps for at most this many
+// files; later rows show the grey placeholder (page counts are still
+// computed for every file, so totals and the slide stay correct).
+private const val MAX_MERGE_PREVIEWS = 20
 
 // ---------------------------------------------------------------------------
 // ToolScreens (part 2): Merge, Compress, Resize/Convert, OCR, Reader, Protect.
@@ -186,12 +195,21 @@ internal fun ToolTabRow(
     horizontalArrangement = Arrangement.spacedBy(Ds.s4)
   ) {
     tabs.forEachIndexed { index, label ->
+      // Final-audit: the interaction source is keyed per tab, so a
+      // reordered/changed tab list cannot hand one tab another's
+      // remembered source; each pill is a real Tab for accessibility.
+      key(label) {
       val interactionSource = remember { MutableInteractionSource() }
       Box(
         modifier = Modifier
           .weight(1f)
           .height(Ds.minTouch)
           .clip(RoundedCornerShape(Ds.s8))
+          .semantics {
+            role = Role.Tab
+            selected = selectedIndex == index
+            contentDescription = label
+          }
           .background(if (selectedIndex == index) theme.primary else Color.Transparent)
           .pressScale(animOn, interactionSource)
           .clickable(
@@ -206,6 +224,7 @@ internal fun ToolTabRow(
           fontSize = Ds.HINT_SP.sp,
           color = if (selectedIndex == index) Color.White else theme.text
         )
+      }
       }
     }
   }
@@ -235,7 +254,10 @@ internal fun ToolEmptyState(icon: ImageVector, text: String, theme: ChamiTheme) 
  *  900ms pulse as PageSkeletonLoader, GPU alpha only. 80dp matches
  *  the file row (12dp padding + 56dp thumbnail). */
 @Composable
-private fun MergeRowSkeleton() {
+private fun MergeRowSkeleton(animOn: Boolean) {
+  // Final-audit: when animations are off the transition still exists
+  // (hook order must stay stable) but its value is not applied —
+  // the box is drawn static grey instead of pulsing.
   val pulse by rememberInfiniteTransition(label = "mergeSkeleton").animateFloat(
     initialValue = 0.35f, targetValue = 0.7f,
     animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
@@ -247,7 +269,7 @@ private fun MergeRowSkeleton() {
       .height(80.dp)
       .clip(RoundedCornerShape(Ds.tileRadius))
       .background(ChamiColors.skeletonBg)
-      .graphicsLayer { alpha = pulse }
+      .graphicsLayer { alpha = if (animOn) pulse else 0.7f }
   )
 }
 
@@ -257,7 +279,9 @@ private fun MergeRowSkeleton() {
  *  height matches the content that will replace it, so the layout
  *  does not jump when the load finishes. */
 @Composable
-private fun Phase6SkeletonBox(height: Dp) {
+private fun Phase6SkeletonBox(height: Dp, animOn: Boolean) {
+  // Final-audit: same gate as MergeRowSkeleton — static grey when
+  // animations are off, never a pulse.
   val pulse by rememberInfiniteTransition(label = "phase6Skeleton").animateFloat(
     initialValue = 0.35f, targetValue = 0.7f,
     animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
@@ -269,7 +293,22 @@ private fun Phase6SkeletonBox(height: Dp) {
       .height(height)
       .clip(RoundedCornerShape(Ds.tileRadius))
       .background(ChamiColors.skeletonBg)
-      .graphicsLayer { alpha = pulse }
+      .graphicsLayer { alpha = if (animOn) pulse else 0.7f }
+  )
+}
+
+/** Final-audit: one Merge row thumbnail — the ImageBitmap is
+ *  wrapped once per bitmap (remember(bmp)), not re-created on every
+ *  recomposition of the row (the list recomposes on every drag). */
+@Composable
+private fun MergeRowThumbnail(bmp: Bitmap, index: Int) {
+  val ctx = LocalContext.current
+  val image = remember(bmp) { bmp.asImageBitmap() }
+  Image(
+    bitmap = image,
+    contentDescription = LocaleHelper.t(ctx, "merge_preview_page").replace("{n}", "${index + 1}"),
+    modifier = Modifier.size(56.dp).clip(RoundedCornerShape(Ds.s4)),
+    contentScale = ContentScale.Fit
   )
 }
 
@@ -362,10 +401,18 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   fun refreshPreviews(uris: List<Uri>) {
     previewJob?.cancel()
     previewJob = scope.launch(Dispatchers.IO) {
-      val previews = uris.map { u ->
+      val previews = uris.mapIndexed { idx, u ->
         val count = PdfEngine.pageCount(ctx, u)
-        val bmp = PdfReader.renderPageBitmap(ctx, u, 0, 1.5f)
+        // Only the first MAX_MERGE_PREVIEWS bitmaps are rendered —
+        // later rows keep the grey placeholder instead of holding an
+        // unbounded set of bitmaps in memory.
+        val bmp = if (idx < MAX_MERGE_PREVIEWS) PdfReader.renderPageBitmap(ctx, u, 0, 1.5f) else null
         Pair(count, bmp)
+      }
+      if (coroutineContext[Job]?.isActive == false) {
+        // Cancelled while rendering: nobody will display these.
+        previews.forEach { (_, b) -> try { b?.recycle() } catch (_: Exception) {} }
+        return@launch
       }
       val sizes = uris.map { uriSizeBytes(ctx, it).coerceAtLeast(0) }
       withContext(Dispatchers.Main) {
@@ -441,7 +488,7 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
     // "Page X of N" is not possible from this screen without an engine
     // change — the total page count is shown instead of a bare spinner.
     val totalPages = pdfPreviews.sumOf { it.first }
-    mergeProgressText = if (totalPages > 0) "Merging $totalPages pages…" else "Merging PDF pages..."
+    mergeProgressText = if (totalPages > 0) LocaleHelper.t(ctx, "merge_progress_pages").replace("{n}", "$totalPages") else LocaleHelper.t(ctx, "merge_progress")
     scope.launch {
       val out = PdfEngine.outFile(ctx, "MERGED_${System.currentTimeMillis()}.pdf")
       val sources = pdfUris.map { it to null }
@@ -465,14 +512,14 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
     return
   }
 
-  ToolScreenContainer("Merge PDF", theme, onBack) {
+  ToolScreenContainer(LocaleHelper.t(ctx, "merge_pdf"), theme, onBack) {
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
       ChamiSecondaryButton(
-        text = "Choose PDFs (${pdfUris.size} selected)",
+        text = LocaleHelper.t(ctx, "merge_choose_pdfs").replace("{n}", "${pdfUris.size}"),
         onClick = { vibrate(); picker.launch("application/pdf") },
         modifier = Modifier.fillMaxWidth()
       )
-      HintText("Merged pages are rendered as images — text in the merged file is not selectable.")
+      HintText(LocaleHelper.t(ctx, "merge_rasterised_hint"))
 
       // Phase 5: empty state while no file is chosen yet.
       if (pdfUris.isEmpty()) {
@@ -488,7 +535,7 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         Spacer(Modifier.height(Ds.s16))
         val totalCombinedPages = pdfPreviews.sumOf { it.first }
         Text(
-          "$totalCombinedPages total pages combined",
+          LocaleHelper.t(ctx, "merge_total_pages").replace("{n}", "$totalCombinedPages"),
           fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text
         )
         Spacer(Modifier.height(Ds.s8))
@@ -501,13 +548,17 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         val rowPx = with(density) { 112.dp.toPx() }
         Column(verticalArrangement = Arrangement.spacedBy(Ds.s12)) {
           pdfPreviews.forEachIndexed { index, pair ->
-            val rowUri = pdfUris.getOrNull(index)
+            // Final-audit: pdfPreviews can briefly stay longer than
+            // pdfUris while a re-render is in flight (remove/reorder);
+            // skip the stale trailing row instead of crashing on
+            // pdfUris[index] below.
+            val rowUri = pdfUris.getOrNull(index) ?: return@forEachIndexed
             val isDragging = draggingUri != null && draggingUri == rowUri
             Row(
               Modifier
                 .fillMaxWidth()
                 // Phase 5: staggered fade-up on first appearance.
-                .toolEnterFade(index, animOn)
+                .toolEnterFade(minOf(index, 9), animOn)
                 .graphicsLayer {
                   translationY = if (isDragging) dragOffsetY else 0f
                   scaleX = if (isDragging) 1.02f else 1f
@@ -545,15 +596,10 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
                 .padding(Ds.s12),
               verticalAlignment = Alignment.CenterVertically
             ) {
-              Icon(Icons.Filled.DragHandle, contentDescription = "Drag to reorder", tint = theme.textSecondary, modifier = Modifier.size(Ds.iconSize))
+              Icon(Icons.Filled.DragHandle, contentDescription = LocaleHelper.t(ctx, "merge_drag_reorder"), tint = theme.textSecondary, modifier = Modifier.size(Ds.iconSize))
               Spacer(Modifier.width(Ds.s8))
               if (pair.second != null) {
-                Image(
-                  bitmap = pair.second!!.asImageBitmap(),
-                  contentDescription = "PDF ${index + 1}",
-                  modifier = Modifier.size(56.dp).clip(RoundedCornerShape(Ds.s4)),
-                  contentScale = ContentScale.Fit
-                )
+                MergeRowThumbnail(pair.second!!, index)
               } else {
                 // Phase 5: grey placeholder until the page render lands.
                 Box(
@@ -569,27 +615,27 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
               Spacer(Modifier.width(Ds.s12))
               Column(Modifier.weight(1f)) {
                 Text(
-                  displayNameOf(ctx, pdfUris[index]) ?: "Doc ${index + 1}",
+                  displayNameOf(ctx, pdfUris[index]) ?: LocaleHelper.t(ctx, "merge_doc_fallback").replace("{n}", "${index + 1}"),
                   fontSize = Ds.BODY_SP.sp, color = theme.text, fontWeight = FontWeight.Bold,
                   maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                  "${pair.first} pages • ${formatSizeText(pdfSizes.getOrNull(index) ?: 0)}",
+                  LocaleHelper.t(ctx, "merge_row_meta").replace("{pages}", "${pair.first}").replace("{size}", formatSizeText(pdfSizes.getOrNull(index) ?: 0)),
                   fontSize = Ds.HINT_SP.sp, color = theme.textSecondary
                 )
               }
               Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
                 ChamiIconButton(
-                  icon = Icons.Filled.KeyboardArrowUp, description = "Move up",
+                  icon = Icons.Filled.KeyboardArrowUp, description = LocaleHelper.t(ctx, "merge_move_up"),
                   onClick = { vibrate(); moveFile(index, index - 1) }
                 )
                 ChamiIconButton(
-                  icon = Icons.Filled.KeyboardArrowDown, description = "Move down",
+                  icon = Icons.Filled.KeyboardArrowDown, description = LocaleHelper.t(ctx, "merge_move_down"),
                   onClick = { vibrate(); moveFile(index, index + 1) }
                 )
               }
               ChamiIconButton(
-                icon = Icons.Filled.Close, description = "Remove file",
+                icon = Icons.Filled.Close, description = LocaleHelper.t(ctx, "merge_remove_file"),
                 onClick = {
                   vibrate()
                   val m = pdfUris.toMutableList()
@@ -602,20 +648,20 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
           }
           // Phase 5: skeleton rows while the picked files still render.
           if (pdfUris.isNotEmpty() && pdfPreviews.size < pdfUris.size) {
-            repeat(pdfUris.size - pdfPreviews.size) { MergeRowSkeleton() }
+            repeat(pdfUris.size - pdfPreviews.size) { MergeRowSkeleton(animOn) }
           }
         }
         // FIX 2026-11-18 (report #14): the long-press drag hint sits
         // under the file list, where the files it describes are.
         Spacer(Modifier.height(Ds.s8))
-        HintText("Long-press a row and drag to reorder. Arrow buttons move it one step.")
+        HintText(LocaleHelper.t(ctx, "merge_reorder_hint"))
       }
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
         LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
         Spacer(Modifier.height(Ds.s8))
-        Text(if (mergeProgressText.isNotEmpty()) mergeProgressText else "Merging PDF pages...", fontSize = Ds.HINT_SP.sp, color = theme.text)
+        Text(if (mergeProgressText.isNotEmpty()) mergeProgressText else LocaleHelper.t(ctx, "merge_progress"), fontSize = Ds.HINT_SP.sp, color = theme.text)
       }
     }
 
@@ -743,8 +789,9 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   LaunchedEffect(imageUris, targetKb) {
     val first = imageUris.firstOrNull()
     if (first == null) { minPossibleKb = null; return@LaunchedEffect }
+    val targetAtStart = targetKb
     delay(400)
-    minPossibleKb = withContext(Dispatchers.IO) {
+    val estimate = withContext(Dispatchers.IO) {
       try {
         val bmp = PdfEngine.loadBitmap(ctx, first, 1200) ?: return@withContext null
         val baos = ByteArrayOutputStream()
@@ -758,6 +805,11 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         (previewBytes * fullPixels / prevPixels / 1024L).coerceAtLeast(1)
       } catch (_: Exception) { null }
     }
+    // M24: the in-flight decode is non-cancellable, so a stale result
+    // must never land — if the effect was cancelled/restarted (a new
+    // target was typed) or the target/file changed mid-decode, drop it.
+    if (coroutineContext[Job]?.isActive == false || targetKb != targetAtStart || imageUris.firstOrNull() != first) return@LaunchedEffect
+    minPossibleKb = estimate
   }
 
   // FIX 2026-11-18 (report #27/#47): the picked Uri is restored by
@@ -839,11 +891,12 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
       val outs = mutableListOf<Pair<File, String>>()
       val lines = mutableListOf<String>()
       imageUris.forEachIndexed { i, u ->
-        withContext(Dispatchers.Main) { imageProgressText = "File ${i + 1} of ${imageUris.size}" }
+        withContext(Dispatchers.Main) { imageProgressText = LocaleHelper.t(ctx, "compress_progress_file").replace("{i}", "${i + 1}").replace("{total}", "${imageUris.size}") }
         val origKb = (PdfCompress.originalSizeBytes(ctx, u) / 1024L).coerceAtLeast(0)
         val tgt = targetKb ?: (origKb * quality / 100L).toInt().coerceAtLeast(10)
         val out = PdfEngine.outFile(ctx, "Compressed_${i + 1}_${System.currentTimeMillis()}.jpg")
-        val ok = withContext(Dispatchers.IO) { PdfEngine.compressImageToKb(ctx, u, tgt, out) }
+        val compressResult = withContext(Dispatchers.IO) { PdfEngine.compressImageToKbDetailed(ctx, u, tgt, out) }
+        val ok = compressResult.ok
         if (ok && out.exists()) {
           // FIX 2026-11-18 (report #15): format-aware keep-smaller —
           // a PNG original that does not shrink is kept in a sibling
@@ -851,14 +904,18 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
           // .jpg. Use the returned file/MIME, never assume .jpg.
           val kept = withContext(Dispatchers.IO) { PdfCompress.keepSmallerImage(ctx, u, out) }
           if (!kept.ok) {
-            lines.add("${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: could not compress")
+            lines.add(LocaleHelper.t(ctx, "compress_could_not").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")))
           } else {
             val finalOut = kept.outFile
             val afterKb = finalOut.length() / 1024L
             val savedPct = if (origKb > 0) ((origKb - afterKb) * 100 / origKb) else 0
             lines.add(
-              if (kept.keptOriginal || afterKb >= origKb) "${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: ${origKb} KB to ${afterKb} KB — not smaller, original kept"
-              else "${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: ${origKb} KB to ${afterKb} KB (${savedPct}% saved)"
+              // M15: when an explicit KB target was set and the engine
+              // could not reach it, say so honestly instead of a
+              // success line — the file saved is the closest possible.
+              if (targetKb != null && !compressResult.targetMet) LocaleHelper.t(ctx, "compress_target_missed").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")).replace("{actual}", "$afterKb").replace("{target}", "$targetKb")
+              else if (kept.keptOriginal || afterKb >= origKb) LocaleHelper.t(ctx, "compress_kept_original").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")).replace("{from}", "$origKb").replace("{to}", "$afterKb")
+              else LocaleHelper.t(ctx, "compress_saved").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")).replace("{from}", "$origKb").replace("{to}", "$afterKb").replace("{pct}", "$savedPct")
             )
             // FIX 2026-11-18 (report #16): record the result so
             // History can show before→after KB.
@@ -866,7 +923,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
             outs.add(finalOut to kept.mimeType)
           }
         } else {
-          lines.add("${displayNameOf(ctx, u) ?: "Image ${i + 1}"}: could not compress")
+          lines.add(LocaleHelper.t(ctx, "compress_could_not").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")))
         }
       }
       isImageProcessing = false
@@ -885,7 +942,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   fun compressPdf() {
     val u = pdfUri ?: return
     isPdfProcessing = true
-    pdfProgressText = "Compressing PDF pages..."
+    pdfProgressText = LocaleHelper.t(ctx, "compress_pdf_progress")
     scope.launch {
       val out = PdfEngine.outFile(ctx, "Compressed_${System.currentTimeMillis()}.pdf")
       val res = withContext(Dispatchers.IO) { compressPdfWithQuality(ctx, u, quality, out) }
@@ -903,9 +960,9 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         // can show before→after KB.
         recordCompressResult(ctx, out.name, origKb, finalKb)
         doneSummary = if (res.keptOriginal) {
-          listOf("Before: ${origKb} KB — after: ${finalKb} KB.", "The compressed file was larger, so the original file was kept.")
+          listOf(LocaleHelper.t(ctx, "compress_before_after").replace("{from}", "$origKb").replace("{to}", "$finalKb"), LocaleHelper.t(ctx, "compress_kept_original_note"))
         } else {
-          listOf("Before: ${origKb} KB — after: ${finalKb} KB.", "Saved $savedPct%.")
+          listOf(LocaleHelper.t(ctx, "compress_before_after").replace("{from}", "$origKb").replace("{to}", "$finalKb"), LocaleHelper.t(ctx, "compress_saved_pct").replace("{pct}", "$savedPct"))
         }
         singleSave(out)
       } else {
@@ -917,7 +974,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   if (showDone && doneFiles != null) {
     MultiDoneScreen(
       files = doneFiles!!,
-      title = "Compressed",
+      title = LocaleHelper.t(ctx, "compress_done_title"),
       summaryLines = doneSummary,
       theme = theme,
       onBackHome = onBack,
@@ -932,11 +989,11 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
     return
   }
 
-  ToolScreenContainer("Compress KB", theme, onBack) {
+  ToolScreenContainer(LocaleHelper.t(ctx, "compress_kb"), theme, onBack) {
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
       // Phase 5: shared segmented tab row (same as Protect).
       ToolTabRow(
-        tabs = listOf("Compress image", "Compress PDF"),
+        tabs = listOf(LocaleHelper.t(ctx, "compress_tab_image"), LocaleHelper.t(ctx, "compress_tab_pdf")),
         selectedIndex = selectedTab,
         onSelect = { selectedTab = it },
         theme = theme,
@@ -948,7 +1005,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
 
       if (selectedTab == 0) {
         ChamiSecondaryButton(
-          text = if (imageUris.isNotEmpty()) "${imageUris.size} image${if (imageUris.size == 1) "" else "s"} chosen" else "Select images",
+          text = if (imageUris.isNotEmpty()) (if (imageUris.size == 1) LocaleHelper.t(ctx, "compress_image_chosen") else LocaleHelper.t(ctx, "compress_images_chosen")).replace("{n}", "${imageUris.size}") else LocaleHelper.t(ctx, "compress_select_images"),
           onClick = { vibrate(); imagePicker.launch("image/*") },
           modifier = Modifier.fillMaxWidth()
         )
@@ -963,7 +1020,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         }
         if (imagePreview != null) {
           Spacer(Modifier.height(Ds.s16))
-          ToolSectionHeader("Original preview", theme.text)
+          ToolSectionHeader(LocaleHelper.t(ctx, "compress_original_preview"), theme.text)
           ToolCard(
             theme = theme,
             padding = Ds.s12,
@@ -971,26 +1028,26 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
           ) {
             Image(
               bitmap = imagePreview!!.asImageBitmap(),
-              contentDescription = "Original Preview",
+              contentDescription = LocaleHelper.t(ctx, "compress_original_preview"),
               modifier = Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(Ds.s8)),
               contentScale = ContentScale.Fit
             )
             Spacer(Modifier.height(Ds.s8))
-            Text("Original size: ${if (imageOrigKb > 0) "$imageOrigKb KB" else "—"}", fontSize = Ds.BODY_SP.sp, color = theme.text, fontWeight = FontWeight.Bold)
+            Text(LocaleHelper.t(ctx, "compress_original_size").replace("{size}", if (imageOrigKb > 0) "$imageOrigKb KB" else "—"), fontSize = Ds.BODY_SP.sp, color = theme.text, fontWeight = FontWeight.Bold)
             estimatedImageKb?.let {
-              Text("Rough estimate: about $it KB", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
+              Text(LocaleHelper.t(ctx, "compress_estimate").replace("{kb}", "$it"), fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
             }
           }
         }
         Spacer(Modifier.height(Ds.s16))
-        ToolSectionHeader("Target size", theme.text)
+        ToolSectionHeader(LocaleHelper.t(ctx, "compress_target_size"), theme.text)
         // Compact 2x2 grid (8dp gaps) — the old single Row was ~545dp
         // wide on a ~360dp screen, so chips ran off-screen and the
         // block looked spaced out. Same options, same behaviour.
         Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
           listOf(
-            listOf(100 to "Under 100 KB", 200 to "Under 200 KB"),
-            listOf(500 to "Under 500 KB", 1024 to "Under 1 MB")
+            listOf(100 to LocaleHelper.t(ctx, "compress_under_100kb"), 200 to LocaleHelper.t(ctx, "compress_under_200kb")),
+            listOf(500 to LocaleHelper.t(ctx, "compress_under_500kb"), 1024 to LocaleHelper.t(ctx, "compress_under_1mb"))
           ).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
               row.forEach { (kb, label) ->
@@ -1006,7 +1063,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
             customInput = it.filter { ch -> ch.isDigit() }
             targetKb = customInput.toIntOrNull()?.coerceAtLeast(10)
           },
-          label = "Custom target KB (optional)", keyboardType = KeyboardType.Number
+          label = LocaleHelper.t(ctx, "compress_custom_target"), keyboardType = KeyboardType.Number
         )
         if (targetUnreachable) {
           Spacer(Modifier.height(Ds.s8))
@@ -1014,14 +1071,14 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
             Icon(Icons.Filled.Warning, contentDescription = null, tint = ChamiColors.warningAmber, modifier = Modifier.size(24.dp))
             Spacer(Modifier.width(Ds.s8))
             Text(
-              "Smallest possible is about ${minPossibleKb} KB — this target cannot be reached.",
+              LocaleHelper.t(ctx, "compress_target_unreachable").replace("{kb}", "$minPossibleKb"),
               fontSize = Ds.HINT_SP.sp, color = ChamiColors.warningAmber
             )
           }
         }
         Spacer(Modifier.height(Ds.s16))
-        Text("Quality: $quality%", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
-        HintText("Used when no target size is set. Lower quality = smaller file.")
+        Text(LocaleHelper.t(ctx, "compress_quality").replace("{n}", "$quality"), fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
+        HintText(LocaleHelper.t(ctx, "compress_quality_hint"))
         Slider(
           value = quality.toFloat(),
           onValueChange = { quality = it.toInt() },
@@ -1044,7 +1101,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         }
       } else {
         ChamiSecondaryButton(
-          text = if (pdfLoadFailed) "PDF can't be opened — pick another" else if (pdfUri != null) "PDF selected ($pdfTotalPages pages)" else "Select PDF",
+          text = if (pdfLoadFailed) LocaleHelper.t(ctx, "btn_pdf_unopenable") else if (pdfUri != null) LocaleHelper.t(ctx, "btn_pdf_selected").replace("{n}", "$pdfTotalPages") else LocaleHelper.t(ctx, "btn_select_pdf"),
           onClick = { vibrate(); pdfPicker.launch("application/pdf") },
           modifier = Modifier.fillMaxWidth()
         )
@@ -1076,7 +1133,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
             if (pdfPreviewBmp != null) {
               Image(
                 bitmap = pdfPreviewBmp!!.asImageBitmap(),
-                contentDescription = "PDF Preview",
+                contentDescription = LocaleHelper.t(ctx, "compress_pdf_preview"),
                 modifier = Modifier.size(120.dp).clip(RoundedCornerShape(Ds.s8)),
                 contentScale = ContentScale.Fit
               )
@@ -1096,18 +1153,18 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
             }
             Column {
               val kb = pdfOrigBytes / 1024L
-              Text("Original size: ${formatSizeText(pdfOrigBytes)}", fontSize = Ds.BODY_SP.sp, color = theme.text, fontWeight = FontWeight.Bold)
-              Text("Total pages: $pdfTotalPages", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
+              Text(LocaleHelper.t(ctx, "compress_original_size").replace("{size}", formatSizeText(pdfOrigBytes)), fontSize = Ds.BODY_SP.sp, color = theme.text, fontWeight = FontWeight.Bold)
+              Text(LocaleHelper.t(ctx, "compress_total_pages").replace("{n}", "$pdfTotalPages"), fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
               val estKb = (kb * quality / 100L).coerceAtLeast(1)
-              Text("Rough estimate: about $estKb KB", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
+              Text(LocaleHelper.t(ctx, "compress_estimate").replace("{kb}", "$estKb"), fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
             }
           }
           Spacer(Modifier.height(Ds.s16))
-          Text("Quality: $quality%", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
-          HintText("Lower quality = smaller file. Pages are re-encoded as images, so text in the output becomes an image and is not selectable.")
+          Text(LocaleHelper.t(ctx, "compress_quality").replace("{n}", "$quality"), fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
+          HintText(LocaleHelper.t(ctx, "compress_pdf_quality_hint"))
           // FIX 2026-11-18 (report #18): warn that a text PDF can
           // come out larger — when it does, the original is kept.
-          HintText("For text PDFs the result can be larger — when it is, the original file is kept instead.")
+          HintText(LocaleHelper.t(ctx, "compress_pdf_larger_note"))
           Slider(
             value = quality.toFloat(),
             onValueChange = { quality = it.toInt() },
@@ -1119,7 +1176,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         if (isPdfProcessing) {
           LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
           Spacer(Modifier.height(Ds.s8))
-          Text(if (pdfProgressText.isNotEmpty()) pdfProgressText else "Compressing PDF pages...", fontSize = Ds.HINT_SP.sp, color = theme.text)
+          Text(if (pdfProgressText.isNotEmpty()) pdfProgressText else LocaleHelper.t(ctx, "compress_pdf_progress"), fontSize = Ds.HINT_SP.sp, color = theme.text)
         }
       }
     }
@@ -1131,7 +1188,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         enabled = !isImageProcessing && imageUris.isNotEmpty() && !targetUnreachable,
         disabledReason = when {
           imageUris.isEmpty() -> LocaleHelper.t(ctx, "reason_select_images_first")
-          targetUnreachable -> "This target size cannot be reached"
+          targetUnreachable -> LocaleHelper.t(ctx, "compress_target_unreachable_short")
           else -> null
         },
         onSlideComplete = { vibrate(); compressImages() }
@@ -1218,6 +1275,9 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
   var imageUri by rememberSaveableUri()
   var imageUris by rememberSaveableUriList()
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+  // Final-audit: true when a picked image was set but its preview
+  // decode returned null — show an error, never a forever skeleton.
+  var previewLoadFailed by remember { mutableStateOf(false) }
   var origDimensions by remember { mutableStateOf<Pair<Int, Int>?>(null) }
   var widthStr by rememberSaveable { mutableStateOf("800") }
   var heightStr by rememberSaveable { mutableStateOf("800") }
@@ -1280,6 +1340,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
     showDone = false
     doneFiles = null
     previewBitmap = null
+    previewLoadFailed = false
     batchResults = emptyList()
     if (selected != null) {
       // L17: an undetectable format leaves the target format alone —
@@ -1295,6 +1356,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         } catch (_: Exception) {}
         withContext(Dispatchers.Main) {
           previewBitmap = bmp
+          previewLoadFailed = bmp == null
           if (opts.outWidth > 0 && opts.outHeight > 0) {
             origDimensions = Pair(opts.outWidth, opts.outHeight)
             widthStr = "${opts.outWidth / 2}"
@@ -1315,7 +1377,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       if (first != null && previewBitmap == null) {
         scope.launch(Dispatchers.IO) {
           val bmp = PdfEngine.loadBitmap(ctx, first, 1200)
-          withContext(Dispatchers.Main) { previewBitmap = bmp }
+          withContext(Dispatchers.Main) { previewBitmap = bmp; previewLoadFailed = bmp == null }
         }
       }
     }
@@ -1333,6 +1395,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         } catch (_: Exception) {}
         withContext(Dispatchers.Main) {
           previewBitmap = bmp
+          previewLoadFailed = bmp == null
           if (opts.outWidth > 0 && opts.outHeight > 0) {
             origDimensions = Pair(opts.outWidth, opts.outHeight)
             widthStr = "${opts.outWidth / 2}"
@@ -1374,7 +1437,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
     val ext = formatChoice.lowercase()
     val kbTarget = targetKbStr.toIntOrNull()
     isProcessing = true
-    progressText = "Resizing..."
+    progressText = LocaleHelper.t(ctx, "resize_progress")
     scope.launch {
       val origKb = (PdfCompress.originalSizeBytes(ctx, u) / 1024L).coerceAtLeast(0)
       val tmp = PdfEngine.outFile(ctx, "Resized_${w}x${h}_${System.currentTimeMillis()}.$ext")
@@ -1390,15 +1453,19 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       if (ok && kbTarget != null && kbTarget > 0) {
         if (formatChoice == "JPG") {
           val out2 = PdfEngine.outFile(ctx, "Resized_${kbTarget}KB_${System.currentTimeMillis()}.jpg")
-          val ok2 = withContext(Dispatchers.IO) { PdfEngine.compressImageToKb(ctx, Uri.fromFile(tmp), kbTarget, out2) }
-          if (ok2) {
+          val kbResult = withContext(Dispatchers.IO) { PdfEngine.compressImageToKbDetailed(ctx, Uri.fromFile(tmp), kbTarget, out2) }
+          if (kbResult.ok) {
             finalFile = out2
             val actualKb = out2.length() / 1024L
             val devPct = ((actualKb - kbTarget) * 100.0 / kbTarget)
-            kbNote = if (kotlin.math.abs(devPct) <= 5.0) {
-              "Exact-KB target ${kbTarget} KB — actual ${actualKb} KB (within ±5%)."
+            kbNote = if (!kbResult.targetMet) {
+              // M15: honest note — the target was not reached, this is
+              // the closest the engine could get.
+              LocaleHelper.t(ctx, "resize_exact_kb_missed").replace("{target}", "$kbTarget").replace("{actual}", "$actualKb")
+            } else if (kotlin.math.abs(devPct) <= 5.0) {
+              LocaleHelper.t(ctx, "resize_exact_kb_within").replace("{target}", "$kbTarget").replace("{actual}", "$actualKb")
             } else {
-              "Exact-KB target ${kbTarget} KB — actual ${actualKb} KB (outside ±5%, closest the engine could reach)."
+              LocaleHelper.t(ctx, "resize_exact_kb_outside").replace("{target}", "$kbTarget").replace("{actual}", "$actualKb")
             }
           }
         } else {
@@ -1412,8 +1479,8 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       if (ok) {
         val afterKb = finalFile.length() / 1024L
         doneSummary = listOfNotNull(
-          "Before: ${origDimensions?.let { "${it.first}x${it.second} px" } ?: "—"} (${origKb} KB).",
-          "After: ${w}x${h} px (${afterKb} KB).",
+          LocaleHelper.t(ctx, "resize_before").replace("{dims}", origDimensions?.let { "${it.first}x${it.second} px" } ?: "—").replace("{kb}", "$origKb"),
+          LocaleHelper.t(ctx, "resize_after").replace("{dims}", "${w}x${h} px").replace("{kb}", "$afterKb"),
           kbNote
         )
         singleSave(finalFile)
@@ -1448,12 +1515,12 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       var done = 0
       var skipped = 0
       for ((idx, u) in imageUris.withIndex()) {
-        withContext(Dispatchers.Main) { progressText = "File ${idx + 1} of ${imageUris.size}" }
+        withContext(Dispatchers.Main) { progressText = LocaleHelper.t(ctx, "convert_progress_file").replace("{i}", "${idx + 1}").replace("{total}", "${imageUris.size}") }
         val srcFmt = sourceFormatOf(ctx, u)
-        val name = displayNameOf(ctx, u) ?: "Image ${idx + 1}"
+        val name = displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "convert_image_fallback").replace("{n}", "${idx + 1}")
         if (srcFmt == formatChoice) {
           skipped++
-          lines.add("$name: Already $formatChoice — skipped")
+          lines.add(LocaleHelper.t(ctx, "convert_already_skipped").replace("{name}", name).replace("{format}", formatChoice))
           continue
         }
         val out = PdfEngine.outFile(ctx, "Converted_${idx + 1}_${System.currentTimeMillis()}.$ext")
@@ -1468,13 +1535,13 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
           if (fileOk) {
             outs.add(out)
             done++
-            lines.add("$name: converted to $formatChoice (${formatSizeText(out.length())})")
+            lines.add(LocaleHelper.t(ctx, "convert_converted").replace("{name}", name).replace("{format}", formatChoice).replace("{size}", formatSizeText(out.length())))
           } else {
             try { out.delete() } catch (_: Exception) {}
-            lines.add("$name: could not convert")
+            lines.add(LocaleHelper.t(ctx, "convert_could_not").replace("{name}", name))
           }
         } else {
-          lines.add("$name: could not convert")
+          lines.add(LocaleHelper.t(ctx, "convert_could_not").replace("{name}", name))
         }
         withContext(Dispatchers.Main) { batchResults = lines.toList() }
       }
@@ -1482,7 +1549,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       progressText = ""
       batchResults = lines
       if (outs.isNotEmpty()) {
-        doneSummary = lines + listOf("$done converted, $skipped already $formatChoice and skipped.")
+        doneSummary = lines + listOf(LocaleHelper.t(ctx, "convert_batch_summary").replace("{done}", "$done").replace("{skipped}", "$skipped").replace("{format}", formatChoice))
         folderSave(outs.map { it to if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg" })
       } else {
         Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_nothing_to_convert").replace("{format}", formatChoice), Toast.LENGTH_LONG).show()
@@ -1493,7 +1560,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
   if (showDone && doneFiles != null) {
     MultiDoneScreen(
       files = doneFiles!!,
-      title = if (isBatch) "Converted" else "Resized",
+      title = if (isBatch) LocaleHelper.t(ctx, "convert_done_title") else LocaleHelper.t(ctx, "resize_done_title"),
       summaryLines = doneSummary,
       theme = theme,
       onBackHome = onBack,
@@ -1510,7 +1577,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
       if (isBatch) {
         ChamiSecondaryButton(
-          text = if (imageUris.isNotEmpty()) "${imageUris.size} images chosen" else "Select images",
+          text = if (imageUris.isNotEmpty()) (if (imageUris.size == 1) LocaleHelper.t(ctx, "convert_image_chosen") else LocaleHelper.t(ctx, "convert_images_chosen")).replace("{n}", "${imageUris.size}") else LocaleHelper.t(ctx, "convert_select_images"),
           onClick = { vibrate(); batchPicker.launch("image/*") },
           modifier = Modifier.fillMaxWidth()
         )
@@ -1526,7 +1593,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
                 // target — it is converted, not skipped.
                 val already = srcFmt == formatChoice
                 Row(
-                  Modifier.fillMaxWidth().toolEnterFade(i, animOn),
+                  Modifier.fillMaxWidth().toolEnterFade(minOf(i, 9), animOn),
                   verticalAlignment = Alignment.CenterVertically
                 ) {
                   Text(
@@ -1536,12 +1603,12 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
                   )
                   if (already) {
                     Text(
-                      "Already $formatChoice",
+                      LocaleHelper.t(ctx, "convert_already").replace("{format}", formatChoice),
                       fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.SemiBold
                     )
                   }
                   ChamiIconButton(
-                    icon = Icons.Filled.Close, description = "Remove",
+                    icon = Icons.Filled.Close, description = LocaleHelper.t(ctx, "convert_remove"),
                     onClick = { vibrate(); imageUris = imageUris.filterIndexed { idx, _ -> idx != i } }
                   )
                 }
@@ -1552,7 +1619,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
             Spacer(Modifier.height(Ds.s12))
             // Phase 6: batch progress / results in the shared card.
             ToolCard(theme) {
-              Text(progressText.ifBlank { "Converted ${batchResults.size} files" }, fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold)
+              Text(progressText.ifBlank { LocaleHelper.t(ctx, "convert_converted_count").replace("{n}", "${batchResults.size}") }, fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold)
               if (batchResults.isNotEmpty()) {
                 Spacer(Modifier.height(Ds.s8))
                 Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
@@ -1569,7 +1636,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         }
       } else {
         ChamiSecondaryButton(
-          text = if (imageUri != null) "Image loaded" else "Select image",
+          text = if (imageUri != null) LocaleHelper.t(ctx, "resize_image_loaded") else LocaleHelper.t(ctx, "resize_select_image"),
           onClick = { vibrate(); picker.launch("image/*") },
           modifier = Modifier.fillMaxWidth()
         )
@@ -1581,35 +1648,41 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
 
       if (previewBitmap != null) {
         // Phase 6: shared section header + card, like the Phase 5 screens.
-        ToolSectionHeader("Preview", theme.text)
+        ToolSectionHeader(LocaleHelper.t(ctx, "resize_preview"), theme.text)
         ToolCard(theme, padding = Ds.s12, horizontalAlignment = Alignment.CenterHorizontally) {
           Image(
             bitmap = previewBitmap!!.asImageBitmap(),
-            contentDescription = "Preview",
+            contentDescription = LocaleHelper.t(ctx, "resize_preview"),
             modifier = Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(Ds.tileRadius)),
             contentScale = ContentScale.Fit
           )
           Spacer(Modifier.height(Ds.s8))
           origDimensions?.let { (w, h) ->
-            Text("Original: ${w}x$h px", fontSize = Ds.HINT_SP.sp, color = theme.text)
+            Text(LocaleHelper.t(ctx, "resize_original_dims").replace("{w}", "$w").replace("{h}", "$h"), fontSize = Ds.HINT_SP.sp, color = theme.text)
           }
-          Text("Target: ${widthStr}x${heightStr} px ($formatChoice)", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "resize_target_dims").replace("{w}", widthStr).replace("{h}", heightStr).replace("{format}", formatChoice), fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold)
         }
       } else if (imageUri != null || imageUris.isNotEmpty()) {
         // Phase 6: skeleton while the picked image decodes, so the
-        // screen never sits blank under the select button.
-        ToolSectionHeader("Preview", theme.text)
-        Phase6SkeletonBox(320.dp)
+        // screen never sits blank under the select button — unless the
+        // decode already failed, which shows an error instead of a
+        // skeleton that would pulse forever.
+        ToolSectionHeader(LocaleHelper.t(ctx, "resize_preview"), theme.text)
+        if (previewLoadFailed) {
+          ToolEmptyState(Icons.Filled.Image, LocaleHelper.t(ctx, "resize_preview_failed"), theme)
+        } else {
+          Phase6SkeletonBox(320.dp, animOn)
+        }
       }
 
       // Phase 6: shared section header, like the Phase 5 screens.
-      ToolSectionHeader("Presets", theme.text)
+      ToolSectionHeader(LocaleHelper.t(ctx, "resize_presets"), theme.text)
       // Compact 2-row grid (8dp gaps) — the old single Row was ~600dp
       // wide on a ~360dp screen, so presets ran off-screen. Same
       // presets, same behaviour. (Same screen as Image Resizer.)
       Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
         listOf(
-          listOf("WhatsApp" to ("1080" to "1080"), "Instagram post" to ("1080" to "1350"), "Instagram story" to ("1080" to "1920")),
+          listOf("WhatsApp" to ("1080" to "1080"), LocaleHelper.t(ctx, "resize_preset_instagram_post") to ("1080" to "1350"), LocaleHelper.t(ctx, "resize_preset_instagram_story") to ("1080" to "1920")),
           listOf("Passport" to ("413" to "531"), "A4" to ("1240" to "1754"))
         ).forEach { row ->
           Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
@@ -1633,7 +1706,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       // scale chips and the upscale warning together.
       ToolCard(theme) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-          Text("Lock aspect ratio", fontSize = Ds.BODY_SP.sp, color = theme.text)
+          Text(LocaleHelper.t(ctx, "resize_lock_ratio"), fontSize = Ds.BODY_SP.sp, color = theme.text)
           Switch(checked = lockRatio, onCheckedChange = { lockRatio = it })
         }
         Spacer(Modifier.height(Ds.s12))
@@ -1644,7 +1717,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
               widthStr = it.filter { ch -> ch.isDigit() }
               widthStr.toIntOrNull()?.let { w -> applyRatioFromWidth(w) }
             },
-            label = "Width (px)", keyboardType = KeyboardType.Number,
+            label = LocaleHelper.t(ctx, "resize_width"), keyboardType = KeyboardType.Number,
             isError = !dimsValid, modifier = Modifier.weight(1f)
           )
           DebouncedTextField(
@@ -1653,7 +1726,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
               heightStr = it.filter { ch -> ch.isDigit() }
               heightStr.toIntOrNull()?.let { h -> applyRatioFromHeight(h) }
             },
-            label = "Height (px)", keyboardType = KeyboardType.Number,
+            label = LocaleHelper.t(ctx, "resize_height"), keyboardType = KeyboardType.Number,
             isError = !dimsValid, modifier = Modifier.weight(1f)
           )
         }
@@ -1679,7 +1752,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
             Icon(Icons.Filled.Warning, contentDescription = null, tint = ChamiColors.warningAmber, modifier = Modifier.size(Ds.iconSize))
             Spacer(Modifier.width(Ds.s8))
             Text(
-              "Upscaling more than 2x will look blurry — the output is stretched, not sharper.",
+              LocaleHelper.t(ctx, "resize_upscale_warning"),
               fontSize = Ds.HINT_SP.sp, color = ChamiColors.warningAmber
             )
           }
@@ -1687,7 +1760,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       }
 
       // Phase 6: shared section header, like the Phase 5 screens.
-      ToolSectionHeader("Format", theme.text)
+      ToolSectionHeader(LocaleHelper.t(ctx, "label_format"), theme.text)
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
         listOf("JPG", "PNG", "WEBP").forEach { fmt ->
           ChamiChip(fmt, formatChoice == fmt, { vibrate(); formatChoice = fmt }, modifier = Modifier.weight(1f))
@@ -1701,7 +1774,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         Spacer(Modifier.height(Ds.s12))
         // Phase 6: quality slider in the shared card.
         ToolCard(theme) {
-          Text("Quality: $quality%", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
+          Text(LocaleHelper.t(ctx, "resize_quality").replace("{n}", "$quality"), fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
           Slider(
             value = quality.toFloat(),
             onValueChange = { quality = it.toInt() },
@@ -1711,7 +1784,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         }
       } else {
         Spacer(Modifier.height(Ds.s8))
-        HintText("PNG is lossless — no quality slider.")
+        HintText(LocaleHelper.t(ctx, "resize_png_note"))
       }
 
       if (!isBatch) {
@@ -1721,10 +1794,10 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
           DebouncedTextField(
             value = targetKbStr,
             onValueChange = { targetKbStr = it.filter { ch -> ch.isDigit() } },
-            label = "Resize to exact KB (JPG only, optional)", keyboardType = KeyboardType.Number
+            label = LocaleHelper.t(ctx, "resize_exact_kb_title"), keyboardType = KeyboardType.Number
           )
           Spacer(Modifier.height(Ds.s8))
-          HintText("When set, quality is adjusted after resizing to land within ±5% of the target.")
+          HintText(LocaleHelper.t(ctx, "resize_exact_kb_hint"))
         }
       }
 
@@ -1784,6 +1857,9 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
   val animOn = animationsEnabled(ctx)
   var imageUri by rememberSaveableUri()
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+  // Final-audit: true when a picked photo was set but its preview
+  // decode returned null — show an error, never a forever skeleton.
+  var previewLoadFailed by remember { mutableStateOf(false) }
   var isProcessing by remember { mutableStateOf(false) }
   var extractedText by remember { mutableStateOf("") }
   var hasResult by remember { mutableStateOf(false) }
@@ -1848,10 +1924,11 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
     showDone = false
     doneFile = null
     previewBitmap = null
+    previewLoadFailed = false
     if (selected != null) {
       scope.launch(Dispatchers.IO) {
         val bmp = PdfEngine.loadBitmap(ctx, selected, 1200)
-        withContext(Dispatchers.Main) { previewBitmap = bmp }
+        withContext(Dispatchers.Main) { previewBitmap = bmp; previewLoadFailed = bmp == null }
       }
     }
   }
@@ -1863,7 +1940,7 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
     if (u != null && previewBitmap == null) {
       scope.launch(Dispatchers.IO) {
         val bmp = PdfEngine.loadBitmap(ctx, u, 1200)
-        withContext(Dispatchers.Main) { previewBitmap = bmp }
+        withContext(Dispatchers.Main) { previewBitmap = bmp; previewLoadFailed = bmp == null }
       }
     }
   }
@@ -1900,16 +1977,16 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
     return
   }
 
-  ToolScreenContainer("OCR Text", theme, onBack) {
+  ToolScreenContainer(LocaleHelper.t(ctx, "ocr_title"), theme, onBack) {
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
       ChamiSecondaryButton(
-        text = if (imageUri != null) "Photo selected" else "Select photo",
+        text = if (imageUri != null) LocaleHelper.t(ctx, "ocr_photo_selected") else LocaleHelper.t(ctx, "ocr_select_photo"),
         onClick = { vibrate(); picker.launch("image/*") },
         modifier = Modifier.fillMaxWidth()
       )
 
       Spacer(Modifier.height(Ds.s16))
-      HintText("Reads any text on the image — Latin-script languages (English, Spanish, French, German…) and Devanagari (Hindi, Marathi, Nepali). Other scripts aren't recognised on-device.")
+      HintText(LocaleHelper.t(ctx, "ocr_scripts_note"))
 
       // Phase 6: clear empty state until a photo is picked.
       if (imageUri == null) {
@@ -1919,11 +1996,11 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
 
       if (previewBitmap != null) {
         // Phase 6: shared section header + card, like the Phase 5 screens.
-        ToolSectionHeader("Preview", theme.text)
+        ToolSectionHeader(LocaleHelper.t(ctx, "ocr_preview"), theme.text)
         ToolCard(theme, padding = Ds.s12) {
           Image(
             bitmap = previewBitmap!!.asImageBitmap(),
-            contentDescription = "OCR Preview",
+            contentDescription = LocaleHelper.t(ctx, "ocr_preview"),
             modifier = Modifier
               .fillMaxWidth()
               .heightIn(max = 384.dp)
@@ -1932,19 +2009,25 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
           )
         }
       } else if (imageUri != null) {
-        // Phase 6: skeleton while the picked photo decodes.
-        ToolSectionHeader("Preview", theme.text)
-        Phase6SkeletonBox(240.dp)
+        // Phase 6: skeleton while the picked photo decodes — unless
+        // the decode already failed, which shows an error instead of
+        // a skeleton that would pulse forever.
+        ToolSectionHeader(LocaleHelper.t(ctx, "ocr_preview"), theme.text)
+        if (previewLoadFailed) {
+          ToolEmptyState(Icons.Filled.Image, LocaleHelper.t(ctx, "ocr_preview_failed"), theme)
+        } else {
+          Phase6SkeletonBox(240.dp, animOn)
+        }
       }
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
         LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
         Spacer(Modifier.height(Ds.s8))
-        Text("Running on-device OCR...", fontSize = Ds.HINT_SP.sp, color = theme.text)
+        Text(LocaleHelper.t(ctx, "ocr_running"), fontSize = Ds.HINT_SP.sp, color = theme.text)
         // Phase 6: skeleton reserves the result area while OCR runs.
         Spacer(Modifier.height(Ds.s12))
-        Phase6SkeletonBox(200.dp)
+        Phase6SkeletonBox(200.dp, animOn)
       }
 
       if (noTextFound) {
@@ -1952,11 +2035,11 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
         ToolCard(theme, modifier = Modifier.toolEnterFade(0, animOn), horizontalAlignment = Alignment.CenterHorizontally) {
           Icon(Icons.Filled.Search, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(Ds.iconSize))
           Spacer(Modifier.height(Ds.s8))
-          Text("No text found", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text)
+          Text(LocaleHelper.t(ctx, "ocr_no_text"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text)
           Spacer(Modifier.height(Ds.s4))
-          HintText("Try a clearer, brighter photo of the text. OCR reads Latin-script and Devanagari text on-device — other scripts aren't supported.")
+          HintText(LocaleHelper.t(ctx, "ocr_no_text_hint"))
           Spacer(Modifier.height(Ds.s12))
-          ChamiSecondaryButton(text = "Retake / choose another photo", onClick = { vibrate(); picker.launch("image/*") }, modifier = Modifier.fillMaxWidth())
+          ChamiSecondaryButton(text = LocaleHelper.t(ctx, "ocr_retake"), onClick = { vibrate(); picker.launch("image/*") }, modifier = Modifier.fillMaxWidth())
         }
       }
 
@@ -1965,8 +2048,8 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
         // Phase 6: shared card + enter fade, instead of the bare 8dp box.
         ToolCard(theme, modifier = Modifier.toolEnterFade(0, animOn)) {
           Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Recognised text", fontWeight = FontWeight.Bold, color = theme.text, fontSize = Ds.BODY_SP.sp)
-            Text("$wordCount words", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+            Text(LocaleHelper.t(ctx, "ocr_recognised_text"), fontWeight = FontWeight.Bold, color = theme.text, fontSize = Ds.BODY_SP.sp)
+            Text(LocaleHelper.t(ctx, "ocr_word_count").replace("{n}", "$wordCount"), fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
           }
           Spacer(Modifier.height(Ds.s8))
           OutlinedTextField(
@@ -1977,7 +2060,7 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
           )
           Spacer(Modifier.height(Ds.s12))
           ChamiSecondaryButton(
-            text = "Copy text",
+            text = LocaleHelper.t(ctx, "ocr_copy_text"),
             onClick = {
               vibrate()
               val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1992,7 +2075,7 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
             // generation never block the main thread (long OCR text
             // used to freeze the UI / risk an ANR from onClick).
             ChamiPrimaryButton(
-              text = "Export TXT",
+              text = LocaleHelper.t(ctx, "ocr_export_txt"),
               onClick = {
                 vibrate()
                 if (isExporting) return@ChamiPrimaryButton
@@ -2016,7 +2099,7 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
               modifier = Modifier.weight(1f)
             )
             ChamiPrimaryButton(
-              text = "Export searchable PDF",
+              text = LocaleHelper.t(ctx, "ocr_export_pdf"),
               onClick = {
                 vibrate()
                 if (isExporting) return@ChamiPrimaryButton
@@ -2050,7 +2133,7 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
             Text(exportProgressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
           }
           Spacer(Modifier.height(Ds.s8))
-          HintText("The PDF holds the recognised text as selectable text (no image layer in this build).")
+          HintText(LocaleHelper.t(ctx, "ocr_export_pdf_note"))
         }
       }
     }
@@ -2086,19 +2169,22 @@ fun PdfReaderScreen(
   val scope = rememberCoroutineScope()
   var pdfUri by rememberSaveableUri(initialFile?.let { Uri.fromFile(it) })
   var totalPages by remember { mutableStateOf(0) }
-  var currentPage by remember { mutableStateOf(0) }
+  var currentPage by rememberSaveable { mutableStateOf(0) }
   // Render scale: 2.0x at fit; raised (debounced) while zoomed so the
   // zoomed page re-renders sharper instead of upscaling a bitmap.
-  var scale by remember { mutableStateOf(2.0f) }
+  var scale by rememberSaveable { mutableStateOf(2.0f) }
   var isNightMode by rememberSaveable { mutableStateOf(false) }
-  var pageInput by remember { mutableStateOf("1") }
-  var zoom by remember { mutableStateOf(1f) }
+  var pageInput by rememberSaveable { mutableStateOf("1") }
+  var zoom by rememberSaveable { mutableStateOf(1f) }
   // FIX 2026-11-18 (report #23): byte-budgeted cache (see
   // PageBitmapCache below) instead of a 12-page count cap.
   val pageBitmapCache = remember { PageBitmapCache() }
   // Continuous scroll (Google Drive style): the reader is one vertical
   // list of pages; the current page follows the first visible page.
-  val listState = rememberLazyListState()
+  // Final-audit: the scroll state survives rotation via its Saver
+  // (plain rememberLazyListState lost the position); the scroll is
+  // restored to the saved page once the document loads (below).
+  val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
   var showSearchBar by remember { mutableStateOf(false) }
   var showBookmarksDialog by remember { mutableStateOf(false) }
   var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -2226,7 +2312,7 @@ fun PdfReaderScreen(
         val count = renderer.pageCount
         for (i in 0 until count) {
           if (searchJob?.isActive == false) break
-          withContext(Dispatchers.Main) { searchProgress = "Searching page ${i + 1} of $count" }
+          withContext(Dispatchers.Main) { searchProgress = LocaleHelper.t(ctx, "reader_search_progress").replace("{page}", "${i + 1}").replace("{total}", "$count") }
           val cached = searchTextCache[i]
           val text = cached ?: withContext(Dispatchers.IO) {
             try {
@@ -2302,6 +2388,14 @@ fun PdfReaderScreen(
     loadBookmarks()
   }
 
+  // Final-audit: restore the scroll position to the saved page after
+  // rotation / process death, once the document has loaded.
+  LaunchedEffect(totalPages) {
+    if (totalPages > 0 && currentPage in 1 until totalPages) {
+      try { listState.scrollToItem(currentPage) } catch (_: Exception) {}
+    }
+  }
+
   // The current page follows the first visible page in the scroll.
   val firstVisiblePage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
   LaunchedEffect(firstVisiblePage) {
@@ -2329,12 +2423,12 @@ fun PdfReaderScreen(
   if (showGoToPage) {
     ChamiAlertDialog(theme,
       onDismissRequest = { showGoToPage = false },
-      title = { Text("Go to page", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
+      title = { Text(LocaleHelper.t(ctx, "reader_goto_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
       text = {
         OutlinedTextField(
           value = goToInput,
           onValueChange = { goToInput = it.filter { ch -> ch.isDigit() } },
-          label = { Text("Page 1–$totalPages", fontSize = Ds.HINT_SP.sp) },
+          label = { Text(LocaleHelper.t(ctx, "reader_goto_range").replace("{total}", "$totalPages"), fontSize = Ds.HINT_SP.sp) },
           singleLine = true,
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
           modifier = Modifier.fillMaxWidth(),
@@ -2349,10 +2443,10 @@ fun PdfReaderScreen(
             showGoToPage = false
           },
           modifier = Modifier.height(Ds.minTouch)
-        ) { Text("Go", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
+        ) { Text(LocaleHelper.t(ctx, "reader_go"), color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
       },
       dismissButton = {
-        TextButton(onClick = { showGoToPage = false }, modifier = Modifier.height(Ds.minTouch)) { Text("Cancel", color = theme.text) }
+        TextButton(onClick = { showGoToPage = false }, modifier = Modifier.height(Ds.minTouch)) { Text(LocaleHelper.t(ctx, "btn_cancel"), color = theme.text) }
       }
     )
   }
@@ -2362,10 +2456,10 @@ fun PdfReaderScreen(
   if (showBookmarksDialog) {
     ChamiAlertDialog(theme,
       onDismissRequest = { showBookmarksDialog = false },
-      title = { Text("Bookmarks", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
+      title = { Text(LocaleHelper.t(ctx, "reader_bookmarks_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
       text = {
         if (bookmarks.isEmpty()) {
-          Text("No bookmarks yet — open the ⋮ menu on any page and tap \"Bookmark this page\".", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
+          Text(LocaleHelper.t(ctx, "reader_no_bookmarks_hint"), fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
         } else {
           Column {
             bookmarks.sorted().forEach { b ->
@@ -2373,9 +2467,9 @@ fun PdfReaderScreen(
                 Modifier.fillMaxWidth().heightIn(min = Ds.minTouch).clickable { showBookmarksDialog = false; jumpToPage(b) }.padding(vertical = Ds.s8),
                 verticalAlignment = Alignment.CenterVertically
               ) {
-                Text("Page $b", fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text, modifier = Modifier.weight(1f))
+                Text(LocaleHelper.t(ctx, "label_page_number").replace("{n}", "$b"), fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text, modifier = Modifier.weight(1f))
                 ChamiIconButton(
-                  icon = Icons.Filled.Close, description = "Delete bookmark",
+                  icon = Icons.Filled.Close, description = LocaleHelper.t(ctx, "reader_delete_bookmark"),
                   onClick = { vibrate(); bookmarks.remove(b); pdfUri?.let { removeBookmark(ctx, it, b) } }
                 )
               }
@@ -2384,18 +2478,18 @@ fun PdfReaderScreen(
         }
       },
       confirmButton = {
-        TextButton(onClick = { showBookmarksDialog = false }, modifier = Modifier.height(Ds.minTouch)) { Text("Close", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
+        TextButton(onClick = { showBookmarksDialog = false }, modifier = Modifier.height(Ds.minTouch)) { Text(LocaleHelper.t(ctx, "btn_close"), color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
       }
     )
   }
 
-  ToolScreenContainer("PDF Reader", theme, onBack) {
+  ToolScreenContainer(LocaleHelper.t(ctx, "pdf_reader"), theme, onBack) {
     if (pdfUri == null) {
       Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         // Phase 6: shared empty state, then the open button.
         ToolEmptyState(Icons.Filled.PictureAsPdf, LocaleHelper.t(ctx, "btn_select_pdf"), theme)
         Spacer(Modifier.height(Ds.s16))
-        ChamiPrimaryButton(text = "Open PDF file", onClick = { vibrate(); picker.launch("application/pdf") }, modifier = Modifier.fillMaxWidth())
+        ChamiPrimaryButton(text = LocaleHelper.t(ctx, "reader_open_pdf"), onClick = { vibrate(); picker.launch("application/pdf") }, modifier = Modifier.fillMaxWidth())
       }
     } else {
       Column(Modifier.fillMaxSize()) {
@@ -2418,52 +2512,52 @@ fun PdfReaderScreen(
           }
           Box {
             ChamiIconButton(
-              icon = Icons.Filled.MoreVert, description = "Reader options",
+              icon = Icons.Filled.MoreVert, description = LocaleHelper.t(ctx, "reader_options"),
               onClick = { vibrate(); showOverflow = true }
             )
             DropdownMenu(expanded = showOverflow, onDismissRequest = { showOverflow = false }) {
               DropdownMenuItem(
-                text = { Text("Search in PDF", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_search"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; showSearchBar = true }
               )
               DropdownMenuItem(
-                text = { Text(if (bookmarks.contains(currentPage + 1)) "Remove bookmark" else "Bookmark this page", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(if (bookmarks.contains(currentPage + 1)) LocaleHelper.t(ctx, "reader_menu_remove_bookmark") else LocaleHelper.t(ctx, "reader_menu_bookmark_page"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; vibrate(); toggleBookmark(currentPage + 1) }
               )
               DropdownMenuItem(
-                text = { Text("Bookmarks…", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_bookmarks"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; showBookmarksDialog = true }
               )
               DropdownMenuItem(
-                text = { Text("Go to page…", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_goto"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; goToInput = "${currentPage + 1}"; showGoToPage = true }
               )
               DropdownMenuItem(
-                text = { Text("Zoom in", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_zoom_in"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; vibrate(); zoom = (zoom + 0.25f).coerceIn(1f, 5f) }
               )
               DropdownMenuItem(
-                text = { Text("Zoom out", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_zoom_out"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; vibrate(); zoom = (zoom - 0.25f).coerceIn(1f, 5f) }
               )
               DropdownMenuItem(
-                text = { Text("Fit to page", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_fit"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; vibrate(); zoom = 1f }
               )
               DropdownMenuItem(
-                text = { Text(if (isNightMode) "Day mode" else "Night mode", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(if (isNightMode) LocaleHelper.t(ctx, "reader_menu_day") else LocaleHelper.t(ctx, "reader_menu_night"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; vibrate(); isNightMode = !isNightMode }
               )
               DropdownMenuItem(
-                text = { Text("Open in Split", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_open_split"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; onOpenTool?.invoke("split", readerContentUri()) }
               )
               DropdownMenuItem(
-                text = { Text("Open in Merge", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_open_merge"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; onOpenTool?.invoke("merge", readerContentUri()) }
               )
               DropdownMenuItem(
-                text = { Text("Open in Compress", fontSize = Ds.BODY_SP.sp) },
+                text = { Text(LocaleHelper.t(ctx, "reader_menu_open_compress"), fontSize = Ds.BODY_SP.sp) },
                 onClick = { showOverflow = false; onOpenTool?.invoke("compress", readerContentUri()) }
               )
             }
@@ -2482,17 +2576,17 @@ fun PdfReaderScreen(
             OutlinedTextField(
               value = searchQuery,
               onValueChange = { searchQuery = it },
-              label = { Text("Search text in PDF", fontSize = Ds.HINT_SP.sp) },
+              label = { Text(LocaleHelper.t(ctx, "reader_search_hint"), fontSize = Ds.HINT_SP.sp) },
               singleLine = true,
               modifier = Modifier.weight(1f).height(Ds.primaryButtonHeight),
               shape = RoundedCornerShape(Ds.tileRadius)
             )
             ChamiIconButton(
-              icon = Icons.Filled.Search, description = "Search",
+              icon = Icons.Filled.Search, description = LocaleHelper.t(ctx, "reader_search_button"),
               onClick = { vibrate(); runSearch() }
             )
             ChamiIconButton(
-              icon = Icons.Filled.Close, description = "Close search",
+              icon = Icons.Filled.Close, description = LocaleHelper.t(ctx, "reader_close_search"),
               onClick = { showSearchBar = false }
             )
           }
@@ -2501,7 +2595,7 @@ fun PdfReaderScreen(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
               Text(searchProgress, fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
               TextButton(onClick = { searchJob?.cancel(); searching = false }, modifier = Modifier.height(Ds.minTouch)) {
-                Text("Cancel", color = ChamiColors.errorRed, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+                Text(LocaleHelper.t(ctx, "btn_cancel"), color = ChamiColors.errorRed, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
               }
             }
             LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
@@ -2532,7 +2626,7 @@ fun PdfReaderScreen(
                 },
                 modifier = Modifier.height(Ds.minTouch)
               ) {
-                Text("Next match", fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.primary)
+                Text(LocaleHelper.t(ctx, "reader_next_match"), fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.primary)
               }
             }
           }
@@ -2552,11 +2646,11 @@ fun PdfReaderScreen(
           ) {
             ChamiErrorBanner(
               theme = theme,
-              title = "Couldn't open this file",
+              title = LocaleHelper.t(ctx, "reader_open_failed_title"),
               message = UNOPENABLE_PDF_MESSAGE
             )
             Spacer(Modifier.height(Ds.s16))
-            ChamiPrimaryButton(text = "Back", onClick = { vibrate(); onBack() }, modifier = Modifier.fillMaxWidth())
+            ChamiPrimaryButton(text = LocaleHelper.t(ctx, "reader_back"), onClick = { vibrate(); onBack() }, modifier = Modifier.fillMaxWidth())
           }
         } else if (totalPages == 0) {
           // UI OVERHAUL 2026-11-18: skeleton page + label instead of a
@@ -2567,7 +2661,7 @@ fun PdfReaderScreen(
           ) {
             PageSkeletonLoader()
             Spacer(Modifier.height(Ds.s16))
-            Text("Opening document…", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
+            Text(LocaleHelper.t(ctx, "reader_opening"), fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
           }
         } else {
           LazyColumn(
@@ -2700,7 +2794,7 @@ private fun ReaderPageView(
         } else null
         Image(
           bitmap = shownImage!!,
-          contentDescription = "Page ${pageIndex + 1}",
+          contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${pageIndex + 1}"),
           colorFilter = nightFilter,
           modifier = Modifier
             .fillMaxWidth()
@@ -2787,10 +2881,17 @@ private fun ReaderPageView(
       }
     }
     Spacer(Modifier.height(Ds.s4))
-    Text("Page ${pageIndex + 1}", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+    Text(LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${pageIndex + 1}"), fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
   }
 }
 
+
+// Final-audit: password strength as a language-independent level.
+ // The old code branched on the English label text
+ // (strength.startsWith("Weak") / "Too short"), so translating those
+ // labels would have broken the red/ green colour logic. The label is
+ // now display-only; logic uses this enum.
+private enum class PasswordStrength { EMPTY, TOO_SHORT, WEAK, OK, STRONG }
 
 // 11. PROTECT PDF — Lock / Unlock segmented control, title stays
 // "Protect PDF". Lock: password with a real vector eye, strength hint
@@ -2899,11 +3000,11 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
   fun protect() {
     val uri = selectedUri ?: return
     isProcessing = true
-    progressStatus = "Encrypting document..."
+    progressStatus = LocaleHelper.t(ctx, "protect_encrypting")
     scope.launch(Dispatchers.IO) {
       val out = PdfEngine.outFile(ctx, "${selectedName}_protected_${System.currentTimeMillis()}.pdf")
       val ok = PdfProtector.protectPdf(ctx, uri, password, out) { current, total ->
-        progressStatus = "Encrypting page $current of $total..."
+        progressStatus = LocaleHelper.t(ctx, "protect_encrypting_page").replace("{current}", "$current").replace("{total}", "$total")
       }
       var patched = true
       if (ok && (!allowPrint || !allowCopy || !allowEdit)) {
@@ -2981,19 +3082,25 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
     return
   }
 
-  val strength = when {
-    password.isEmpty() -> ""
-    password.length < 4 -> "Too short — at least 4 characters"
-    password.length < 8 && !(password.any { it.isDigit() } && password.any { it.isLetter() }) -> "Weak"
-    password.length < 8 -> "OK"
-    password.any { it.isDigit() } && password.any { it.isLetter() } && password.any { !it.isLetterOrDigit() } -> "Strong"
-    password.any { it.isDigit() } && password.any { it.isLetter() } -> "Strong"
-    else -> "OK"
+  val strengthLevel = when {
+    password.isEmpty() -> PasswordStrength.EMPTY
+    password.length < 4 -> PasswordStrength.TOO_SHORT
+    password.length < 8 && !(password.any { it.isDigit() } && password.any { it.isLetter() }) -> PasswordStrength.WEAK
+    password.length < 8 -> PasswordStrength.OK
+    password.any { it.isDigit() } && password.any { it.isLetter() } -> PasswordStrength.STRONG
+    else -> PasswordStrength.OK
+  }
+  val strength = when (strengthLevel) {
+    PasswordStrength.EMPTY -> ""
+    PasswordStrength.TOO_SHORT -> LocaleHelper.t(ctx, "protect_strength_too_short")
+    PasswordStrength.WEAK -> LocaleHelper.t(ctx, "protect_strength_weak")
+    PasswordStrength.OK -> LocaleHelper.t(ctx, "protect_strength_ok")
+    PasswordStrength.STRONG -> LocaleHelper.t(ctx, "protect_strength_strong")
   }
   val mismatch = confirmPassword.isNotEmpty() && password != confirmPassword
   val canEncrypt = selectedUri != null && !pdfLoadFailed && pageCount > 0 && password.length >= 4 && password == confirmPassword && !isProcessing
 
-  ToolScreenContainer("Protect PDF", theme, onBack) {
+  ToolScreenContainer(LocaleHelper.t(ctx, "protect_pdf"), theme, onBack) {
     Column(
       // C1: weight(1f), NOT fillMaxSize() — a fillMaxSize child takes
       // the whole Column, pushing the SlideToAction below off-screen
@@ -3006,7 +3113,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
     ) {
       // Phase 5: shared segmented tab row (same as Compress).
       ToolTabRow(
-        tabs = listOf("PROTECT", "UNLOCK"),
+        tabs = listOf(LocaleHelper.t(ctx, "protect_tab_protect"), LocaleHelper.t(ctx, "protect_tab_unlock")),
         selectedIndex = if (mode == "Protect") 0 else 1,
         onSelect = { mode = if (it == 0) "Protect" else "Unlock" },
         theme = theme,
@@ -3016,9 +3123,9 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
 
       if (mode == "Unlock") {
         ToolCard(theme = theme) {
-          ToolSectionHeader("Unlock a protected PDF", theme.text, topPadding = 0.dp)
+          ToolSectionHeader(LocaleHelper.t(ctx, "protect_unlock_title"), theme.text, topPadding = 0.dp)
           ChamiSecondaryButton(
-            text = if (unlockUri == null) "Choose protected PDF" else "Change PDF file",
+            text = if (unlockUri == null) LocaleHelper.t(ctx, "protect_choose_protected") else LocaleHelper.t(ctx, "protect_change_pdf"),
             onClick = { vibrate(); unlockPicker.launch("application/pdf") },
             modifier = Modifier.fillMaxWidth()
           )
@@ -3027,14 +3134,14 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
             OutlinedTextField(
               value = unlockPassword,
               onValueChange = { unlockPassword = it; unlockError = null },
-              label = { Text("Enter PDF password", fontSize = Ds.HINT_SP.sp) },
+              label = { Text(LocaleHelper.t(ctx, "protect_enter_password"), fontSize = Ds.HINT_SP.sp) },
               singleLine = true,
               visualTransformation = if (unlockPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
               trailingIcon = {
                 ChamiIconButton(
                   icon = if (unlockPasswordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                  description = if (unlockPasswordVisible) "Hide password" else "Show password",
+                  description = if (unlockPasswordVisible) LocaleHelper.t(ctx, "protect_hide_password") else LocaleHelper.t(ctx, "protect_show_password"),
                   onClick = { unlockPasswordVisible = !unlockPasswordVisible }
                 )
               },
@@ -3051,7 +3158,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
               }
             }
             Spacer(Modifier.height(Ds.s8))
-            HintText("Removes the password from PDFs protected by Chami (Standard encryption). The unlocked file is a new file — the original stays protected.")
+            HintText(LocaleHelper.t(ctx, "protect_unlock_note"))
           }
         }
         if (isProcessing) {
@@ -3059,9 +3166,9 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
         }
       } else {
         ToolCard(theme = theme) {
-          ToolSectionHeader("1. Select PDF document", theme.text, topPadding = 0.dp)
+          ToolSectionHeader(LocaleHelper.t(ctx, "protect_step_1"), theme.text, topPadding = 0.dp)
           ChamiSecondaryButton(
-            text = if (selectedUri == null) "Choose PDF file" else "Change PDF file",
+            text = if (selectedUri == null) LocaleHelper.t(ctx, "protect_choose_pdf") else LocaleHelper.t(ctx, "protect_change_pdf"),
             onClick = { vibrate(); pdfPicker.launch("application/pdf") },
             modifier = Modifier.fillMaxWidth()
           )
@@ -3079,7 +3186,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
               if (previewBitmap != null) {
                 Image(
                   bitmap = previewBitmap!!.asImageBitmap(),
-                  contentDescription = "Document page 1",
+                  contentDescription = LocaleHelper.t(ctx, "protect_doc_preview"),
                   modifier = Modifier
                     .size(56.dp, 72.dp)
                     .clip(RoundedCornerShape(Ds.s8))
@@ -3103,7 +3210,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
                 Text(selectedName, fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(Ds.s4))
                 Text(
-                  if (pdfLoadFailed) UNOPENABLE_PDF_MESSAGE else "Total pages: $pageCount",
+                  if (pdfLoadFailed) UNOPENABLE_PDF_MESSAGE else LocaleHelper.t(ctx, "protect_total_pages").replace("{n}", "$pageCount"),
                   fontSize = Ds.HINT_SP.sp,
                   color = if (pdfLoadFailed) ChamiColors.errorRed else theme.textSecondary
                 )
@@ -3114,19 +3221,19 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
 
         if (selectedUri != null) {
           ToolCard(theme = theme) {
-            ToolSectionHeader("2. Set encryption password", theme.text, topPadding = 0.dp)
+            ToolSectionHeader(LocaleHelper.t(ctx, "protect_step_2"), theme.text, topPadding = 0.dp)
             Spacer(Modifier.height(Ds.s4))
             OutlinedTextField(
               value = password,
               onValueChange = { password = it },
-              label = { Text("Enter document password", fontSize = Ds.HINT_SP.sp) },
+              label = { Text(LocaleHelper.t(ctx, "protect_password_label"), fontSize = Ds.HINT_SP.sp) },
               singleLine = true,
               visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
               trailingIcon = {
                 ChamiIconButton(
                   icon = if (passwordVisible) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                  description = if (passwordVisible) "Hide password" else "Show password",
+                  description = if (passwordVisible) LocaleHelper.t(ctx, "protect_hide_password") else LocaleHelper.t(ctx, "protect_show_password"),
                   onClick = { passwordVisible = !passwordVisible }
                 )
               },
@@ -3136,16 +3243,16 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
             if (strength.isNotEmpty()) {
               Spacer(Modifier.height(Ds.s4))
               Text(
-                "Strength: $strength",
+                LocaleHelper.t(ctx, "protect_strength_label").replace("{strength}", strength),
                 fontSize = Ds.HINT_SP.sp,
-                color = if (strength.startsWith("Weak") || strength.startsWith("Too short")) ChamiColors.errorRed else theme.primary
+                color = if (strengthLevel == PasswordStrength.WEAK || strengthLevel == PasswordStrength.TOO_SHORT) ChamiColors.errorRed else theme.primary
               )
             }
             Spacer(Modifier.height(Ds.s12))
             OutlinedTextField(
               value = confirmPassword,
               onValueChange = { confirmPassword = it },
-              label = { Text("Confirm document password", fontSize = Ds.HINT_SP.sp) },
+              label = { Text(LocaleHelper.t(ctx, "protect_confirm_password"), fontSize = Ds.HINT_SP.sp) },
               singleLine = true,
               visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
               keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -3162,17 +3269,17 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
               }
             }
             Spacer(Modifier.height(Ds.s16))
-            ToolSectionHeader("Permissions", theme.text, topPadding = 0.dp)
+            ToolSectionHeader(LocaleHelper.t(ctx, "protect_permissions"), theme.text, topPadding = 0.dp)
             Row(Modifier.fillMaxWidth().defaultMinSize(minHeight = Ds.minTouch), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-              Text("Allow printing", fontSize = Ds.BODY_SP.sp, color = theme.text)
+              Text(LocaleHelper.t(ctx, "protect_allow_printing"), fontSize = Ds.BODY_SP.sp, color = theme.text)
               Switch(checked = allowPrint, onCheckedChange = { allowPrint = it })
             }
             Row(Modifier.fillMaxWidth().defaultMinSize(minHeight = Ds.minTouch), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-              Text("Allow copying text", fontSize = Ds.BODY_SP.sp, color = theme.text)
+              Text(LocaleHelper.t(ctx, "protect_allow_copying"), fontSize = Ds.BODY_SP.sp, color = theme.text)
               Switch(checked = allowCopy, onCheckedChange = { allowCopy = it })
             }
             Row(Modifier.fillMaxWidth().defaultMinSize(minHeight = Ds.minTouch), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-              Text("Allow editing", fontSize = Ds.BODY_SP.sp, color = theme.text)
+              Text(LocaleHelper.t(ctx, "protect_allow_editing"), fontSize = Ds.BODY_SP.sp, color = theme.text)
               Switch(checked = allowEdit, onCheckedChange = { allowEdit = it })
             }
             Spacer(Modifier.height(Ds.s12))
@@ -3190,16 +3297,16 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
             Spacer(Modifier.height(Ds.s8))
             // FIX 2026-11-18 (report #30): same rasterised-output note
             // the other tools carry.
-            HintText("Protected pages are rendered as images — text in the protected file is not selectable.")
+            HintText(LocaleHelper.t(ctx, "protect_rasterised_hint"))
             Spacer(Modifier.height(Ds.s12))
-            HintText("Keep this password safe — it cannot be recovered. The protected file is a new file; the original is never changed.")
+            HintText(LocaleHelper.t(ctx, "protect_password_warning"))
           }
         }
 
         if (isProcessing) {
           LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
           Spacer(Modifier.height(Ds.s4))
-          Text(if (progressStatus.isNotEmpty()) progressStatus else "Encrypting...", fontSize = Ds.HINT_SP.sp, color = theme.text)
+          Text(if (progressStatus.isNotEmpty()) progressStatus else LocaleHelper.t(ctx, "protect_encrypting_short"), fontSize = Ds.HINT_SP.sp, color = theme.text)
         }
       }
     }

@@ -12,7 +12,7 @@
       android:allowBackup="true"
       android:icon="@mipmap/ic_launcher"
       android:label="Chami PDF Maker - Image to PDF"
-      android:theme="@style/Theme.Material3.DayNight.NoActionBar"
+      android:theme="@style/Theme.Chami.Light.NoActionBar"
       android:supportsRtl="true">
     <activity
         android:name=".IntroActivity"

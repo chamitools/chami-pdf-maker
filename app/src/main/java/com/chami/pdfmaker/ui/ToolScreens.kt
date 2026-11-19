@@ -13,6 +13,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -603,7 +604,7 @@ fun MultiDoneScreen(
       Modifier.size(72.dp).clip(CircleShape).background(ChamiColors.lightGreen),
       contentAlignment = Alignment.Center
     ) {
-      Icon(Icons.Filled.Check, contentDescription = "Done", tint = ChamiColors.darkGreen, modifier = Modifier.size(36.dp))
+      Icon(Icons.Filled.Check, contentDescription = LocaleHelper.t(ctx, "done"), tint = ChamiColors.darkGreen, modifier = Modifier.size(36.dp))
     }
     Spacer(Modifier.height(Ds.s16))
     TitleText(title, color = theme.text)
@@ -691,6 +692,8 @@ fun BigPagePreview(
   height: Dp = 340.dp
 ) {
   val ctx = LocalContext.current
+  // FINAL AUDIT: motion gate for the crossfade below.
+  val animOn = animationsEnabled(ctx)
   Box(
     Modifier
       .fillMaxWidth()
@@ -705,7 +708,13 @@ fun BigPagePreview(
     // read as a flicker. Crossfade keeps the old bitmap alive until
     // the fade finishes; the A4 page box is fixed-size, so nothing
     // jumps during the transition.
-    Crossfade(targetState = shown, label = "pagePreview") { bmp ->
+    // FINAL AUDIT: gated on the motion setting — with animations off
+    // the preview swaps instantly (0ms) instead of crossfading.
+    Crossfade(
+      targetState = shown,
+      animationSpec = if (animOn) tween(300) else tween(0),
+      label = "pagePreview"
+    ) { bmp ->
       if (bmp != null) {
         // PERFORMANCE: wrap once per bitmap — this preview recomposes
         // on every page / selection change, and re-wrapping the
@@ -780,6 +789,8 @@ fun PageThumbnailStrip(
 ) {
   val density = LocalDensity.current
   val ctx = LocalContext.current
+  // FINAL AUDIT: motion gate for animateItemPlacement below.
+  val animOn = animationsEnabled(ctx)
   val haptic = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val listState = rememberLazyListState()
@@ -846,7 +857,9 @@ fun PageThumbnailStrip(
       // to the finger (dragOffsetX) and animating its placement would
       // make it jump back a card width, then glide forward.
       Column(
-        modifier = if (isDragging) Modifier else Modifier.animateItemPlacement(),
+        // FINAL AUDIT: no slide when animations are off — reorder
+        // itself still works, it just applies instantly.
+        modifier = if (isDragging || !animOn) Modifier else Modifier.animateItemPlacement(),
         horizontalAlignment = Alignment.CenterHorizontally
       ) {
         Box(
@@ -907,7 +920,7 @@ fun PageThumbnailStrip(
           if (loadedThumb != null) {
             Image(
               bitmap = loadedThumb,
-              contentDescription = "Page ${index + 1}",
+              contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${index + 1}"),
               modifier = Modifier.fillMaxSize(),
               contentScale = ContentScale.Crop
             )
@@ -923,7 +936,7 @@ fun PageThumbnailStrip(
                 .background(ChamiColors.darkGreen),
               contentAlignment = Alignment.Center
             ) {
-              Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(16.dp))
+              Icon(Icons.Filled.Check, contentDescription = LocaleHelper.t(ctx, "split_mode_selected"), tint = Color.White, modifier = Modifier.size(16.dp))
             }
           }
         }
@@ -946,7 +959,7 @@ fun PageThumbnailStrip(
             .clickable { onAddPages() },
           contentAlignment = Alignment.Center
         ) {
-          Icon(Icons.Filled.Add, contentDescription = "Add pages", tint = theme.primary, modifier = Modifier.size(24.dp))
+          Icon(Icons.Filled.Add, contentDescription = LocaleHelper.t(ctx, "content_add_pages"), tint = theme.primary, modifier = Modifier.size(24.dp))
         }
         Spacer(Modifier.height(Ds.s4))
         Text(LocaleHelper.t(ctx, "btn_add"), fontSize = Ds.HINT_SP.sp, color = theme.text)
@@ -1035,7 +1048,7 @@ fun FilterPickerDialog(
                           .background(ChamiColors.darkGreen),
                         contentAlignment = Alignment.Center
                       ) {
-                        Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Filled.Check, contentDescription = LocaleHelper.t(ctx, "split_mode_selected"), tint = Color.White, modifier = Modifier.size(16.dp))
                       }
                     }
                   }
@@ -1102,7 +1115,7 @@ fun BrightnessDialog(
         if (previewImage != null) {
           Image(
             bitmap = previewImage,
-            contentDescription = "Brightness preview",
+            contentDescription = LocaleHelper.t(ctx, "content_brightness_preview"),
             colorFilter = androidx.compose.ui.graphics.ColorFilter.colorMatrix(
               androidx.compose.ui.graphics.ColorMatrix(
                 floatArrayOf(
@@ -1378,7 +1391,7 @@ fun RectCropDialog(
               .border(1.dp, Color(0xFF94A3B8))
           )
           Image(
-            bitmap = imageBitmap, contentDescription = "Crop preview",
+            bitmap = imageBitmap, contentDescription = LocaleHelper.t(ctx, "content_crop_preview"),
             modifier = Modifier
               .offset(x = with(density) { offX.toDp() }, y = with(density) { offY.toDp() })
               .size(width = with(density) { dispW.toDp() }, height = with(density) { dispH.toDp() }),
@@ -1890,7 +1903,7 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       } else {
         BigPagePreview(
           page = selectedPage,
-          label = "Page ${safeSelected + 1}",
+          label = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${safeSelected + 1}"),
           theme = theme,
           onCrop = { cropIndex = safeSelected },
           onDelete = { vibrate(); vm.deleteAt(safeSelected) },
@@ -1954,6 +1967,9 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
   val animOn = animationsEnabled(ctx)
   var pdfUri by rememberSaveableUri()
   var totalPages by remember { mutableStateOf(0) }
+  // FINAL AUDIT: hoisted out of the grid recomposition —
+  // (1..totalPages).toList() was re-allocated on every recomposition.
+  val pageNumbers = remember(totalPages) { (1..totalPages).toList() }
   var pageOnePreview by remember { mutableStateOf<Bitmap?>(null) }
   // FIX 2026-11-18 (Fix 6): page selection. All pages are selected by
   // default (same behaviour as before); tapping a thumbnail toggles
@@ -2101,7 +2117,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       var failedPages = 0
       withContext(Dispatchers.IO) {
         for ((idx, p) in effectivePages.withIndex()) {
-          withContext(Dispatchers.Main) { progressText = "Image ${idx + 1} of ${effectivePages.size}" }
+          withContext(Dispatchers.Main) { progressText = LocaleHelper.t(ctx, "progress_image_of").replace("{i}", "${idx + 1}").replace("{n}", "${effectivePages.size}") }
           val bmp = try {
             PdfReader.renderPageBitmap(ctx, u, p - 1, scale)
           } catch (_: OutOfMemoryError) {
@@ -2204,7 +2220,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         ToolCard(theme = theme, horizontalAlignment = Alignment.CenterHorizontally) {
           Image(
             bitmap = pageOnePreview!!.asImageBitmap(),
-            contentDescription = "Page 1 Preview",
+            contentDescription = LocaleHelper.t(ctx, "content_page_1_preview"),
             modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(Ds.s8)),
             contentScale = ContentScale.Fit
           )
@@ -2294,7 +2310,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
           horizontalArrangement = Arrangement.spacedBy(Ds.s8),
           verticalArrangement = Arrangement.spacedBy(Ds.s8)
         ) {
-          gridItems((1..totalPages).toList(), key = { it }) { p ->
+          gridItems(pageNumbers, key = { it }) { p ->
             val isSelected = selectedPages.contains(p)
             val thumb = pageThumbs[p]
             if (pdfU != null) {
@@ -2333,7 +2349,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
                 if (thumb != null) {
                   Image(
                     bitmap = thumb.asImageBitmap(),
-                    contentDescription = "Page $p",
+                    contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "$p"),
                     modifier = Modifier.fillMaxSize().padding(Ds.s4),
                     contentScale = ContentScale.Fit
                   )
@@ -2359,7 +2375,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
                       .border(1.dp, Color.White, CircleShape),
                     contentAlignment = Alignment.Center
                   ) {
-                    Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(14.dp))
+                    Icon(Icons.Filled.Check, contentDescription = LocaleHelper.t(ctx, "split_mode_selected"), tint = Color.White, modifier = Modifier.size(14.dp))
                   }
                 }
               }
@@ -2420,6 +2436,9 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   val animOn = animationsEnabled(ctx)
   var pdfUri by rememberSaveableUri()
   var totalPages by remember { mutableStateOf(0) }
+  // FINAL AUDIT: hoisted out of the grid recomposition —
+  // (1..totalPages).toList() was re-allocated on every recomposition.
+  val pageNumbers = remember(totalPages) { (1..totalPages).toList() }
   var pdfLoadFailed by remember { mutableStateOf(false) }
   var loadedPdfUri by remember { mutableStateOf<Uri?>(null) }
   var initialConsumed by rememberSaveable { mutableStateOf(false) }
@@ -2562,7 +2581,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         when (splitMode) {
           "Every N" -> {
             parts.forEachIndexed { i, range ->
-              withContext(Dispatchers.Main) { progressText = "Part ${i + 1} of ${parts.size}" }
+              withContext(Dispatchers.Main) { progressText = LocaleHelper.t(ctx, "progress_part_of").replace("{i}", "${i + 1}").replace("{n}", "${parts.size}") }
               val out = PdfEngine.outFile(ctx, "${base}_part${i + 1}_${System.currentTimeMillis()}.pdf")
               if (PdfEngine.copyPages(ctx, listOf(u to range.toSet()), out)) files.add(out)
             }
@@ -2699,7 +2718,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
                       .replace("{from}", "${range.first}")
                       .replace("{to}", "${range.last}"),
                     fontSize = Ds.BODY_SP.sp, color = theme.text,
-                    modifier = Modifier.toolEnterFade(i, animOn)
+                    modifier = Modifier.toolEnterFade(minOf(i, 9), animOn)
                   )
                 }
               }
@@ -2737,7 +2756,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
           horizontalArrangement = Arrangement.spacedBy(Ds.s8),
           verticalArrangement = Arrangement.spacedBy(Ds.s8)
         ) {
-          gridItems((1..totalPages).toList(), key = { it }) { p ->
+          gridItems(pageNumbers, key = { it }) { p ->
             val isSelected = selectedPages.contains(p)
             val highlighted = inRange(p)
             Box(
@@ -2782,7 +2801,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
               ) {
                 if (isSelected) {
                   Icon(
-                    Icons.Filled.Check, contentDescription = "Select page $p",
+                    Icons.Filled.Check, contentDescription = LocaleHelper.t(ctx, "content_select_page").replace("{n}", "$p"),
                     tint = theme.primary, modifier = Modifier.size(16.dp)
                   )
                 }
@@ -2796,7 +2815,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
           ToolCard(theme = theme, horizontalAlignment = Alignment.CenterHorizontally) {
             Image(
               bitmap = pagePreviewBitmap!!.asImageBitmap(),
-              contentDescription = "Page $previewPageIndex",
+              contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "$previewPageIndex"),
               modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(Ds.s8)),
               contentScale = ContentScale.Fit
             )

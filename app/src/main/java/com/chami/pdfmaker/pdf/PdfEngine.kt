@@ -145,12 +145,22 @@ object PdfEngine {
   // — the valid JPEG bytes are kept instead. Callers that can rename
   // the output should use PdfCompress.keepSmallerImage, which keeps
   // such an original in a correctly-named .png/.webp file.
-  fun compressImageToKb(ctx:Context, uri:Uri, targetKb:Int, outFile:File): Boolean {
+  // M15: the result of compressImageToKbDetailed — `ok` is whether a
+  // file was written at all; `targetMet` is whether that file is
+  // actually at or under the requested KB target. The old Boolean-only
+  // result let callers claim the target was met when the binary search
+  // + 8 downscales still could not reach it.
+  data class CompressImageResult(val ok: Boolean, val targetMet: Boolean)
+
+  // COMPRESS TO EXACT KB — the byte-producing behaviour is unchanged
+  // (binary search quality 95 -> 20, then up to 8 downscales); only
+  // the result now reports whether the target was actually met.
+  fun compressImageToKbDetailed(ctx:Context, uri:Uri, targetKb:Int, outFile:File): CompressImageResult {
     // `bmp` always points at the current working bitmap so the finally
     // below recycles exactly that one, once, on every exit path.
     var bmp: Bitmap? = null
     return try {
-      bmp = loadBitmap(ctx, uri, 2000) ?: return false
+      bmp = loadBitmap(ctx, uri, 2000) ?: return CompressImageResult(ok = false, targetMet = false)
       var cur: Bitmap = bmp!!
       var quality=95; var bytes:ByteArray
       while(true){
@@ -188,16 +198,22 @@ object PdfEngine {
         ctx.contentResolver.openInputStream(uri)?.use { input ->
           FileOutputStream(outFile).use { o -> input.copyTo(o) }
         }
-        return true
+        return CompressImageResult(ok = true, targetMet = outFile.length() <= targetKb * 1024L)
       }
       FileOutputStream(outFile).use{ it.write(bytes) }
-      true
-    } catch(e:Exception){ false }
-      catch(e:OutOfMemoryError){ false }
+      CompressImageResult(ok = true, targetMet = bytes.size <= targetKb * 1024L)
+    } catch(e:Exception){ CompressImageResult(ok = false, targetMet = false) }
+      catch(e:OutOfMemoryError){ CompressImageResult(ok = false, targetMet = false) }
     finally {
       bmp?.recycle()
     }
   }
+
+  // Backwards-compatible wrapper: existing callers (and tests) keep
+  // the Boolean result; callers that need the honest target verdict
+  // use compressImageToKbDetailed instead.
+  fun compressImageToKb(ctx:Context, uri:Uri, targetKb:Int, outFile:File): Boolean =
+    compressImageToKbDetailed(ctx, uri, targetKb, outFile).ok
 
   // IMAGE RESIZE + CONVERT: width/height in px, format JPG/PNG/WEBP.
   // CROP-TO-FILL (#20): the source is centre-cropped to the target

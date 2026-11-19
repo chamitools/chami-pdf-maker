@@ -14,6 +14,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -54,6 +56,8 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,6 +68,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -83,8 +88,10 @@ import java.util.Locale
 // Tool is resolved by [historyToolName]: the per-file record in
 // HistoryStore first (written at creation, survives a rename), falling
 // back to the file-name prefix inference below
-// (Chami_ = Images to PDF, Scan_ = Scan, Split_ = Split, Merged_ = Merge,
+// (Chami_ = Images to PDF, Split_ = Split, Merged_ = Merge,
 // Compress_/Compressed_ = Compress, Resized_ = Resizer, protected_ = Protect).
+// FIX 2026-11-19 (final audit): no Scan here — Scan was removed from the
+// app, so a Scan_ prefix no longer maps to a tool (falls to "Other").
 // Files with an unknown prefix and no record only appear under "All".
 // Before→after KB is shown for compress results
 // recorded via recordCompressResult (SharedPreferences, keyed by output
@@ -99,7 +106,6 @@ private fun historyToolOf(file: File): String {
   val n = file.name
   return when {
     n.startsWith("Chami_") -> "Images to PDF"
-    n.startsWith("Scan_") -> "Scan"
     n.startsWith("Split_") -> "Split"
     n.startsWith("Merged_") -> "Merge"
     n.startsWith("Compress_") || n.startsWith("Compressed_") -> "Compress"
@@ -158,6 +164,45 @@ private fun historyDateBucket(lastModified: Long): String {
     lastModified >= today - day -> "Yesterday"
     lastModified >= today - 7 * day -> "This week"
     else -> "Older"
+  }
+}
+
+// FIX 2026-11-19 (final audit): tool / bucket / sort values are kept as
+// canonical English ids internally (filter, sort and grouping logic
+// compares them), and are only turned into display text here, at the
+// point they are shown. That keeps the logic language-independent.
+private fun historyToolLabel(ctx: Context, canonical: String): String {
+  return when (canonical) {
+    "All" -> LocaleHelper.t(ctx, "history_filter_all")
+    "Images to PDF" -> LocaleHelper.t(ctx, "history_tool_images_to_pdf")
+    "Merge" -> LocaleHelper.t(ctx, "history_tool_merge")
+    "Split" -> LocaleHelper.t(ctx, "history_tool_split")
+    "Protect" -> LocaleHelper.t(ctx, "history_tool_protect")
+    "Compress" -> LocaleHelper.t(ctx, "history_tool_compress")
+    "Resizer" -> LocaleHelper.t(ctx, "history_tool_resizer")
+    "PDF to Images" -> LocaleHelper.t(ctx, "history_tool_pdf_to_images")
+    "Format Convert" -> LocaleHelper.t(ctx, "history_tool_format_convert")
+    "OCR" -> LocaleHelper.t(ctx, "history_tool_ocr")
+    "Other" -> LocaleHelper.t(ctx, "history_tool_other")
+    else -> canonical
+  }
+}
+
+private fun historyBucketLabel(ctx: Context, bucket: String): String {
+  return when (bucket) {
+    "Today" -> LocaleHelper.t(ctx, "history_bucket_today")
+    "Yesterday" -> LocaleHelper.t(ctx, "history_bucket_yesterday")
+    "This week" -> LocaleHelper.t(ctx, "history_bucket_this_week")
+    else -> LocaleHelper.t(ctx, "history_bucket_older")
+  }
+}
+
+private fun historySortLabel(ctx: Context, mode: String): String {
+  return when (mode) {
+    "Newest" -> LocaleHelper.t(ctx, "history_sort_newest")
+    "Oldest" -> LocaleHelper.t(ctx, "history_sort_oldest")
+    "Biggest" -> LocaleHelper.t(ctx, "history_sort_biggest")
+    else -> LocaleHelper.t(ctx, "history_sort_name")
   }
 }
 
@@ -264,7 +309,14 @@ private object HistoryThumbCache {
   private const val MAX_ENTRIES = 40
   private val map = object : LinkedHashMap<String, Bitmap>(MAX_ENTRIES, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean {
-      return size > MAX_ENTRIES
+      // FIX 2026-11-19 (final audit): recycle the evicted bitmap so its
+      // native pixels are freed instead of leaking until GC. Rows guard
+      // against a recycled bitmap (see HistoryThumb) and re-render it.
+      val evict = size > MAX_ENTRIES
+      if (evict) {
+        eldest?.value?.let { if (!it.isRecycled) it.recycle() }
+      }
+      return evict
     }
   }
 
@@ -277,9 +329,11 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
   val ctx = LocalContext.current
   val isPdf = file.name.endsWith(".pdf", ignoreCase = true)
   // Render from the in-memory cache first — no pop-in on revisit.
-  var bmp by remember(file.absolutePath) { mutableStateOf(HistoryThumbCache.get(file.absolutePath)) }
-  LaunchedEffect(file.absolutePath) {
-    if (bmp == null) {
+  var bmp by remember(file.absolutePath) {
+    mutableStateOf(HistoryThumbCache.get(file.absolutePath)?.takeUnless { it.isRecycled })
+  }
+  LaunchedEffect(file.absolutePath, bmp?.isRecycled) {
+    if (bmp == null || bmp?.isRecycled == true) {
       withContext(Dispatchers.IO) {
         val uri = Uri.fromFile(file)
         // Whole first page, fitted (never a cropped square): render at
@@ -299,7 +353,7 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
   // Phase 6: thumbnail drawn from the cache when ready; while it
   // loads the tile is a grey skeleton (not a blank tile), matching
   // the Phase 4/5 skeleton pattern. Radius is Ds.tileRadius (L22).
-  val thumbImage = remember(bmp) { bmp?.asImageBitmap() }
+  val thumbImage = remember(bmp) { bmp?.takeUnless { it.isRecycled }?.asImageBitmap() }
   Box(
     Modifier
       .size(width = 48.dp, height = 64.dp)
@@ -314,7 +368,7 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
     if (thumbImage != null) {
       Image(
         bitmap = thumbImage,
-        contentDescription = "First page of ${file.name}",
+        contentDescription = LocaleHelper.t(ctx, "history_thumb_desc").replace("{name}", file.name),
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Fit
       )
@@ -334,20 +388,70 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
  *  pulse as MergeRowSkeleton, 96dp matches the file row (16dp
  *  padding + 64dp thumbnail). GPU alpha only, no layout work. */
 @Composable
-private fun HistoryRowSkeleton() {
-  val pulse by rememberInfiniteTransition(label = "historySkeleton").animateFloat(
-    initialValue = 0.35f, targetValue = 0.7f,
-    animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
-    label = "historySkeletonAlpha"
-  )
-  Box(
-    Modifier
-      .fillMaxWidth()
-      .height(96.dp)
-      .clip(RoundedCornerShape(Ds.tileRadius))
-      .background(ChamiColors.skeletonBg)
-      .graphicsLayer { alpha = pulse }
-  )
+private fun HistoryRowSkeleton(animOn: Boolean) {
+  // FIX 2026-11-19 (final audit): gate the infinite pulse on
+  // animationsEnabled() — with animations off the skeleton is a static
+  // grey box, same shape, no motion (same animOn gate the caller
+  // already computes for press-scale / toolEnterFade).
+  if (animOn) {
+    val pulse by rememberInfiniteTransition(label = "historySkeleton").animateFloat(
+      initialValue = 0.35f, targetValue = 0.7f,
+      animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+      label = "historySkeletonAlpha"
+    )
+    Box(
+      Modifier
+        .fillMaxWidth()
+        .height(96.dp)
+        .clip(RoundedCornerShape(Ds.tileRadius))
+        .background(ChamiColors.skeletonBg)
+        .graphicsLayer { alpha = pulse }
+    )
+  } else {
+    Box(
+      Modifier
+        .fillMaxWidth()
+        .height(96.dp)
+        .clip(RoundedCornerShape(Ds.tileRadius))
+        .background(ChamiColors.skeletonBg)
+    )
+  }
+}
+
+/** FIX 2026-11-19 (final audit): local section header for History /
+ *  Settings — same green accent bar look as the shared
+ *  ToolSectionHeader, but the text honours the Font Size setting
+ *  (fontScale) and PixelFont like the rest of these screens. The shared
+ *  header is fixed 16sp with no fontScale, which was a Font Size
+ *  regression for date-group headers and Settings section headings. */
+@Composable
+private fun FontScaledSectionHeader(
+  text: String,
+  color: Color,
+  fontScale: Float,
+  topPadding: Dp = Ds.s16
+) {
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    modifier = Modifier.padding(top = topPadding, bottom = Ds.s12)
+  ) {
+    Box(
+      Modifier
+        .width(Ds.s4)
+        .height(Ds.s20)
+        .clip(RoundedCornerShape(Ds.pillRadius))
+        .background(ChamiColors.darkGreen)
+    )
+    Spacer(Modifier.width(Ds.s8))
+    Text(
+      text,
+      fontFamily = PixelFont,
+      fontWeight = FontWeight.Bold,
+      fontSize = (Ds.SECTION_SP * fontScale).sp,
+      lineHeight = (Ds.SECTION_SP * 1.4 * fontScale).sp,
+      color = color
+    )
+  }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -369,31 +473,42 @@ fun HistoryScreen(
   // press-scale — off when the system "remove animations" setting is on.
   val animOn = animationsEnabled(ctx)
   // Phase 6 Font Size: "font_scale" in chami_prefs (0.85 / 1.0 / 1.15).
-  // Main History text sizes are multiplied by it (read fresh each
-  // composition so a change in Settings applies on the next visit).
-  val fontScale = ctx.getSharedPreferences(LocaleHelper.PREFS, Context.MODE_PRIVATE)
-    .getFloat("font_scale", 1.0f)
-  val favPrefs = remember { ctx.getSharedPreferences("chami_history_favs", Context.MODE_PRIVATE) }
-  // Phase 5 FLICKER FIX: the file list is loaded SYNCHRONOUSLY here,
-  // before the first composition, instead of starting empty and filling
-  // in from LaunchedEffect. The screen therefore never shows the
-  // "No Documents Found" empty state for a millisecond when files exist
-  // — the first frame already has the real list (or the true empty state).
-  // `loaded` stays as a guard: until the first refresh completes, show
-  // a blank background, never the empty state.
-  fun loadFilesNow(): List<File> {
-    val dir = File(ctx.getExternalFilesDir(null), "Chami")
-    return if (dir.exists()) dir.listFiles()?.filter { it.isFile } ?: emptyList() else emptyList()
+  // Main History text sizes are multiplied by it. Read once per visit
+  // (remember) instead of on every composition — HistoryScreen leaves
+  // the composition when the tab changes, so a change made in Settings
+  // is still picked up on the next visit.
+  val fontScale = remember {
+    ctx.getSharedPreferences(LocaleHelper.PREFS, Context.MODE_PRIVATE)
+      .getFloat("font_scale", 1.0f)
   }
-  var fileList by remember { mutableStateOf(loadFilesNow()) }
-  var storageUsed by remember { mutableStateOf(fileList.sumOf { it.length() }) }
+  val favPrefs = remember { ctx.getSharedPreferences("chami_history_favs", Context.MODE_PRIVATE) }
+  // FIX 2026-11-19 (final audit): the file list is loaded on an IO
+  // thread, not synchronously in remember{} on first composition
+  // (listFiles + sumOf length is disk IO). `loaded` is the no-flicker
+  // guard: until the first load completes the screen shows skeleton
+  // rows, never the "No Documents Found" empty state — the first frame
+  // therefore still never flashes a wrong empty state when files exist.
+  var fileList by remember { mutableStateOf<List<File>>(emptyList()) }
+  var storageUsed by remember { mutableStateOf(0L) }
   var loaded by remember { mutableStateOf(false) }
-  var query by remember { mutableStateOf("") }
-  var filter by remember { mutableStateOf("All") }
-  var sortMode by remember { mutableStateOf("Newest") }
+  // FIX 2026-11-19 (final audit): rotation state — query, filter,
+  // sort mode, selection and favourites survive rotation.
+  var query by rememberSaveable { mutableStateOf("") }
+  var filter by rememberSaveable { mutableStateOf("All") }
+  var sortMode by rememberSaveable { mutableStateOf("Newest") }
   var sortMenuOpen by remember { mutableStateOf(false) }
-  var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
-  var favourites by remember {
+  var selected by rememberSaveable(
+    saver = listSaver<Set<String>, String>(
+      save = { it.toList() },
+      restore = { it.toSet() }
+    )
+  ) { mutableStateOf<Set<String>>(emptySet()) }
+  var favourites by rememberSaveable(
+    saver = listSaver<Set<String>, String>(
+      save = { it.toList() },
+      restore = { it.toSet() }
+    )
+  ) {
     mutableStateOf(favPrefs.getStringSet("favs", emptySet())?.toSet() ?: emptySet())
   }
   var fileToDelete by remember { mutableStateOf<File?>(null) }
@@ -411,6 +526,19 @@ fun HistoryScreen(
     value = withContext(Dispatchers.IO) { HistoryStore.toolMap(ctx) }
   }
 
+  // FIX 2026-11-19 (final audit): compress results are loaded ONCE per
+  // screen (off the main thread) instead of readCompressResult() doing
+  // a SharedPreferences read inside every Compress row on every
+  // recomposition. Rows look the map up in memory (see FileRow below).
+  val compressResults by produceState<Map<String, Pair<Long, Long>>>(emptyMap(), fileList, toolMap) {
+    value = withContext(Dispatchers.IO) {
+      fileList
+        .filter { historyToolName(toolMap, it) == "Compress" }
+        .mapNotNull { f -> readCompressResult(ctx, f.name)?.let { f.name to it } }
+        .toMap()
+    }
+  }
+
   fun vibrate() {
     if (tm.hapticOn()) {
       try {
@@ -419,17 +547,19 @@ fun HistoryScreen(
     }
   }
 
+  val historyScope = rememberCoroutineScope()
   fun refresh() {
-    val dir = File(ctx.getExternalFilesDir(null), "Chami")
-    if (dir.exists()) {
-      val files = dir.listFiles()?.filter { it.isFile } ?: emptyList()
+    // Disk IO off the main thread (see the first-load note above);
+    // state is only written once the IO result is in.
+    historyScope.launch {
+      val files = withContext(Dispatchers.IO) {
+        val dir = File(ctx.getExternalFilesDir(null), "Chami")
+        if (dir.exists()) dir.listFiles()?.filter { it.isFile } ?: emptyList() else emptyList()
+      }
       fileList = files
       storageUsed = files.sumOf { it.length() }
-    } else {
-      fileList = emptyList()
-      storageUsed = 0L
+      loaded = true
     }
-    loaded = true
   }
 
   LaunchedEffect(Unit) { refresh() }
@@ -438,9 +568,13 @@ fun HistoryScreen(
   // blocking the list — rows show their metadata as counts arrive.
   LaunchedEffect(fileList) {
     withContext(Dispatchers.IO) {
+      // FIX 2026-11-19 (final audit): cap parallel page-count renders
+      // at 4 in flight — the old unbounded map{async} rendered every
+      // PDF at once on a long list.
+      val pageCountSlots = Semaphore(4)
       val counts = fileList
         .filter { it.name.endsWith(".pdf", ignoreCase = true) }
-        .map { f -> async { f.absolutePath to PdfEngine.pageCount(ctx, Uri.fromFile(f)) } }
+        .map { f -> async { pageCountSlots.withPermit { f.absolutePath to PdfEngine.pageCount(ctx, Uri.fromFile(f)) } } }
         .awaitAll()
         .filter { it.second > 0 }
         .toMap()
@@ -461,7 +595,7 @@ fun HistoryScreen(
     fileToDelete = null
     filesToDelete = emptyList()
     refresh()
-    Toast.makeText(ctx, "File deleted", Toast.LENGTH_SHORT).show()
+    Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_file_deleted"), Toast.LENGTH_SHORT).show()
   }
 
   val sdf = remember { SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault()) }
@@ -534,7 +668,8 @@ fun HistoryScreen(
       color = theme.text
     )
     Text(
-      text = "${fileList.size} documents saved",
+      text = if (!loaded) LocaleHelper.t(ctx, "calculating_sizes")
+        else LocaleHelper.t(ctx, "history_documents_saved").replace("{n}", "${fileList.size}"),
       fontSize = (Ds.HINT_SP * fontScale).sp,
       lineHeight = (Ds.HINT_SP * 1.4 * fontScale).sp,
       color = theme.textSecondary
@@ -561,7 +696,8 @@ fun HistoryScreen(
         )
         Spacer(Modifier.width(Ds.s12))
         Text(
-          "${formatKb(storageUsed)} used in Chami folder",
+          if (!loaded) LocaleHelper.t(ctx, "calculating_sizes")
+          else LocaleHelper.t(ctx, "history_storage_used").replace("{size}", formatKb(storageUsed)),
           fontSize = (Ds.HINT_SP * fontScale).sp,
           color = theme.textSecondary
         )
@@ -575,10 +711,10 @@ fun HistoryScreen(
       value = query,
       onValueChange = { query = it },
       placeholder = {
-        Text("Search files…", fontSize = (Ds.HINT_SP * fontScale).sp, color = theme.textSecondary)
+        Text(LocaleHelper.t(ctx, "history_search_hint"), fontSize = (Ds.HINT_SP * fontScale).sp, color = theme.textSecondary)
       },
       leadingIcon = {
-        Icon(Icons.Filled.Search, contentDescription = "Search", tint = theme.textSecondary)
+        Icon(Icons.Filled.Search, contentDescription = LocaleHelper.t(ctx, "history_search_label"), tint = theme.textSecondary)
       },
       singleLine = true,
       modifier = Modifier.fillMaxWidth().height(Ds.minTouch),
@@ -597,7 +733,7 @@ fun HistoryScreen(
     LazyRow(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
       items(filterChips) { chip ->
         ChamiChip(
-          label = chip,
+          label = historyToolLabel(ctx, chip),
           selected = filter == chip,
           onClick = { vibrate(); filter = chip }
         )
@@ -621,7 +757,7 @@ fun HistoryScreen(
           modifier = Modifier.height(Ds.minTouch),
           contentPadding = PaddingValues(horizontal = Ds.s12, vertical = Ds.s8)
         ) {
-          Text("SORT: $sortMode", fontFamily = PixelFont, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "history_sort_label").replace("{mode}", historySortLabel(ctx, sortMode)), fontFamily = PixelFont, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
         }
         DropdownMenu(
           expanded = sortMenuOpen,
@@ -630,7 +766,7 @@ fun HistoryScreen(
           listOf("Newest", "Oldest", "Biggest", "Name").forEach { mode ->
             DropdownMenuItem(
               text = {
-                Text(mode, fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
+                Text(historySortLabel(ctx, mode), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
               },
               onClick = { sortMode = mode; sortMenuOpen = false }
             )
@@ -645,7 +781,7 @@ fun HistoryScreen(
         modifier = Modifier.height(Ds.minTouch),
         contentPadding = PaddingValues(horizontal = Ds.s12, vertical = Ds.s8)
       ) {
-        Text("REFRESH", fontFamily = PixelFont, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
+        Text(LocaleHelper.t(ctx, "history_refresh"), fontFamily = PixelFont, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
       }
     }
 
@@ -662,7 +798,7 @@ fun HistoryScreen(
         verticalAlignment = Alignment.CenterVertically
       ) {
         Text(
-          "${selected.size} selected",
+          LocaleHelper.t(ctx, "history_selected_count").replace("{n}", "${selected.size}"),
           fontFamily = PixelFont,
           fontSize = Ds.HINT_SP.sp,
           fontWeight = FontWeight.Bold,
@@ -688,7 +824,7 @@ fun HistoryScreen(
           shape = RoundedCornerShape(Ds.buttonRadius),
           contentPadding = PaddingValues(horizontal = Ds.s12, vertical = Ds.s4)
         ) {
-          Text("SHARE", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "history_multi_share"), fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
         Button(
           onClick = {
@@ -701,10 +837,10 @@ fun HistoryScreen(
           shape = RoundedCornerShape(Ds.buttonRadius),
           contentPadding = PaddingValues(horizontal = Ds.s12, vertical = Ds.s4)
         ) {
-          Text("DELETE", fontFamily = PixelFont, color = Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "history_multi_delete"), fontFamily = PixelFont, color = Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
         TextButton(onClick = { selected = emptySet() }) {
-          Text("CANCEL", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
+          Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
         }
       }
     }
@@ -715,7 +851,7 @@ fun HistoryScreen(
       // Loading: skeleton rows shaped like file rows, NOT the empty
       // state (flicker fix) and NOT a blank background.
       Column(verticalArrangement = Arrangement.spacedBy(Ds.s12)) {
-        repeat(4) { HistoryRowSkeleton() }
+        repeat(4) { HistoryRowSkeleton(animOn) }
       }
     } else if (visible.isEmpty()) {
       Box(
@@ -748,7 +884,7 @@ fun HistoryScreen(
           }
           Spacer(Modifier.height(Ds.s12))
           Text(
-            "No Documents Found",
+            LocaleHelper.t(ctx, "history_empty_title"),
             fontFamily = PixelFont,
             fontWeight = FontWeight.Bold,
             fontSize = (Ds.BODY_SP * fontScale).sp,
@@ -756,8 +892,8 @@ fun HistoryScreen(
           )
           Spacer(Modifier.height(Ds.s4))
           Text(
-            if (query.isNotBlank() || filter != "All") "No files match this search or filter."
-            else "Created PDFs and converted files will appear here.",
+            if (query.isNotBlank() || filter != "All") LocaleHelper.t(ctx, "history_empty_search")
+            else LocaleHelper.t(ctx, "history_empty_hint"),
             fontFamily = PixelFont,
             fontSize = Ds.HINT_SP.sp,
             color = theme.textSecondary,
@@ -782,7 +918,7 @@ fun HistoryScreen(
               // Phase 6: date-group header in the shared Phase 5 style
               // (green accent bar), with the staggered enter fade.
               Box(Modifier.toolEnterFade(minOf(index, 9), animOn)) {
-                ToolSectionHeader(entry.title, theme.primary, topPadding = Ds.s4)
+                FontScaledSectionHeader(historyBucketLabel(ctx, entry.title), theme.primary, fontScale, topPadding = Ds.s4)
               }
             }
             is HistoryEntry.FileRow -> {
@@ -792,9 +928,7 @@ fun HistoryScreen(
               val isSel = selected.contains(file.absolutePath)
               val isFav = favourites.contains(file.absolutePath)
               val pages = pageCounts[file.absolutePath]
-              val compressResult = if (historyToolName(toolMap, file) == "Compress") {
-                readCompressResult(ctx, file.name)
-              } else null
+              val compressResult = compressResults[file.name]
               // Phase 6: press-scale on the row (shared interaction
               // source with combinedClickable) + staggered fade-up,
               // capped at 9 so long lists never delay late rows.
@@ -863,7 +997,7 @@ fun HistoryScreen(
                     Spacer(Modifier.height(Ds.s4))
                     Text(
                       buildString {
-                        if (pages != null) append("$pages pages • ")
+                        if (pages != null) append("$pages ${LocaleHelper.t(ctx, if (pages == 1) "done_page" else "done_pages")} • ")
                         append(formatKb(file.length()))
                         append(" • ${sdf.format(Date(file.lastModified()))}")
                       },
@@ -887,7 +1021,7 @@ fun HistoryScreen(
                   // Favourite / pin (star, persisted in SharedPreferences).
                   ChamiIconButton(
                     icon = if (isFav) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                    description = if (isFav) "Remove favourite" else "Favourite",
+                    description = if (isFav) LocaleHelper.t(ctx, "history_remove_favourite") else LocaleHelper.t(ctx, "history_favourite"),
                     onClick = { vibrate(); toggleFavourite(file) },
                     tint = if (isFav) theme.primary else theme.textSecondary
                   )
@@ -895,7 +1029,7 @@ fun HistoryScreen(
                   Box {
                     ChamiIconButton(
                       icon = Icons.Filled.MoreVert,
-                      description = "More options",
+                      description = LocaleHelper.t(ctx, "history_more_options"),
                       onClick = { menuFor = file.absolutePath }
                     )
                     DropdownMenu(
@@ -903,7 +1037,7 @@ fun HistoryScreen(
                       onDismissRequest = { menuFor = null }
                     ) {
                       DropdownMenuItem(
-                        text = { Text("Rename", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
+                        text = { Text(LocaleHelper.t(ctx, "history_rename"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
                         onClick = {
                           menuFor = null
                           renameText = file.nameWithoutExtension
@@ -911,14 +1045,14 @@ fun HistoryScreen(
                         }
                       )
                       DropdownMenuItem(
-                        text = { Text("Share", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
+                        text = { Text(LocaleHelper.t(ctx, "done_share"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
                         onClick = {
                           menuFor = null
                           ShareHelper.shareFile(ctx, file, mime)
                         }
                       )
                       DropdownMenuItem(
-                        text = { Text("Open", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
+                        text = { Text(LocaleHelper.t(ctx, "done_open"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
                         onClick = {
                           menuFor = null
                           if (isPdf) onOpenInReader(file)
@@ -926,7 +1060,7 @@ fun HistoryScreen(
                         }
                       )
                       DropdownMenuItem(
-                        text = { Text("Delete", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = MaterialTheme.colorScheme.error) },
+                        text = { Text(LocaleHelper.t(ctx, "history_delete"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = MaterialTheme.colorScheme.error) },
                         onClick = { menuFor = null; fileToDelete = file }
                       )
                     }
@@ -951,20 +1085,20 @@ fun HistoryScreen(
             },
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
           ) {
-            Text("DELETE", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+            Text(LocaleHelper.t(ctx, "history_delete_confirm"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
           }
         },
         dismissButton = {
           TextButton(onClick = { fileToDelete = null }) {
-            Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+            Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, color = theme.text)
           }
         },
         title = {
-          Text("Delete Document?", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
+          Text(LocaleHelper.t(ctx, "history_delete_title"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
         },
         text = {
           Text(
-            "Permanently delete \"${fileToDelete?.name}\"? This action cannot be undone.",
+            LocaleHelper.t(ctx, "history_delete_body").replace("{name}", fileToDelete?.name ?: ""),
             fontFamily = PixelFont,
             fontSize = Ds.BODY_SP.sp,
             color = theme.textSecondary
@@ -982,20 +1116,20 @@ fun HistoryScreen(
             onClick = { vibrate(); deleteFiles(filesToDelete) },
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
           ) {
-            Text("DELETE ${filesToDelete.size}", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+            Text(LocaleHelper.t(ctx, "history_delete_multi_confirm").replace("{n}", "${filesToDelete.size}"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
           }
         },
         dismissButton = {
           TextButton(onClick = { filesToDelete = emptyList() }) {
-            Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+            Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, color = theme.text)
           }
         },
         title = {
-          Text("Delete ${filesToDelete.size} files?", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
+          Text(LocaleHelper.t(ctx, "history_delete_multi_title").replace("{n}", "${filesToDelete.size}"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
         },
         text = {
           Text(
-            "These files will be permanently deleted. This action cannot be undone.",
+            LocaleHelper.t(ctx, "history_delete_multi_body"),
             fontFamily = PixelFont,
             fontSize = Ds.BODY_SP.sp,
             color = theme.textSecondary
@@ -1024,33 +1158,33 @@ fun HistoryScreen(
                 } else typed
                 val newName = base + "." + f.extension
                 if (base.isBlank()) {
-                  Toast.makeText(ctx, "Enter a file name", Toast.LENGTH_SHORT).show()
+                  Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_enter_file_name"), Toast.LENGTH_SHORT).show()
                 } else {
                   val newFile = File(f.parentFile, newName)
                   if (newFile.exists() && newFile.absolutePath != f.absolutePath) {
-                    Toast.makeText(ctx, "A file with that name already exists", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_rename_exists"), Toast.LENGTH_SHORT).show()
                   } else if (f.renameTo(newFile)) {
-                    Toast.makeText(ctx, "Renamed", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_renamed"), Toast.LENGTH_SHORT).show()
                     fileToRename = null
                     refresh()
                   } else {
-                    Toast.makeText(ctx, "Could not rename", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_rename_failed"), Toast.LENGTH_SHORT).show()
                   }
                 }
               }
             },
             colors = ButtonDefaults.buttonColors(containerColor = theme.primary)
           ) {
-            Text("RENAME", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+            Text(LocaleHelper.t(ctx, "history_rename_confirm"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
           }
         },
         dismissButton = {
           TextButton(onClick = { fileToRename = null }) {
-            Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+            Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, color = theme.text)
           }
         },
         title = {
-          Text("Rename file", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
+          Text(LocaleHelper.t(ctx, "history_rename_title"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
         },
         text = {
           OutlinedTextField(
@@ -1149,7 +1283,7 @@ fun SettingsScreen(
       )
       ctx.startActivity(intent)
     } catch (_: Exception) {
-      Toast.makeText(ctx, "No email app found", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_no_email_app"), Toast.LENGTH_SHORT).show()
     }
   }
 
@@ -1183,16 +1317,17 @@ fun SettingsScreen(
   }
 
   val fontOptions = listOf(
-    "Small" to 0.85f,
-    "Default" to 1.0f,
-    "Large" to 1.15f
+    LocaleHelper.t(ctx, "settings_font_small") to 0.85f,
+    LocaleHelper.t(ctx, "settings_font_default") to 1.0f,
+    LocaleHelper.t(ctx, "settings_font_large") to 1.15f
   )
 
   @Composable
   fun SectionHeading(text: String) {
-    // Phase 6: shared Phase 5 section header — 4dp green accent bar
-    // + bold section text, same as the tool screens.
-    ToolSectionHeader(text, theme.primaryDark, topPadding = Ds.s24)
+    // FIX 2026-11-19 (final audit): local font-scaled header (see
+    // FontScaledSectionHeader) — the shared ToolSectionHeader is fixed
+    // 16sp with no fontScale, so Settings headings ignored Font Size.
+    FontScaledSectionHeader(text, theme.primaryDark, fontScale, topPadding = Ds.s24)
   }
 
   @Composable
@@ -1307,12 +1442,14 @@ fun SettingsScreen(
     val storageValue = if (storageUsedBytes == null || cacheBytes == null) {
       calculatingText
     } else {
-      "${formatKb(storageUsedBytes!!)} used • ${formatKb(cacheBytes!!)} cache"
+      LocaleHelper.t(ctx, "settings_storage_value")
+        .replace("{used}", formatKb(storageUsedBytes!!))
+        .replace("{cache}", formatKb(cacheBytes!!))
     }
     val cacheValue = cacheBytes?.let { formatKb(it) } ?: calculatingText
 
     // ---- General ----
-    SectionHeading("General")
+    SectionHeading(LocaleHelper.t(ctx, "settings_section_general"))
     SettingsCard(modifier = Modifier.toolEnterFade(0, animOn)) {
       SettingsRow(
         title = LocaleHelper.t(ctx, "language"),
@@ -1322,7 +1459,7 @@ fun SettingsScreen(
       // FIX 2026-11-18 (report #42): say plainly what the language
       // switch translates, so it is not sold as a full switch.
       Text(
-        "Language changes Home, tool names and slide buttons. Tool screens stay in English.",
+        LocaleHelper.t(ctx, "settings_language_note"),
         fontSize = (Ds.HINT_SP * fontScale).sp,
         lineHeight = (Ds.HINT_SP * 1.4 * fontScale).sp,
         color = theme.textSecondary,
@@ -1351,7 +1488,7 @@ fun SettingsScreen(
     }
 
     // ---- Security ----
-    SectionHeading("Security")
+    SectionHeading(LocaleHelper.t(ctx, "settings_section_security"))
     SettingsCard(modifier = Modifier.toolEnterFade(1, animOn)) {
       SettingsRow(
         title = LocaleHelper.t(ctx, "app_lock"),
@@ -1387,7 +1524,7 @@ fun SettingsScreen(
     }
 
     // ---- About ----
-    SectionHeading("About")
+    SectionHeading(LocaleHelper.t(ctx, "settings_about"))
     SettingsCard(modifier = Modifier.toolEnterFade(2, animOn)) {
       SettingsRow(
         title = LocaleHelper.t(ctx, "contact_support"),
@@ -1399,8 +1536,8 @@ fun SettingsScreen(
         onClick = { openPrivacyPolicy() }
       )
       SettingsRow(
-        title = "About",
-        value = "Version ${BuildConfig.VERSION_NAME}",
+        title = LocaleHelper.t(ctx, "settings_about"),
+        value = LocaleHelper.t(ctx, "settings_about_version").replace("{version}", BuildConfig.VERSION_NAME),
         onClick = { showAboutDialog = true }
       )
     }
@@ -1415,7 +1552,7 @@ fun SettingsScreen(
       confirmButton = {},
       dismissButton = {
         TextButton(onClick = { showLanguageDialog = false }) {
-          Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+          Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, color = theme.text)
         }
       },
       title = {
@@ -1446,7 +1583,7 @@ fun SettingsScreen(
                 modifier = Modifier.weight(1f)
               )
               if (isCurrent) {
-                Icon(Icons.Filled.Check, contentDescription = "Current language", tint = theme.primary)
+                Icon(Icons.Filled.Check, contentDescription = LocaleHelper.t(ctx, "settings_current_language"), tint = theme.primary)
               }
             }
           }
@@ -1464,7 +1601,7 @@ fun SettingsScreen(
         TextButton(onClick = { showFontSizeDialog = false }) {
           // UI OVERHAUL 2026-11-18: primaryDark — 12sp #16A34A on white
           // is ~3:1 and fails WCAG AA (4.5:1); #14532D passes.
-          Text("DONE", fontFamily = PixelFont, color = theme.primaryDark)
+          Text(LocaleHelper.t(ctx, "done"), fontFamily = PixelFont, color = theme.primaryDark)
         }
       },
       title = {
@@ -1513,13 +1650,13 @@ fun SettingsScreen(
           onClick = {
             val pin = pinSetupText.filter { it.isDigit() }
             if (pin.length != 4) {
-              pinSetupError = "Enter exactly 4 digits"
+              pinSetupError = LocaleHelper.t(ctx, "pin_enter_4_digits")
             } else if (pinStep == 0) {
               pinFirst = pin
               pinSetupText = ""
               pinStep = 1
             } else if (pin != pinFirst) {
-              pinSetupError = "PINs do not match — enter the PIN again"
+              pinSetupError = LocaleHelper.t(ctx, "pin_mismatch")
               pinStep = 0
               pinFirst = ""
               pinSetupText = ""
@@ -1530,13 +1667,13 @@ fun SettingsScreen(
                 .apply()
               appLockOn = true
               showPinSetupDialog = false
-              Toast.makeText(ctx, "App Lock ON", Toast.LENGTH_SHORT).show()
+              Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_app_lock_on"), Toast.LENGTH_SHORT).show()
             }
           },
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary)
         ) {
           Text(
-            if (pinStep == 0) "NEXT" else "SAVE PIN",
+            if (pinStep == 0) LocaleHelper.t(ctx, "pin_next") else LocaleHelper.t(ctx, "pin_save"),
             fontFamily = PixelFont,
             color = theme.textOnPrimary,
             fontSize = (Ds.HINT_SP * fontScale).sp,
@@ -1546,12 +1683,12 @@ fun SettingsScreen(
       },
       dismissButton = {
         TextButton(onClick = { showPinSetupDialog = false }) {
-          Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+          Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, color = theme.text)
         }
       },
       title = {
         Text(
-          if (pinStep == 0) "Set a 4-digit PIN" else "Enter the PIN again",
+          if (pinStep == 0) LocaleHelper.t(ctx, "pin_set_title") else LocaleHelper.t(ctx, "pin_confirm_title"),
           fontFamily = PixelFont,
           fontWeight = FontWeight.Bold,
           fontSize = Ds.SECTION_SP.sp
@@ -1582,7 +1719,7 @@ fun SettingsScreen(
           }
           Spacer(Modifier.height(Ds.s8))
           Text(
-            "If you forget this PIN, resetting it requires reinstalling the app.",
+            LocaleHelper.t(ctx, "pin_forgot_note"),
             fontSize = (Ds.HINT_SP * fontScale).sp,
             lineHeight = (Ds.HINT_SP * 1.4 * fontScale).sp,
             color = theme.textSecondary
@@ -1605,9 +1742,9 @@ fun SettingsScreen(
           onClick = {
             val pin = pinVerifyText.filter { it.isDigit() }
             if (pin.length != 4) {
-              pinVerifyError = "Enter exactly 4 digits"
+              pinVerifyError = LocaleHelper.t(ctx, "pin_enter_4_digits")
             } else if (!pinMatches(prefs.getString("app_pin", null), pin)) {
-              pinVerifyError = "Wrong PIN — try again"
+              pinVerifyError = LocaleHelper.t(ctx, "pin_wrong_try_again")
               pinVerifyText = ""
             } else {
               // L23 migration: a legacy unsalted/plain PIN that just
@@ -1618,13 +1755,13 @@ fun SettingsScreen(
               prefs.edit().putBoolean("app_lock", false).apply()
               appLockOn = false
               showPinVerifyDialog = false
-              Toast.makeText(ctx, "App Lock OFF", Toast.LENGTH_SHORT).show()
+              Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_app_lock_off"), Toast.LENGTH_SHORT).show()
             }
           },
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary)
         ) {
           Text(
-            "TURN OFF",
+            LocaleHelper.t(ctx, "pin_turn_off"),
             fontFamily = PixelFont,
             color = theme.textOnPrimary,
             fontSize = (Ds.HINT_SP * fontScale).sp,
@@ -1634,12 +1771,12 @@ fun SettingsScreen(
       },
       dismissButton = {
         TextButton(onClick = { showPinVerifyDialog = false }) {
-          Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+          Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, color = theme.text)
         }
       },
       title = {
         Text(
-          "Enter your PIN to turn App Lock off",
+          LocaleHelper.t(ctx, "pin_verify_title"),
           fontFamily = PixelFont,
           fontWeight = FontWeight.Bold,
           fontSize = Ds.SECTION_SP.sp
@@ -1686,7 +1823,7 @@ fun SettingsScreen(
               ctx.cacheDir.deleteRecursively()
               val chamiTmp = File(ctx.getExternalFilesDir(null), "Chami/tmppdf")
               if (chamiTmp.exists()) chamiTmp.deleteRecursively()
-              Toast.makeText(ctx, "Cache cleared", Toast.LENGTH_SHORT).show()
+              Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_cache_cleared"), Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
               e.printStackTrace()
             }
@@ -1695,23 +1832,23 @@ fun SettingsScreen(
           },
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary)
         ) {
-          Text("CLEAR", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "settings_clear_confirm"), fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
         }
       },
       dismissButton = {
         TextButton(onClick = { showClearCacheDialog = false }) {
-          Text("CANCEL", fontFamily = PixelFont, color = theme.text)
+          Text(LocaleHelper.t(ctx, "btn_cancel"), fontFamily = PixelFont, color = theme.text)
         }
       },
       title = {
         Text(
-          "Clear Cache" + (cacheBytes?.let { " (${formatKb(it)})" } ?: "") + "?",
+          LocaleHelper.t(ctx, "clear_cache") + (cacheBytes?.let { " (${formatKb(it)})" } ?: "") + "?",
           fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = (Ds.BODY_SP * fontScale).sp
         )
       },
       text = {
         Text(
-          "This clears temporary files only. Your saved documents and History entries will not be deleted.",
+          LocaleHelper.t(ctx, "settings_clear_cache_body"),
           fontSize = (Ds.BODY_SP * fontScale).sp,
           lineHeight = (Ds.BODY_SP * 1.4 * fontScale).sp,
           color = theme.textSecondary
@@ -1727,17 +1864,16 @@ fun SettingsScreen(
       onDismissRequest = { showUpdateDialog = false },
       confirmButton = {
         TextButton(onClick = { showUpdateDialog = false }) {
-          Text("CLOSE", fontFamily = PixelFont, color = theme.primaryDark)
+          Text(LocaleHelper.t(ctx, "close"), fontFamily = PixelFont, color = theme.primaryDark)
         }
       },
       title = {
-        Text("Check for Updates", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
+        Text(LocaleHelper.t(ctx, "check_updates"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
       },
       text = {
         Text(
-          "This check needs the store app, which is not available on this device. " +
-            "You are on version ${BuildConfig.VERSION_NAME}. " +
-            "Open the store listing on your phone to check for a newer version.",
+          LocaleHelper.t(ctx, "settings_update_unavailable_body")
+            .replace("{version}", BuildConfig.VERSION_NAME),
           fontSize = (Ds.BODY_SP * fontScale).sp,
           lineHeight = (Ds.BODY_SP * 1.4 * fontScale).sp,
           color = theme.textSecondary
@@ -1752,11 +1888,11 @@ fun SettingsScreen(
       onDismissRequest = { showAboutDialog = false },
       confirmButton = {
         TextButton(onClick = { showAboutDialog = false }) {
-          Text("CLOSE", fontFamily = PixelFont, color = theme.primaryDark)
+          Text(LocaleHelper.t(ctx, "close"), fontFamily = PixelFont, color = theme.primaryDark)
         }
       },
       title = {
-        Text("About", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
+        Text(LocaleHelper.t(ctx, "settings_about"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = Ds.SECTION_SP.sp)
       },
       text = {
         Column {
@@ -1768,12 +1904,12 @@ fun SettingsScreen(
           )
           Spacer(Modifier.height(Ds.s8))
           Text(
-            "Version ${BuildConfig.VERSION_NAME}",
+            LocaleHelper.t(ctx, "settings_about_version").replace("{version}", BuildConfig.VERSION_NAME),
             fontSize = (Ds.BODY_SP * fontScale).sp,
             color = theme.textSecondary
           )
           Text(
-            "Package ${ctx.packageName}",
+            LocaleHelper.t(ctx, "settings_about_package").replace("{package}", ctx.packageName),
             fontSize = (Ds.BODY_SP * fontScale).sp,
             color = theme.textSecondary
           )
@@ -1792,11 +1928,11 @@ fun SettingsScreen(
           onClick = { showPrivacyPolicyFallback = false },
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary)
         ) {
-          Text("CLOSE", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "close"), fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = (Ds.HINT_SP * fontScale).sp, fontWeight = FontWeight.Bold)
         }
       },
       title = {
-        Text("Privacy Policy", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = (Ds.BODY_SP * fontScale).sp)
+        Text(LocaleHelper.t(ctx, "privacy_policy"), fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = (Ds.BODY_SP * fontScale).sp)
       },
       text = {
         Box(Modifier.height(300.dp)) {

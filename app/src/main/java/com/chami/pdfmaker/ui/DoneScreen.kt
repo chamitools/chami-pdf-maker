@@ -206,16 +206,22 @@ fun DoneScreen(
     try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
   }
 
-  // Spec §5: tick draws in over 600ms.
+  // Spec §5: tick draws in over 600ms. Final-audit fix: when
+  // animations are off the spec timing is replaced by an instant
+  // (0ms) spec, so the tick shows fully drawn at once — the
+  // animateFloatAsState call itself stays unconditional.
   val tickProgress by animateFloatAsState(
     targetValue = if (started) 1f else 0f,
-    animationSpec = tween(durationMillis = 600),
+    animationSpec = if (animOn) tween(durationMillis = 600) else tween(durationMillis = 0),
     label = "tick"
   )
   // Confetti bursts once (1800ms) — `started` only ever goes false -> true.
+  // Same gate as the tick: instant (0ms) when animations are off, so
+  // confettiProgress jumps to 1f and the confetti (alpha 1 - progress)
+  // is simply never drawn.
   val confettiProgress by animateFloatAsState(
     targetValue = if (started) 1f else 0f,
-    animationSpec = tween(durationMillis = 1800),
+    animationSpec = if (animOn) tween(durationMillis = 1800) else tween(durationMillis = 0),
     label = "confetti"
   )
 
@@ -252,7 +258,8 @@ fun DoneScreen(
   // Phase 6: the Done content fades in gently (250ms shared easing,
   // same toolEnterFade as the Phase 5 tool screens); instant when
   // animations are off. The tick (600ms) and confetti (1800ms) keep
-  // their spec timings and behaviour exactly.
+  // their spec timings when animations are on, and show their final
+  // state instantly (full tick, no confetti) when animations are off.
   Column(
     modifier = Modifier
       .fillMaxSize()

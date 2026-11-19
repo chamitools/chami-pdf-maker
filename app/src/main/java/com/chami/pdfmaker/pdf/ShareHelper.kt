@@ -23,7 +23,7 @@ object ShareHelper {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
-      ctx.startActivity(Intent.createChooser(intent, "Share via"))
+      ctx.startActivity(Intent.createChooser(intent, LocaleHelper.t(ctx, "share_via")))
       true
     } catch (e: Exception) {
       e.printStackTrace()
@@ -48,7 +48,7 @@ object ShareHelper {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
-      ctx.startActivity(Intent.createChooser(intent, "Share via"))
+      ctx.startActivity(Intent.createChooser(intent, LocaleHelper.t(ctx, "share_via")))
       true
     } catch (e: Exception) {
       e.printStackTrace()
@@ -71,7 +71,7 @@ object ShareHelper {
         showToast(ctx, LocaleHelper.t(ctx, "open_failed"))
         return false
       }
-      ctx.startActivity(Intent.createChooser(intent, "Open with"))
+      ctx.startActivity(Intent.createChooser(intent, LocaleHelper.t(ctx, "open_with")))
       true
     } catch (e: ActivityNotFoundException) {
       showToast(ctx, LocaleHelper.t(ctx, "open_failed"))

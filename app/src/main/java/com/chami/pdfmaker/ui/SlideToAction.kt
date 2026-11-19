@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.chami.pdfmaker.LocaleHelper
 import com.chami.pdfmaker.theme.ChamiTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -87,6 +89,11 @@ fun SlideToAction(
   val haptic = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val density = LocalDensity.current
+  // Final-audit fix: motion gate (same animationsEnabled pattern as
+  // DoneScreen / the tool screens) — snap-back and tap-nudge set the
+  // offset instantly when animations are off, with no tween.
+  val ctx = LocalContext.current
+  val animOn = animationsEnabled(ctx)
   // PHASE 2 (H8): in RTL layouts the thumb starts at the end side
   // and the drag mirrors (dragging toward the start side completes).
   // `LayoutDirection` is read here, never hardcoded to LTR.
@@ -115,10 +122,17 @@ fun SlideToAction(
   /** One snap-back animation per gesture end — the only coroutine here. */
   // PHASE 2 (M10): the previous offset animation is cancelled before
   // a new one starts, so two animations can never fight over the thumb.
+  // Final-audit fix: with animations off there is no tween at all —
+  // the offset is set instantly (previous job still cancelled first).
   var animJob by remember { mutableStateOf<Job?>(null) }
   fun animateOffsetTo(target: Float) {
     val start = dragOffset
     animJob?.cancel()
+    animJob = null
+    if (!animOn) {
+      dragOffset = target
+      return
+    }
     animJob = scope.launch {
       animate(start, target, animationSpec = tween(300)) { value, _ ->
         dragOffset = value
@@ -273,7 +287,7 @@ fun SlideToAction(
     if (showTapHint && enabled) {
       Spacer(Modifier.height(Ds.s4))
       Text(
-        text = "Drag the circle",
+        text = LocaleHelper.t(ctx, "slide_drag_circle"),
         fontSize = Ds.HINT_SP.sp,
         lineHeight = (Ds.HINT_SP * 1.4).sp,
         color = ChamiColors.deepGreen
@@ -282,7 +296,7 @@ fun SlideToAction(
     if (!enabled) {
       Spacer(Modifier.height(Ds.s4))
       Text(
-        text = disabledReason ?: "Not ready yet — finish the steps above first.",
+        text = disabledReason ?: LocaleHelper.t(ctx, "slide_not_ready"),
         fontSize = Ds.HINT_SP.sp,
         lineHeight = (Ds.HINT_SP * 1.4).sp,
         color = ChamiColors.secondaryText

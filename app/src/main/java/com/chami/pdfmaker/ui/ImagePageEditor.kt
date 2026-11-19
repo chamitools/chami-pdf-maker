@@ -44,6 +44,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -59,6 +60,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -73,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.chami.pdfmaker.LocaleHelper
 import com.chami.pdfmaker.theme.ChamiTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -337,7 +340,19 @@ private fun thumbnailBitmap(cache: MutableMap<Uri, ImageBitmap>, page: PageItem)
   cache[page.uri]?.let { return it }
   val bmp = page.bitmap
   val thumb: ImageBitmap = if (bmp.width <= 200) {
-    bmp.asImageBitmap()
+    // FINAL AUDIT: an owned copy, never the page bitmap itself, so
+    // the cache owns its bitmaps and can recycle them on prune/dispose
+    // (same rule as the Images-to-PDF strip in ToolScreens.kt).
+    val owned = try {
+      bmp.copy(Bitmap.Config.ARGB_8888, false)
+    } catch (_: Exception) {
+      null
+    } ?: try {
+      Bitmap.createScaledBitmap(bmp, bmp.width, bmp.height, true)
+    } catch (_: Exception) {
+      null
+    }
+    (owned ?: bmp).asImageBitmap()
   } else {
     val h = (bmp.height * (200f / bmp.width)).toInt().coerceAtLeast(1)
     Bitmap.createScaledBitmap(bmp, 200, h, true).asImageBitmap()
@@ -400,6 +415,7 @@ fun CropEditorDialog(
   // width/height the frame must keep while dragging. A preset sets it;
   // Free clears it. Straighten mode ignores it (corners move freely).
   var activeRatio by remember(bitmap) { mutableStateOf<Float?>(null) }
+  val ctx = LocalContext.current
   val density = LocalDensity.current
   // PERFORMANCE: wrap the bitmap once — every drag frame recomposes this
   // dialog, and asImageBitmap() on every frame (main image + loupe) made
@@ -444,10 +460,10 @@ fun CropEditorDialog(
         verticalAlignment = Alignment.CenterVertically
       ) {
         TextButton(onClick = onDismiss) {
-          Text("CANCEL", fontFamily = PixelFont, color = Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "editor_cancel"), fontFamily = PixelFont, color = Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
         Text(
-          if (straightenMode) "STRAIGHTEN" else "CROP",
+          if (straightenMode) LocaleHelper.t(ctx, "editor_straighten") else LocaleHelper.t(ctx, "editor_crop"),
           fontFamily = PixelFont, fontWeight = FontWeight.Bold,
           fontSize = Ds.BODY_SP.sp, color = Color.White
         )
@@ -457,7 +473,7 @@ fun CropEditorDialog(
           shape = RoundedCornerShape(Ds.buttonRadius),
           contentPadding = PaddingValues(horizontal = Ds.s16, vertical = 0.dp)
         ) {
-          Text("APPLY", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "editor_apply"), fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
       }
       Spacer(Modifier.height(Ds.s8))
@@ -473,7 +489,7 @@ fun CropEditorDialog(
           shape = RoundedCornerShape(Ds.buttonRadius),
           border = androidx.compose.foundation.BorderStroke(1.dp, theme.primary)
         ) {
-          Text("CROP — CUT", fontFamily = PixelFont, color = if (!straightenMode) theme.textOnPrimary else Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "editor_crop_cut"), fontFamily = PixelFont, color = if (!straightenMode) theme.textOnPrimary else Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
         OutlinedButton(
           onClick = { straightenMode = true },
@@ -482,13 +498,13 @@ fun CropEditorDialog(
           border = androidx.compose.foundation.BorderStroke(1.dp, Color.White),
           colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
         ) {
-          Text("STRAIGHTEN", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
+          Text(LocaleHelper.t(ctx, "editor_straighten"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
       }
       Spacer(Modifier.height(Ds.s8))
       Text(
-        if (straightenMode) "Straighten flattens a tilted page — corners move on their own and the perspective is corrected. This is separate from Crop."
-        else "Crop cuts the image — everything outside the frame is removed. Drag a corner or edge to cut. Pinch to zoom.",
+        if (straightenMode) LocaleHelper.t(ctx, "editor_straighten_hint")
+        else LocaleHelper.t(ctx, "editor_crop_hint"),
         fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = Color.White.copy(alpha = 0.7f)
       )
       Spacer(Modifier.height(Ds.s8))
@@ -680,7 +696,7 @@ fun CropEditorDialog(
         ) {
           Image(
             bitmap = imageBitmap,
-            contentDescription = "Page to crop",
+            contentDescription = LocaleHelper.t(ctx, "editor_page_to_crop"),
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.FillBounds
           )
@@ -837,7 +853,7 @@ fun CropEditorDialog(
 
       Spacer(Modifier.height(Ds.s8))
       Text(
-        "Zoom: ${"%.1f".format(zoom)}x",
+        LocaleHelper.t(ctx, "editor_zoom").replace("{v}", "%.1f".format(zoom)),
         fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = Color.White.copy(alpha = 0.7f)
       )
       Spacer(Modifier.height(Ds.s8))
@@ -879,7 +895,14 @@ fun CropEditorDialog(
             ),
             contentPadding = PaddingValues(0.dp)
           ) {
-            Text(opt.label, fontFamily = PixelFont, fontSize = Ds.NAV_SP.sp, fontWeight = FontWeight.Bold, color = if (selected) theme.textOnPrimary else Color.White)
+            // FINAL AUDIT: Free/Original reuse existing keys;
+            // 1:1 etc. are numerals and stay as-is.
+            val ratioLabel = when (opt.label) {
+              "Free" -> LocaleHelper.t(ctx, "label_free")
+              "Original" -> LocaleHelper.t(ctx, "label_original")
+              else -> opt.label
+            }
+            Text(ratioLabel, fontFamily = PixelFont, fontSize = Ds.NAV_SP.sp, fontWeight = FontWeight.Bold, color = if (selected) theme.textOnPrimary else Color.White)
           }
         }
       }
@@ -900,7 +923,7 @@ fun CropEditorDialog(
           border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.7f)),
           colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
         ) {
-          Text("SUGGEST EDGES", fontFamily = PixelFont, fontSize = Ds.NAV_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
+          Text(LocaleHelper.t(ctx, "editor_suggest_edges"), fontFamily = PixelFont, fontSize = Ds.NAV_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
         Button(
           onClick = onRotate,
@@ -908,12 +931,12 @@ fun CropEditorDialog(
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary),
           shape = RoundedCornerShape(Ds.buttonRadius)
         ) {
-          Text("ROTATE 90°", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+          Text(LocaleHelper.t(ctx, "btn_rotate_90"), fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
       }
       Spacer(Modifier.height(Ds.s8))
       Text(
-        "Edge suggestion is a brightness guide only, not true edge detection — drag the corners to fix it before applying.",
+        LocaleHelper.t(ctx, "editor_edge_hint"),
         fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = Color.White.copy(alpha = 0.7f)
       )
       Spacer(Modifier.height(Ds.s8))
@@ -924,7 +947,7 @@ fun CropEditorDialog(
         shape = RoundedCornerShape(Ds.buttonRadius)
       ) {
         Text(
-          if (straightenMode) "APPLY STRAIGHTEN" else "APPLY CROP",
+          if (straightenMode) LocaleHelper.t(ctx, "editor_apply_straighten") else LocaleHelper.t(ctx, "editor_apply_crop"),
           fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold
         )
       }
@@ -966,13 +989,27 @@ fun PageList(
   onAdjust: (Int) -> Unit
 ) {
   val density = LocalDensity.current
+  val ctx = LocalContext.current
+  // FINAL AUDIT: motion gate for animateItemPlacement below.
+  val animOn = animationsEnabled(ctx)
   val haptic = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val listState = rememberLazyListState()
   // Cached thumbnails, keyed by page Uri (see thumbnailBitmap).
   val thumbCache = remember { HashMap<Uri, ImageBitmap>() }
   // PHASE 4: pruning is a side effect, not composition work.
-  SideEffect { thumbCache.keys.retainAll(pages.map { it.uri }.toSet()) }
+  // FINAL AUDIT: evicted entries are recycled here (the cache owns
+  // its bitmaps — see thumbnailBitmap); a bitmap still backing a live
+  // page is never recycled.
+  SideEffect {
+    val currentUris = pages.map { it.uri }.toSet()
+    val liveBitmaps = pages.map { it.bitmap }.toSet()
+    thumbCache.keys.filter { it !in currentUris }.forEach { uri ->
+      thumbCache.remove(uri)?.asAndroidBitmap()?.let { bmp ->
+        if (bmp !in liveBitmaps && !bmp.isRecycled) bmp.recycle()
+      }
+    }
+  }
   // Drag state lives here (not per-item) so it survives the list being
   // reordered under the dragged card. Explicit State objects so the
   // pointerInput drag callbacks always read the current values.
@@ -980,6 +1017,20 @@ fun PageList(
   val dragOffsetXState = remember { mutableStateOf(0f) }
   val latestPages by rememberUpdatedState(pages)
   val latestOnPagesChange by rememberUpdatedState(onPagesChange)
+  // FINAL AUDIT: recycle the whole thumbnail cache when this list
+  // leaves composition (previously the cached bitmaps were never
+  // recycled). latestPages is read live so a bitmap still backing a
+  // page is never recycled.
+  DisposableEffect(Unit) {
+    onDispose {
+      val liveBitmaps = latestPages.map { it.bitmap }.toSet()
+      thumbCache.values.forEach { img ->
+        val bmp = img.asAndroidBitmap()
+        if (bmp !in liveBitmaps && !bmp.isRecycled) bmp.recycle()
+      }
+      thumbCache.clear()
+    }
+  }
   val cardWidthDp = 120.dp
   val spacingDp = 10.dp
   val cardFullPx = with(density) { (cardWidthDp + spacingDp).toPx() }
@@ -1080,14 +1131,16 @@ fun PageList(
           // the list reorders mid-drag. Not applied to the dragged card
           // itself — it is glued to the finger and animating its
           // placement would make it jump back a card width.
-          .then(if (isDragging) Modifier else Modifier.animateItemPlacement())
+          // FINAL AUDIT: no slide when animations are off — reorder
+          // itself still works, it just applies instantly.
+          .then(if (isDragging || !animOn) Modifier else Modifier.animateItemPlacement())
       ) {
         Box(Modifier.size(110.dp)) {
           val loadedThumb = thumb
           if (loadedThumb != null) {
             Image(
               bitmap = loadedThumb,
-              contentDescription = "Page ${index + 1}",
+              contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${index + 1}"),
               modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(4.dp)),
               contentScale = ContentScale.Crop
             )
@@ -1112,9 +1165,9 @@ fun PageList(
           }
         }
         Spacer(Modifier.height(4.dp))
-        Text("Page ${index + 1}", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
+        Text(LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${index + 1}"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text)
         if (page.cropped) {
-          Text("Edited", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
+          Text(LocaleHelper.t(ctx, "editor_edited"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.primaryDark)
         }
       }
     }
@@ -1163,7 +1216,7 @@ fun PageList(
     // an edit is still running is no longer dropped silently — the
     // user gets a short "Working..." toast instead.
     if (cropBusy) {
-      Toast.makeText(ctx, "Working...", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_working"), Toast.LENGTH_SHORT).show()
       return
     }
     cropBusy = true
@@ -1179,7 +1232,7 @@ fun PageList(
         }
         if (closeSheet) cropIndex = null
       } catch (_: Exception) {
-        Toast.makeText(ctx, "Could not apply that edit", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_edit_failed"), Toast.LENGTH_SHORT).show()
       }
       cropBusy = false
     }

@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- L12: least privilege — only the app's own dirs that FileProvider
+     actually shares (ShareHelper + ToolScreens2 readerContentUri):
+     tool outputs / History files under getExternalFilesDir()/Chami
+     (PdfEngine.outFile) and temp files under cacheDir (unlock_*.pdf,
+     image-editor temps). The old <external-path path="."> exposed ALL
+     of shared external storage, and <external-files-path path=".">
+     exposed the whole app external-files root — neither is needed.
+     No file under filesDir is ever shared, so no files-path entry. -->
 <paths>
-    <external-files-path name="my_files" path="." />
     <external-files-path name="chami" path="Chami/" />
-    <external-path name="external_files" path="." />
     <cache-path name="cache" path="." />
-    <cache-path name="cache_files" path="." />
 </paths>

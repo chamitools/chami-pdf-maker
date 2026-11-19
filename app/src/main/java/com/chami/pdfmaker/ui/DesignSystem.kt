@@ -5,11 +5,7 @@ import android.provider.Settings
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -52,6 +48,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -390,15 +387,28 @@ fun ChamiErrorBanner(
  * like an A4 page — used instead of a bare spinner while a document
  * or page renders, so loading never looks like a blank white screen.
  * The pulse is a GPU alpha animation only (no layout work per frame).
+ * Final-audit fix: the pulse honours [animationsEnabled] — with
+ * animations off the bars sit at a static mid grey (alpha 0.5) and no
+ * animation runs. Same signature, so existing callers are unchanged.
  */
 @Composable
 fun PageSkeletonLoader(modifier: Modifier = Modifier) {
-    val pulse by rememberInfiniteTransition(label = "skeleton").animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.7f,
-        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
-        label = "skeletonAlpha"
-    )
+    // Same gate pattern as ChamiScreenTransition below: one Animatable
+    // driven by a LaunchedEffect, so the composable calls stay
+    // unconditional and only the motion is gated.
+    val animOn = animationsEnabled(LocalContext.current)
+    val pulseAnim = remember { Animatable(0.5f) }
+    LaunchedEffect(animOn) {
+        if (animOn) {
+            while (true) {
+                pulseAnim.animateTo(0.7f, tween(900))
+                pulseAnim.animateTo(0.35f, tween(900))
+            }
+        } else {
+            pulseAnim.snapTo(0.5f)
+        }
+    }
+    val pulse = pulseAnim.value
     Column(
         modifier = modifier
             .fillMaxWidth()

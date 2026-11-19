@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Material3.DayNight.NoActionBar" parent="android:Theme.Material.Light.NoActionBar" />
-    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar" />
+    <!-- L13: renamed — the old name Theme.Material3.DayNight.NoActionBar
+         lied: it is parented to android:Theme.Material.Light.NoActionBar
+         (light-only, no DayNight, no Material3). Manifest updated to match. -->
+    <style name="Theme.Chami.Light.NoActionBar" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- L13: Theme.MyApplication deleted — nothing referenced it
+         (only its own definition; no manifest/activity/style ref). -->
 </resources>

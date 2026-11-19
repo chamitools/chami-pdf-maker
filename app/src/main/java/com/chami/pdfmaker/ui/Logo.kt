@@ -1,6 +1,8 @@
 package com.chami.pdfmaker.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,13 +32,22 @@ val PixelFont = FontFamily.SansSerif
 @Composable
 fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
   val ctx = LocalContext.current
-  val animatedFill by animateFloatAsState(targetValue = fill, label = "progress")
+  // Final-audit fix: motion gate — the fill animation uses the
+  // default spring when animations are on and snaps instantly to the
+  // filled state when animations are off (same animationsEnabled
+  // pattern as the tool screens).
+  val animOn = animationsEnabled(ctx)
+  val animatedFill by animateFloatAsState(
+    targetValue = fill,
+    animationSpec = if (animOn) spring() else snap(),
+    label = "progress"
+  )
 
   val statusText = when {
-    fill < 0.35f -> "Initializing ultra-fast engine..."
-    fill < 0.75f -> "Loading secure document modules..."
-    fill < 1.0f -> "Preparing workspace..."
-    else -> "Ready"
+    fill < 0.35f -> LocaleHelper.t(ctx, "splash_initializing")
+    fill < 0.75f -> LocaleHelper.t(ctx, "splash_loading_modules")
+    fill < 1.0f -> LocaleHelper.t(ctx, "splash_preparing")
+    else -> LocaleHelper.t(ctx, "splash_ready")
   }
 
   Box(

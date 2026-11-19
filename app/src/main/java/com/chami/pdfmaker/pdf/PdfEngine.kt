@@ -97,7 +97,7 @@ object PdfEngine {
   // Merge / Split output as keeping text.
   fun copyPages(ctx:Context, sources:List<Pair<Uri,Set<Int>?>>, outFile:File): Boolean {
     val doc = PdfDocument(); var pageNo=1
-    try {
+    return try {
       sources.forEach{ (uri, keep) ->
         var pfd: ParcelFileDescriptor? = null
         var renderer: PdfRenderer? = null

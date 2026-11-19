@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -33,7 +34,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.animateItemPlacement
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -951,6 +951,7 @@ fun CropEditorDialog(
 // - Thumbnails use the cached ~200px downscale (thumbnailBitmap), never
 //   the full bitmap per recomposition.
 // No ads in this file (Phase 6: all ads removed).
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PageList(
   pages: List<PageItem>,

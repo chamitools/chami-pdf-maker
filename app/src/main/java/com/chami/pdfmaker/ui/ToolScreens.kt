@@ -1168,8 +1168,8 @@ fun RectCropDialog(
   var rect by remember(bitmap) { mutableStateOf(ComposeRect(0f, 0f, 1f, 1f)) }
   var ratioLabel by rememberSaveable { mutableStateOf("Free") }
   // PHASE 4: which handle (if any) is being dragged right now — drives
-  // the magnifier loupe below and the handle's pressed scale. The
-  // geometry functions are untouched; this is feedback only.
+  // the handle's pressed scale. The geometry functions are untouched;
+  // this is feedback only.
   var activeHandle by remember { mutableStateOf<String?>(null) }
   val ctx = LocalContext.current
   // PERFORMANCE: wrap the bitmap once — the drag path recomposes on every
@@ -1547,63 +1547,6 @@ fun RectCropDialog(
                     scaleX = s; scaleY = s
                   }
                   .clip(CircleShape).background(Color.White).border(2.dp, ChamiColors.darkGreen, CircleShape)
-              )
-            }
-          }
-          // PHASE 4: magnifier loupe while a handle is dragged — a 2x
-          // circular view of the pixels under the finger, above the
-          // handle, so a precise cut is possible on small screens.
-          // Same pattern as the loupe in CropEditorDialog: the loupe
-          // shows the image at 2x with the handle point centred; the
-          // image is offset by (offX, offY) inside this box, so the
-          // handle's box coordinates map to image coordinates first.
-          // FIX (phone-fix, issue 2 — black circle while dragging):
-          // the loupe is 120dp at 2x, so it shows a source window only
-          // 60dp wide. Centring that window on a corner/edge handle
-          // put half of it OUTSIDE the image, where the Box's solid
-          // Color.Black background showed through as a black disc.
-          // The sampled point is now clamped so the whole source
-          // window stays inside the image (the loupe then shows the
-          // area NEAR the handle when the handle is at an edge, and
-          // the magnified image always covers the full circle), and
-          // the loupe is not shown at all when the image is too small
-          // for the window to fit — never a black disc. The loupe's
-          // position above the finger is unchanged.
-          activeHandle?.let { handleId ->
-            val frac = handles.firstOrNull { it.first == handleId }?.second ?: return@let
-            val hx = toPxX(frac.x)
-            val hy = toPxY(frac.y)
-            val loupePx = with(density) { 120.dp.toPx() }
-            val half = loupePx / 2f
-            val loupeX = (hx - half).coerceIn(0f, (boxW - loupePx).coerceAtLeast(0f))
-            val loupeY = (hy - loupePx - with(density) { Ds.s24.toPx() }).coerceIn(0f, (boxH - loupePx).coerceAtLeast(0f))
-            val srcHalf = loupePx / 4f
-            if (dispW < loupePx / 2f || dispH < loupePx / 2f) return@let
-            val fx = (hx - offX).coerceIn(srcHalf, dispW - srcHalf)
-            val fy = (hy - offY).coerceIn(srcHalf, dispH - srcHalf)
-            Box(
-              Modifier
-                .offset { IntOffset(loupeX.roundToInt(), loupeY.roundToInt()) }
-                .size(120.dp)
-                .clip(CircleShape)
-                .background(Color.Black)
-                .border(2.dp, Color.White, CircleShape)
-            ) {
-              Image(
-                bitmap = imageBitmap,
-                contentDescription = null,
-                modifier = Modifier
-                  .size(
-                    width = with(density) { (dispW * 2f).toDp() },
-                    height = with(density) { (dispH * 2f).toDp() }
-                  )
-                  .offset {
-                    IntOffset(
-                      (half - fx * 2f).roundToInt(),
-                      (half - fy * 2f).roundToInt()
-                    )
-                  },
-                contentScale = ContentScale.FillBounds
               )
             }
           }

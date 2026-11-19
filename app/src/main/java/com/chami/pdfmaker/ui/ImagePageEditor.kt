@@ -379,8 +379,6 @@ private fun thumbnailBitmap(cache: MutableMap<Uri, ImageBitmap>, page: PageItem)
 // visible dot is deliberately smaller than its touch target),
 // draggable freely in x and y, clamped inside the image, cannot cross
 // the opposite corner. Edge midpoint handles (4) drag that edge's two
-// corners together. While a handle is dragged a circular 2x magnifier
-// loupe shows the area around the finger, positioned above it.
 // Auto-detect only SUGGESTS corners (luminance guide, see
 // detectDocumentQuad) — it never applies anything by itself. Pinch
 // zoom 1-3x still works. Signature unchanged from Phase 5.
@@ -418,7 +416,7 @@ fun CropEditorDialog(
   val ctx = LocalContext.current
   val density = LocalDensity.current
   // PERFORMANCE: wrap the bitmap once — every drag frame recomposes this
-  // dialog, and asImageBitmap() on every frame (main image + loupe) made
+  // dialog, and asImageBitmap() on every frame made
   // the crop drag stutter on low-end phones.
   val imageBitmap = remember(bitmap) { bitmap.asImageBitmap() }
 
@@ -557,7 +555,6 @@ fun CropEditorDialog(
         val minSide = 0.08f
         // Which handle is being dragged: 0..3 = corner, 4..7 = edge midpoint
         // (edge = handle - 4: 0 top, 1 right, 2 bottom, 3 left). Null = none.
-        // The loupe follows this handle's point.
         var activeHandle by remember { mutableStateOf<Int?>(null) }
 
         // Frame corners in the current mode: the free quad in
@@ -839,63 +836,6 @@ fun CropEditorDialog(
 
                   }
 
-        // MAGNIFIER LOUPE: while a corner/edge handle is dragged, a
-        // circular 2x zoomed view of the area around the finger,
-        // positioned above the finger (clamped inside the image area).
-        // Sits OUTSIDE the zoomed Box so the pinch scale does not move it.
-        // FIX (phone-fix, issue 2 — black circle while dragging): the
-        // loupe is 120dp at 2x, so it shows a source window only 60dp
-        // wide. Centring that window on a corner/edge handle put half
-        // of it OUTSIDE the image, where the Box's solid Color.Black
-        // background showed through as a black disc. The sampled point
-        // is now clamped so the whole source window stays inside the
-        // image (the loupe then shows the area NEAR the handle when the
-        // handle is at an edge, and the magnified image always covers
-        // the full circle), and the loupe is not shown at all when the
-        // image is too small for the window to fit — never a black
-        // disc. The loupe's position above the finger is unchanged.
-        activeHandle?.let { handle ->
-          val focus = if (handle < 4) frameCorners()[handle] else edgeMid(handle - 4)
-          val fx = focus.x * dispW
-          val fy = focus.y * dispH
-          // 120dp loupe and the 20dp / 16dp visible dots below are documented
-          // one-offs: the touch target is the 48dp token, the visible dot
-          // and the magnifier are deliberately larger than the spec's 72dp
-          // loupe, kept from Phase 6 so the pixel under the finger is legible.
-          val loupePx = with(density) { 120.dp.toPx() }
-          val half = loupePx / 2f
-          val loupeX = (fx - half).coerceIn(0f, (dispW - loupePx).coerceAtLeast(0f))
-          val loupeY = (fy - loupePx - with(density) { Ds.s24.toPx() }).coerceIn(0f, (dispH - loupePx).coerceAtLeast(0f))
-          val srcHalf = loupePx / 4f
-          if (dispW < loupePx / 2f || dispH < loupePx / 2f) return@let
-          val fxC = fx.coerceIn(srcHalf, dispW - srcHalf)
-          val fyC = fy.coerceIn(srcHalf, dispH - srcHalf)
-          Box(
-            Modifier
-              .offset { IntOffset((offXPx + loupeX).roundToInt(), (offYPx + loupeY).roundToInt()) }
-              .size(120.dp)
-              .clip(CircleShape)
-              .background(Color.Black)
-              .border(2.dp, Color.White, CircleShape)
-          ) {
-            Image(
-              bitmap = imageBitmap,
-              contentDescription = null,
-              modifier = Modifier
-                .size(
-                  width = with(density) { (dispW * 2f).toDp() },
-                  height = with(density) { (dispH * 2f).toDp() }
-                )
-                .offset {
-                  IntOffset(
-                    (half - fxC * 2f).roundToInt(),
-                    (half - fyC * 2f).roundToInt()
-                  )
-                },
-              contentScale = ContentScale.FillBounds
-            )
-          }
-        }
       }
 
       Spacer(Modifier.height(Ds.s8))

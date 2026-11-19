@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.animateItemPlacement
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -43,6 +44,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,7 +74,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.chami.pdfmaker.theme.ChamiTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 // A page = Uri the PDF is built from + the bitmap currently shown
@@ -726,8 +731,15 @@ fun CropEditorDialog(
                 },
               contentAlignment = Alignment.Center
             ) {
+              // PHASE 4: the handle being dragged grows slightly, so the
+              // finger's grip point stays visible under the finger.
               Box(
-                Modifier.size(20.dp).clip(CircleShape).background(theme.primary)
+                Modifier.size(20.dp)
+                  .graphicsLayer {
+                    val s = if (activeHandle == corner) 1.3f else 1f
+                    scaleX = s; scaleY = s
+                  }
+                  .clip(CircleShape).background(theme.primary)
                   .border(2.dp, Color.White, CircleShape)
               )
             }
@@ -764,8 +776,14 @@ fun CropEditorDialog(
                 },
               contentAlignment = Alignment.Center
             ) {
+              // PHASE 4: same pressed feedback as the corner handles.
               Box(
-                Modifier.size(16.dp).clip(CircleShape).background(Color.White)
+                Modifier.size(16.dp)
+                  .graphicsLayer {
+                    val s = if (activeHandle == edge + 4) 1.3f else 1f
+                    scaleX = s; scaleY = s
+                  }
+                  .clip(CircleShape).background(Color.White)
                   .border(2.dp, theme.primary, CircleShape)
               )
             }
@@ -952,7 +970,8 @@ fun PageList(
   val listState = rememberLazyListState()
   // Cached thumbnails, keyed by page Uri (see thumbnailBitmap).
   val thumbCache = remember { HashMap<Uri, ImageBitmap>() }
-  thumbCache.keys.retainAll(pages.map { it.uri }.toSet())
+  // PHASE 4: pruning is a side effect, not composition work.
+  SideEffect { thumbCache.keys.retainAll(pages.map { it.uri }.toSet()) }
   // Drag state lives here (not per-item) so it survives the list being
   // reordered under the dragged card. Explicit State objects so the
   // pointerInput drag callbacks always read the current values.
@@ -974,6 +993,14 @@ fun PageList(
     itemsIndexed(pages, key = { _, page -> page.uri.toString() }) { index, page ->
       val isSelected = index == selectedIndex
       val isDragging = index == draggingIndexState.value
+      // PHASE 4: thumbnails decode off the main thread (same pattern as
+      // PageThumbnailStrip) — the cell shows a skeleton until the
+      // downscale lands, so scrolling never janks on the first pass.
+      var thumb by remember(page.uri) { mutableStateOf<ImageBitmap?>(thumbCache[page.uri]) }
+      LaunchedEffect(page.uri) {
+        if (thumb != null) return@LaunchedEffect
+        thumb = withContext(Dispatchers.Default) { thumbnailBitmap(thumbCache, page) }
+      }
       Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
@@ -1028,10 +1055,13 @@ fun PageList(
                   latestOnPagesChange(ImagePageEditor.move(current, cur, cur + 1))
                   draggingIndexState.value = cur + 1
                   dragOffsetXState.value -= cardFullPx
+                  // PHASE 4: a light tick on every swap.
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                 } else if (dragOffsetXState.value < -halfPx && cur > 0) {
                   latestOnPagesChange(ImagePageEditor.move(current, cur, cur - 1))
                   draggingIndexState.value = cur - 1
                   dragOffsetXState.value += cardFullPx
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                 }
               },
               onDragEnd = {
@@ -1045,14 +1075,27 @@ fun PageList(
               }
             )
           }
+          // PHASE 4: neighbours slide aside instead of teleporting when
+          // the list reorders mid-drag. Not applied to the dragged card
+          // itself — it is glued to the finger and animating its
+          // placement would make it jump back a card width.
+          .then(if (isDragging) Modifier else Modifier.animateItemPlacement())
       ) {
         Box(Modifier.size(110.dp)) {
-          Image(
-            bitmap = thumbnailBitmap(thumbCache, page),
-            contentDescription = "Page ${index + 1}",
-            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(4.dp)),
-            contentScale = ContentScale.Crop
-          )
+          val loadedThumb = thumb
+          if (loadedThumb != null) {
+            Image(
+              bitmap = loadedThumb,
+              contentDescription = "Page ${index + 1}",
+              modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(4.dp)),
+              contentScale = ContentScale.Crop
+            )
+          } else {
+            Box(
+              Modifier.fillMaxSize().clip(RoundedCornerShape(4.dp))
+                .background(ChamiColors.skeletonBg)
+            )
+          }
           if (isSelected) {
             Box(
               Modifier

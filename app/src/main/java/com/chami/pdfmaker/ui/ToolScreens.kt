@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -24,6 +25,7 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.animateItemPlacement
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
@@ -46,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect as ComposeRect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -61,6 +64,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -77,6 +81,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.roundToInt
 
 // ---------------------------------------------------------------------------
 // PHASE 6 — NO ADS in this build (user decision 2026-11-13): no interstitial
@@ -695,39 +700,46 @@ fun BigPagePreview(
       .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.s8))
   ) {
     val shown = page?.bitmap
-    // PERFORMANCE: wrap once — this preview recomposes on every page /
-    // selection change, and re-wrapping the full-res bitmap each time
-    // dropped frames on low-end phones.
-    val shownImage = remember(shown) { shown?.asImageBitmap() }
-    if (shown != null) {
-      // FIX 2026-11-18 (fixed A4 page): the preview shows the FIXED A4
-      // portrait page (595x842pt, white) with the image fitted inside
-      // it at uniform 15mm margins, centred, aspect preserved — never
-      // stretched, never cropped to fill. This is exactly what the
-      // generated PDF page looks like.
-      BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        val pageW = minOf(maxWidth, maxHeight * (595f / 842f))
-        val pageH = pageW * (842f / 595f)
-        Box(
-          Modifier.size(pageW, pageH)
-            .background(Color.White)
-            .border(1.dp, theme.cardBorder)
-        ) {
-          BoxWithConstraints(Modifier.fillMaxSize()) {
-            val padX = maxWidth * (15f / 210f)
-            val padY = maxHeight * (15f / 297f)
-            Image(
-              bitmap = shownImage!!,
-              contentDescription = label,
-              modifier = Modifier.fillMaxSize().padding(horizontal = padX, vertical = padY),
-              contentScale = ContentScale.Fit
-            )
+    // PHASE 4: gentle crossfade when the page changes (tap a thumbnail,
+    // crop/filter/rotate) — the preview used to swap instantly, which
+    // read as a flicker. Crossfade keeps the old bitmap alive until
+    // the fade finishes; the A4 page box is fixed-size, so nothing
+    // jumps during the transition.
+    Crossfade(targetState = shown, label = "pagePreview") { bmp ->
+      if (bmp != null) {
+        // PERFORMANCE: wrap once per bitmap — this preview recomposes
+        // on every page / selection change, and re-wrapping the
+        // full-res bitmap each time dropped frames on low-end phones.
+        val shownImage = remember(bmp) { bmp.asImageBitmap() }
+        // FIX 2026-11-18 (fixed A4 page): the preview shows the FIXED A4
+        // portrait page (595x842pt, white) with the image fitted inside
+        // it at uniform 15mm margins, centred, aspect preserved — never
+        // stretched, never cropped to fill. This is exactly what the
+        // generated PDF page looks like.
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+          val pageW = minOf(maxWidth, maxHeight * (595f / 842f))
+          val pageH = pageW * (842f / 595f)
+          Box(
+            Modifier.size(pageW, pageH)
+              .background(Color.White)
+              .border(1.dp, theme.cardBorder)
+          ) {
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+              val padX = maxWidth * (15f / 210f)
+              val padY = maxHeight * (15f / 297f)
+              Image(
+                bitmap = shownImage,
+                contentDescription = label,
+                modifier = Modifier.fillMaxSize().padding(horizontal = padX, vertical = padY),
+                contentScale = ContentScale.Fit
+              )
+            }
           }
         }
-      }
-    } else {
-      Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text(LocaleHelper.t(ctx, "label_no_page_yet"), fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+      } else {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+          Text(LocaleHelper.t(ctx, "label_no_page_yet"), fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+        }
       }
     }
     Column(
@@ -781,8 +793,12 @@ fun PageThumbnailStrip(
   // leaves composition.
   val thumbCache = remember { HashMap<Uri, Bitmap>() }
   val currentUris = pages.map { it.uri }.toSet()
-  thumbCache.keys.filter { it !in currentUris }.forEach { uri ->
-    thumbCache.remove(uri)?.let { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+  // PHASE 4: pruning is a side effect, not composition work — it used
+  // to run inline here (recycling bitmaps mid-composition).
+  SideEffect {
+    thumbCache.keys.filter { it !in currentUris }.forEach { uri ->
+      thumbCache.remove(uri)?.let { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+    }
   }
   DisposableEffect(Unit) {
     onDispose {
@@ -803,17 +819,35 @@ fun PageThumbnailStrip(
     itemsIndexed(pages, key = { _, page -> page.uri.toString() }) { index, page ->
       val isSel = index == selectedIndex
       val isDragging = draggingUri == page.uri
-      // PHASE 2 (M11): ~200px cached downscale, never the full-res
-      // bitmap — wrapping the full bitmap with asImageBitmap() uploaded
-      // a full-res texture per thumbnail and stuttered the drag surface.
-      val thumbImage = remember(page.uri) {
-        thumbCache.getOrPut(page.uri) {
-          val bmp = page.bitmap
-          val h = (bmp.height * (200f / bmp.width)).toInt().coerceAtLeast(1)
-          Bitmap.createScaledBitmap(bmp, 200, h, true)
-        }.asImageBitmap()
+      // PHASE 4: the 200px downscale runs on Dispatchers.Default and
+      // the cell shows a skeleton until it lands — the old code scaled
+      // the full-res bitmap synchronously during composition, so the
+      // first scroll through a strip of phone photos janked. The cache
+      // is still the owner (see above); a Uri change (crop/rotate)
+      // resets the state and reloads, so no stale thumbnail survives.
+      var thumbImage by remember(page.uri) {
+        mutableStateOf<ImageBitmap?>(thumbCache[page.uri]?.asImageBitmap())
       }
-      Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      LaunchedEffect(page.uri) {
+        if (thumbImage != null) return@LaunchedEffect
+        val scaled = withContext(Dispatchers.Default) {
+          thumbCache[page.uri] ?: run {
+            val bmp = page.bitmap
+            val h = (bmp.height * (200f / bmp.width)).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(bmp, 200, h, true).also { thumbCache[page.uri] = it }
+          }
+        }
+        thumbImage = scaled.asImageBitmap()
+      }
+      // PHASE 4: neighbours slide aside instead of teleporting when the
+      // list reorders mid-drag. animateItemPlacement is applied to
+      // every item EXCEPT the dragged one — the dragged card is glued
+      // to the finger (dragOffsetX) and animating its placement would
+      // make it jump back a card width, then glide forward.
+      Column(
+        modifier = if (isDragging) Modifier else Modifier.animateItemPlacement(),
+        horizontalAlignment = Alignment.CenterHorizontally
+      ) {
         Box(
           Modifier
             .size(Ds.thumbStripHeight)
@@ -841,9 +875,14 @@ fun PageThumbnailStrip(
                   if (dragOffsetX > halfPx && cur < latestPages.lastIndex) {
                     latestOnMove(cur, cur + 1)
                     dragOffsetX -= cardFullPx
+                    // PHASE 4: a light tick on every swap, so the drag
+                    // feels physical — pickup/drop already tick; the
+                    // in-between swaps were silent.
+                    try { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } catch (_: Exception) {}
                   } else if (dragOffsetX < -halfPx && cur > 0) {
                     latestOnMove(cur, cur - 1)
                     dragOffsetX += cardFullPx
+                    try { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } catch (_: Exception) {}
                   }
                   if (dragOffsetX > cardFullPx * 0.7f) scope.launch { listState.scrollBy(cardFullPx * 0.3f) }
                   else if (dragOffsetX < -cardFullPx * 0.7f) scope.launch { listState.scrollBy(-cardFullPx * 0.3f) }
@@ -860,12 +899,20 @@ fun PageThumbnailStrip(
             .border(2.dp, if (isSel) ChamiColors.darkGreen else theme.cardBorder, RoundedCornerShape(Ds.s8))
             .clickable { onSelect(index) }
         ) {
-          Image(
-            bitmap = thumbImage,
-            contentDescription = "Page ${index + 1}",
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop
-          )
+          // PHASE 4: skeleton while the downscale is still loading
+          // (see LaunchedEffect above) — the cell never shows a blank
+          // hole or a half-decoded image while scrolling.
+          val loadedThumb = thumbImage
+          if (loadedThumb != null) {
+            Image(
+              bitmap = loadedThumb,
+              contentDescription = "Page ${index + 1}",
+              modifier = Modifier.fillMaxSize(),
+              contentScale = ContentScale.Crop
+            )
+          } else {
+            Box(Modifier.fillMaxSize().background(ChamiColors.skeletonBg))
+          }
           if (isSel) {
             Box(
               Modifier
@@ -912,7 +959,8 @@ fun FilterPickerDialog(
   selected: Int,
   theme: ChamiTheme,
   onPick: (Int) -> Unit,
-  onDismiss: () -> Unit
+  onDismiss: () -> Unit,
+  bitmap: Bitmap? = null
 ) {
   val ctx = LocalContext.current
   val names = listOf(
@@ -921,20 +969,97 @@ fun FilterPickerDialog(
     LocaleHelper.t(ctx, "filter_name_grayscale"),
     LocaleHelper.t(ctx, "filter_name_enhance")
   )
+  // PHASE 4: live previews — one small downscale, each filter applied
+  // to it off the main thread, so the user sees the effect before
+  // tapping instead of applying blind. The tap behaviour is unchanged
+  // (apply on tap, dialog closes); the previews only show what the tap
+  // will do. The same ImagePageEditor.applyFilter runs on the small
+  // copy, so the preview matches the result.
+  val previews = remember { mutableStateMapOf<Int, ImageBitmap?>() }
+  LaunchedEffect(bitmap) {
+    previews.clear()
+    val src = bitmap ?: return@LaunchedEffect
+    val small = withContext(Dispatchers.Default) {
+      val w = 160
+      val h = (src.height * (w.toFloat() / src.width)).toInt().coerceAtLeast(1)
+      Bitmap.createScaledBitmap(src, w, h, true)
+    }
+    for (mode in 0..3) {
+      val filtered = withContext(Dispatchers.Default) {
+        if (mode == 0) small else ImagePageEditor.applyFilter(small, mode)
+      }
+      previews[mode] = filtered.asImageBitmap()
+    }
+  }
   ChamiAlertDialog(theme,
     onDismissRequest = onDismiss,
     title = { Text(LocaleHelper.t(ctx, "dialog_filter_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
     text = {
       Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          names.take(2).forEachIndexed { i, n ->
-            ChamiChip(n, selected == i, { onPick(i) }, Modifier.weight(1f))
+        if (bitmap != null) {
+          // 2x2 grid of preview cards: image on top, name below; the
+          // selected card gets the green border + check badge, so the
+          // current filter is visible at a glance.
+          listOf(0 to 1, 2 to 3).forEach { (a, b) ->
+            Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+              listOf(a, b).forEach { i ->
+                Column(
+                  Modifier.weight(1f)
+                    .clip(RoundedCornerShape(Ds.s8))
+                    .background(theme.card)
+                    .border(2.dp, if (selected == i) ChamiColors.darkGreen else theme.cardBorder, RoundedCornerShape(Ds.s8))
+                    .clickable { onPick(i) },
+                  horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                  Box(
+                    Modifier.fillMaxWidth().aspectRatio(4f / 3f)
+                      .clip(RoundedCornerShape(Ds.s8))
+                      .background(ChamiColors.skeletonBg)
+                  ) {
+                    previews[i]?.let { preview ->
+                      Image(
+                        bitmap = preview,
+                        contentDescription = names[i],
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                      )
+                    }
+                    if (selected == i) {
+                      Box(
+                        Modifier
+                          .align(Alignment.TopEnd)
+                          .padding(Ds.s4)
+                          .size(24.dp)
+                          .clip(CircleShape)
+                          .background(ChamiColors.darkGreen),
+                        contentAlignment = Alignment.Center
+                      ) {
+                        Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(16.dp))
+                      }
+                    }
+                  }
+                  Text(
+                    names[i],
+                    fontSize = Ds.BODY_SP.sp,
+                    fontWeight = if (selected == i) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (selected == i) ChamiColors.deepGreen else theme.text,
+                    modifier = Modifier.padding(vertical = Ds.s8)
+                  )
+                }
+              }
+            }
           }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          names.drop(2).forEachIndexed { k, n ->
-            val i = k + 2
-            ChamiChip(n, selected == i, { onPick(i) }, Modifier.weight(1f))
+        } else {
+          Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+            names.take(2).forEachIndexed { i, n ->
+              ChamiChip(n, selected == i, { onPick(i) }, Modifier.weight(1f))
+            }
+          }
+          Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+            names.drop(2).forEachIndexed { k, n ->
+              val i = k + 2
+              ChamiChip(n, selected == i, { onPick(i) }, Modifier.weight(1f))
+            }
           }
         }
         HintText(LocaleHelper.t(ctx, "hint_filter_page_only"))
@@ -960,6 +1085,10 @@ fun BrightnessDialog(
   bitmap: Bitmap? = null
 ) {
   val ctx = LocalContext.current
+  // PHASE 4: wrap once — the slider recomposes this dialog on every
+  // move, and re-wrapping the full-res bitmap each frame is wasted
+  // allocation on the drag path.
+  val previewImage = remember(bitmap) { bitmap?.asImageBitmap() }
   ChamiAlertDialog(theme,
     onDismissRequest = onDismiss,
     title = { Text(LocaleHelper.t(ctx, "dialog_brightness_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
@@ -969,9 +1098,9 @@ fun BrightnessDialog(
         // shown with the slider's brightness applied (same ColorMatrix
         // offset ImagePageEditor.adjustBrightness uses), so the effect
         // is visible while sliding, not only after Apply.
-        if (bitmap != null) {
+        if (previewImage != null) {
           Image(
-            bitmap = bitmap.asImageBitmap(),
+            bitmap = previewImage,
             contentDescription = "Brightness preview",
             colorFilter = androidx.compose.ui.graphics.ColorFilter.colorMatrix(
               androidx.compose.ui.graphics.ColorMatrix(
@@ -1024,6 +1153,10 @@ fun RectCropDialog(
 ) {
   var rect by remember(bitmap) { mutableStateOf(ComposeRect(0f, 0f, 1f, 1f)) }
   var ratioLabel by rememberSaveable { mutableStateOf("Free") }
+  // PHASE 4: which handle (if any) is being dragged right now — drives
+  // the magnifier loupe below and the handle's pressed scale. The
+  // geometry functions are untouched; this is feedback only.
+  var activeHandle by remember { mutableStateOf<String?>(null) }
   val ctx = LocalContext.current
   // PERFORMANCE: wrap the bitmap once — the drag path recomposes on every
   // pointer move, and asImageBitmap() on every frame made the crop drag
@@ -1345,7 +1478,11 @@ fun RectCropDialog(
                 // (Still NOT keyed on rect — that would cancel the drag
                 // on its first pixel.)
                 .pointerInput(id, dispW, dispH) {
-                  detectDragGestures { change, drag ->
+                  detectDragGestures(
+                    onDragStart = { activeHandle = id },
+                    onDragEnd = { activeHandle = null },
+                    onDragCancel = { activeHandle = null },
+                    onDrag = { change, drag ->
                     change.consume()
                     val cur = latestRect
                     val dx = drag.x / dispW
@@ -1371,11 +1508,62 @@ fun RectCropDialog(
                       // Ratio locked: edge resize keeps the ratio.
                       resizeEdgeRatio(cur, id, dx, dy, ratio)
                     }
-                  }
+                    }
+                  )
                 },
               contentAlignment = Alignment.Center
             ) {
-              Box(Modifier.size(20.dp).clip(CircleShape).background(Color.White).border(2.dp, ChamiColors.darkGreen, CircleShape))
+              // PHASE 4: the handle being dragged grows slightly, so the
+              // finger's grip point stays visible under the finger.
+              Box(
+                Modifier.size(20.dp)
+                  .graphicsLayer {
+                    val s = if (activeHandle == id) 1.3f else 1f
+                    scaleX = s; scaleY = s
+                  }
+                  .clip(CircleShape).background(Color.White).border(2.dp, ChamiColors.darkGreen, CircleShape)
+              )
+            }
+          }
+          // PHASE 4: magnifier loupe while a handle is dragged — a 2x
+          // circular view of the pixels under the finger, above the
+          // handle, so a precise cut is possible on small screens.
+          // Same pattern as the loupe in CropEditorDialog: the loupe
+          // shows the image at 2x with the handle point centred; the
+          // image is offset by (offX, offY) inside this box, so the
+          // handle's box coordinates map to image coordinates first.
+          activeHandle?.let { handleId ->
+            val frac = handles.firstOrNull { it.first == handleId }?.second ?: return@let
+            val hx = toPxX(frac.x)
+            val hy = toPxY(frac.y)
+            val loupePx = with(density) { 120.dp.toPx() }
+            val half = loupePx / 2f
+            val loupeX = (hx - half).coerceIn(0f, (boxW - loupePx).coerceAtLeast(0f))
+            val loupeY = (hy - loupePx - with(density) { Ds.s24.toPx() }).coerceIn(0f, (boxH - loupePx).coerceAtLeast(0f))
+            Box(
+              Modifier
+                .offset { IntOffset(loupeX.roundToInt(), loupeY.roundToInt()) }
+                .size(120.dp)
+                .clip(CircleShape)
+                .background(Color.Black)
+                .border(2.dp, Color.White, CircleShape)
+            ) {
+              Image(
+                bitmap = imageBitmap,
+                contentDescription = null,
+                modifier = Modifier
+                  .size(
+                    width = with(density) { (dispW * 2f).toDp() },
+                    height = with(density) { (dispH * 2f).toDp() }
+                  )
+                  .offset {
+                    IntOffset(
+                      (half - (hx - offX) * 2f).roundToInt(),
+                      (half - (hy - offY) * 2f).roundToInt()
+                    )
+                  },
+                contentScale = ContentScale.FillBounds
+              )
             }
           }
         }
@@ -1653,7 +1841,9 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       selected = filterMode,
       theme = theme,
       onPick = { mode -> vibrate(); editor.applyFilter(safeSelected, mode); showFilters = false },
-      onDismiss = { showFilters = false }
+      onDismiss = { showFilters = false },
+      // PHASE 4: live filter previews need the current page bitmap.
+      bitmap = selectedPage?.bitmap
     )
   }
   if (showAdjust) {

@@ -84,10 +84,9 @@ class MainActivity : ComponentActivity() {
       // rememberSaveableUri() from the ui package.
       var activeTool by rememberSaveable { mutableStateOf<String?>(null) }
       var currentTab by rememberSaveable { mutableStateOf("Home") }
-      var readerFile by rememberSaveable { mutableStateOf<java.io.File?>(null) }
-      // FIX 2026-11-18 (report #27): the file the Reader hands to
-      // Split / Merge / Compress, so the target tool opens with it
-      // already selected instead of asking the user to re-pick it.
+      // File to pre-select in Split / Merge / Compress (their
+      // initialPdfUri, consumed once). Nothing sets it now that the
+      // Reader hand-off is gone (Reader removed 2026-11-19).
       var pendingToolFileUri by rememberSaveableUri()
       val haptic = LocalHapticFeedback.current
       val scope = rememberCoroutineScope()
@@ -122,7 +121,7 @@ class MainActivity : ComponentActivity() {
       // FIX 2026-11-18: Scan to PDF REMOVED (user decision) — the
       // "Make a PDF" group would have been left with a single tile, so
       // it is gone too: Images to PDF moves into "Images & Reading",
-      // which now fills a full 3-tile row. 10 tools.
+      // which now fills a full 3-tile row. 9 tools.
       // FIX 2026-11-18 (user feedback on Run #150): Images to PDF is
       // the main tool — "Images & Reading" goes first, so Images to PDF
       // is the very first tile on Home. Group order below is deliberate.
@@ -137,17 +136,16 @@ class MainActivity : ComponentActivity() {
         ToolItem("convert", "Format Convert", R.drawable.tool_ic_14_format_convert, "PHOTO", "format_convert"),
         ToolItem("ocr", "OCR Text", R.drawable.tool_ic_11_ocr_text, "EXTRACT", "ocr"),
       )
-      val imagesReadingTools = listOf(
+      val imagesTools = listOf(
         ToolItem("img_pdf", "Images to PDF", R.drawable.tool_ic_01_images_to_pdf, "CREATE", "images_to_pdf"),
         ToolItem("resize", "Image Resizer", R.drawable.tool_ic_09_image_resizer, "PHOTO", "image_resizer"),
-        ToolItem("reader", "PDF Reader", R.drawable.tool_ic_10_pdf_reader, "VIEW", "pdf_reader"),
       )
       // FIX 2026-11-18 (report #42): group headings are LocaleHelper
-      // keys, not literal English — "group_images_reading" and
-      // "group_fix_pdf" are added to the English map by the Locale
-      // worker; "convert" already exists in every language.
+      // keys, not literal English — "group_images" and "group_fix_pdf"
+      // are in the English map (other languages fall back to English);
+      // "convert" already exists in every language.
       val toolGroups = listOf(
-        "group_images_reading" to imagesReadingTools,
+        "group_images" to imagesTools,
         "group_fix_pdf" to fixPdfTools,
         "convert" to convertTools,
       )
@@ -367,27 +365,22 @@ class MainActivity : ComponentActivity() {
           // Phase 3: tool screens fade in on the shared easing; the
           // transition is enter-only (see ChamiScreenTransition).
           ChamiScreenTransition(targetState = activeTool, enabled = animationsOn) { tool ->
-          // 10 tools only. Dead routes are NOT wired: text_pdf (Word
+          // 9 tools only. Dead routes are NOT wired: text_pdf (Word
           // editor), editor (PDF Editor), Passport Photo and PDF to Text
           // screens exist as dead code elsewhere but are never opened
           // from here — an unknown id just returns to Home.
           when (tool) {
-            // FIX 2026-11-18 (report #4): every tool screen gets
-            // onOpenPdfInReader, so a Done "Open" on a PDF goes to the
-            // inbuilt Reader instead of an external viewer. Reader
-            // hand-off (report #27): onOpenTool carries the current
-            // PDF's Uri into Split / Merge / Compress via
-            // pendingToolFileUri, consumed once by the target tool.
-            "img_pdf" -> ImagesToPdfScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "protect" -> ProtectPdfScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "pdf_img" -> PdfToImagesScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "split" -> SplitPdfScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "merge" -> MergePdfScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "compress" -> CompressKbScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "resize" -> ResizeConvertScreen(theme, title = "Image Resizer", onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "convert" -> ResizeConvertScreen(theme, title = "Format Convert", onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "ocr" -> OcrScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
-            "reader" -> PdfReaderScreen(theme, initialFile = readerFile, onOpenTool = { tool, uri -> pendingToolFileUri = uri; activeTool = tool }) { activeTool = null; readerFile = null }
+            // Done "Open" on a PDF uses the system viewer (the inbuilt
+            // Reader was removed 2026-11-19, so onOpenPdfInReader is gone).
+            "img_pdf" -> ImagesToPdfScreen(theme) { activeTool = null }
+            "protect" -> ProtectPdfScreen(theme) { activeTool = null }
+            "pdf_img" -> PdfToImagesScreen(theme) { activeTool = null }
+            "split" -> SplitPdfScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }) { activeTool = null }
+            "merge" -> MergePdfScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }) { activeTool = null }
+            "compress" -> CompressKbScreen(theme, initialPdfUri = pendingToolFileUri, onInitialPdfConsumed = { pendingToolFileUri = null }) { activeTool = null }
+            "resize" -> ResizeConvertScreen(theme, title = "Image Resizer") { activeTool = null }
+            "convert" -> ResizeConvertScreen(theme, title = "Format Convert") { activeTool = null }
+            "ocr" -> OcrScreen(theme) { activeTool = null }
             else -> { activeTool = null }
           }
           }
@@ -466,7 +459,6 @@ class MainActivity : ComponentActivity() {
                 when (tab) {
                   "History" -> HistoryScreen(
                     theme,
-                    onOpenInReader = { file -> readerFile = file; activeTool = "reader" },
                     listState = historyListState
                   )
                   "Settings" -> SettingsScreen(theme, tm) { theme = it }

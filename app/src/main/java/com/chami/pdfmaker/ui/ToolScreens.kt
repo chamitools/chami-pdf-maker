@@ -106,9 +106,10 @@ import kotlin.math.roundToInt
 //   patchPermissions; Protect and Unlock use them. The old local RC4/MD5
 //   helpers were deleted in the Phase 2 final pass (L10) once the last
 //   ToolScreens2.kt call site migrated to PdfProtector.patchPermissions.
-// - ReaderTextTools already exposes saveBookmark / getBookmarks
-//   (SharedPreferences "chami_bookmarks"); the Reader uses them, plus a
-//   local removeBookmark with the same key scheme.
+// - ReaderTextTools also holds the old Reader's bookmark helpers
+//   (saveBookmark / getBookmarks, SharedPreferences "chami_bookmarks");
+//   unused since the Reader was removed 2026-11-19, kept because the
+//   file also provides PdfReader.renderPageBitmap for thumbnails.
 
 // --- Shared engine-facing helpers ----------------------------------------
 
@@ -134,7 +135,7 @@ fun baseNameOf(ctx: Context, uri: Uri, fallback: String): String {
 }
 
 /** Shown whenever a PDF cannot be opened at all (password-protected
- *  or damaged) — report #24. Used by the Reader and every tool that
+ *  or damaged) — report #24. Used by every tool that
  *  picks a PDF, so the message is identical everywhere. */
 const val UNOPENABLE_PDF_MESSAGE = "This PDF can't be opened (password-protected or damaged)"
 
@@ -582,7 +583,6 @@ fun MultiDoneScreen(
   onBackHome: () -> Unit,
   onOpen: (File) -> Unit,
   savedLocationText: String? = null,
-  onOpenPdfInReader: ((File) -> Unit)? = null
 ) {
   val ctx = LocalContext.current
   // PHASE 2 (H1): system Back on a multi-file Done screen goes Home
@@ -654,10 +654,7 @@ fun MultiDoneScreen(
       text = LocaleHelper.t(ctx, "btn_open_first_file"),
       onClick = {
         files.firstOrNull()?.let {
-          // FIX 2026-11-18 (report #4): a PDF opens in the inbuilt
-          // Reader when the caller supplies onOpenPdfInReader.
-          if (it.file.extension.lowercase() == "pdf" && onOpenPdfInReader != null) onOpenPdfInReader(it.file)
-          else onOpen(it.file)
+          onOpen(it.file)
         }
       },
       modifier = Modifier.fillMaxWidth()
@@ -1677,7 +1674,7 @@ class PageEditor(
 //   user's request. Per-page filter state, correct delete, selection
 //   follows the page Uri.
 @Composable
-fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -1850,7 +1847,6 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -1925,7 +1921,7 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
 // select/deselect, Select all / Clear. Extraction converts only the
 // selected pages inside the range (all selected = the old behaviour).
 @Composable
-fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -2154,7 +2150,6 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, if (format == "PNG") "image/png" else "image/jpeg") },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -2394,7 +2389,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
 // save folder ONCE and saves every part there. NOTE: copyPages renders
 // pages as images, so text in split output is not selectable.
 @Composable
-fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -2454,8 +2449,8 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   }
 
   // FIX 2026-11-18 (report #27/#47): the picked Uri is restored by
-  // rememberSaveable after process death, and the Reader hands a Uri
-  // in through initialPdfUri — both go through this loader.
+  // rememberSaveable after process death, and a handed-over Uri can
+  // arrive through initialPdfUri — both go through this loader.
   fun loadPdf(uri: Uri) {
     loadedPdfUri = uri
     scope.launch(Dispatchers.IO) {
@@ -2484,7 +2479,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
     if (selected != null) loadPdf(selected)
   }
 
-  // Reader hand-off (report #27): consume the incoming Uri once.
+  // Incoming Uri (report #27): consume it once.
   LaunchedEffect(initialPdfUri) {
     if (initialPdfUri != null && !initialConsumed) {
       initialConsumed = true
@@ -2493,7 +2488,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
     }
   }
 
-  // Restored Uri (process death) or the Reader's handed-over Uri.
+  // Restored Uri (process death) or a handed-over Uri.
   LaunchedEffect(pdfUri) {
     val u = pdfUri
     if (u != null && loadedPdfUri != u) loadPdf(u)
@@ -2586,7 +2581,6 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -2597,7 +2591,6 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }

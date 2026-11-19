@@ -125,9 +125,7 @@ private class TickPathCache {
  * supplied, sharing falls back to [ShareHelper.shareFile].
  * FIX 2026-11-18: [savedLocationText] — when non-null, the card shows
  * "Saved to: $savedLocationText" (the folder the user actually picked in
- * the save picker) instead of the file's parent folder name. [onOpenPdfInReader]
- * — when non-null and the file is a PDF, Open goes to the inbuilt Reader
- * instead of [onOpen] (the external viewer).
+ * the save picker) instead of the file's parent folder name.
  */
 @Composable
 fun DoneScreen(
@@ -138,7 +136,6 @@ fun DoneScreen(
   onShare: ((File) -> Unit)? = null,
   pageCount: Int? = null,
   savedLocationText: String? = null,
-  onOpenPdfInReader: ((File) -> Unit)? = null
 ) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
@@ -416,8 +413,7 @@ fun DoneScreen(
     Spacer(Modifier.weight(1f))
 
     // Actions, in spec order: Open / Share / Done (max 3).
-    // FIX 2026-11-18 (#4): a PDF opens in the inbuilt Reader when the
-    // caller supplies onOpenPdfInReader; otherwise Open behaves as before.
+    // Open uses the system viewer (the inbuilt Reader was removed 2026-11-19).
     // Phase 6: press-scale on every button (Phase 3 pattern — the same
     // interactionSource drives the button and the scale, input never
     // blocked); primary uses theme.primary, the one primary green
@@ -427,7 +423,7 @@ fun DoneScreen(
     val donePress = remember { MutableInteractionSource() }
     Button(
       onClick = {
-        if (isPdf && onOpenPdfInReader != null) onOpenPdfInReader(file) else onOpen(file)
+        onOpen(file)
       },
       modifier = Modifier
         .fillMaxWidth()

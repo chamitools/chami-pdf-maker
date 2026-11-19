@@ -93,7 +93,7 @@ object LocaleHelper {
       "slide_compress" to "Slide to Compress", "slide_convert_all" to "Slide to Convert All",
       "slide_resize" to "Slide to Resize", "slide_extract_text" to "Slide to Extract Text",
       "slide_unlock" to "Slide to Unlock PDF", "slide_protect" to "Slide to Protect PDF",
-      "group_images_reading" to "Images & Reading", "group_fix_pdf" to "Fix a PDF",
+      "group_images" to "Images", "group_fix_pdf" to "Fix a PDF",
       "toast_save_partial" to "Saved {saved} of {total} files — {failed} could not be saved to the chosen folder",
       "toast_save_failed_folder" to "Could not save to the chosen folder — files kept in Chami folder",
       "toast_save_failed_file" to "Could not save to chosen folder",

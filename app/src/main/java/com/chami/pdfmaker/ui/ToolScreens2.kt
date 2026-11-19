@@ -126,7 +126,7 @@ import kotlinx.coroutines.withContext
 private const val MAX_MERGE_PREVIEWS = 20
 
 // ---------------------------------------------------------------------------
-// ToolScreens (part 2): Merge, Compress, Resize/Convert, OCR, Reader, Protect.
+// ToolScreens (part 2): Merge, Compress, Resize/Convert, OCR, Protect.
 // Shares the helpers in ToolScreens.kt (same package).
 // ---------------------------------------------------------------------------
 
@@ -347,7 +347,7 @@ internal fun Modifier.toolEnterFade(index: Int, enabled: Boolean): Modifier {
 }
 
 @Composable
-fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -451,7 +451,7 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
     }
   }
 
-  // Reader hand-off (report #27): consume the incoming Uri once.
+  // Incoming Uri (report #27): consume it once.
   LaunchedEffect(initialPdfUri) {
     if (initialPdfUri != null && !initialConsumed) {
       initialConsumed = true
@@ -517,7 +517,6 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -699,7 +698,7 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
 // plainly. Done shows actual before/after + % saved, and says plainly
 // if the output is not smaller (the smaller file is kept).
 @Composable
-fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfConsumed: () -> Unit = {}, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -823,8 +822,8 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   }
 
   // FIX 2026-11-18 (report #27/#47): the picked Uri is restored by
-  // rememberSaveable after process death, and the Reader hands a Uri
-  // in through initialPdfUri — both go through this loader.
+  // rememberSaveable after process death, and a handed-over Uri can
+  // arrive through initialPdfUri — both go through this loader.
   fun loadPdf(uri: Uri) {
     loadedPdfUri = uri
     scope.launch(Dispatchers.IO) {
@@ -849,7 +848,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
     if (selected != null) loadPdf(selected)
   }
 
-  // Reader hand-off (report #27): consume the incoming Uri once, on
+  // Incoming Uri (report #27): consume it once, on
   // the PDF tab.
   LaunchedEffect(initialPdfUri) {
     if (initialPdfUri != null && !initialConsumed) {
@@ -860,7 +859,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
     }
   }
 
-  // Restored Uri (process death) or the Reader's handed-over Uri.
+  // Restored Uri (process death) or a handed-over Uri.
   LaunchedEffect(pdfUri) {
     val u = pdfUri
     if (u != null && loadedPdfUri != u) loadPdf(u)
@@ -994,7 +993,6 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         ShareHelper.openFile(ctx, f, mime)
       },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -1274,7 +1272,7 @@ private fun sourceFormatOf(ctx: Context, uri: Uri): String? {
 // "Already JPG" and skipped, quality slider only for lossy targets,
 // per-file progress + result list, one save folder for the batch.
 @Composable
-fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -1578,7 +1576,6 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         ShareHelper.openFile(ctx, it, if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg")
       },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -1858,7 +1855,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
 // shows "No text found" with a Retake action and says plainly which
 // scripts are supported on-device, never a fake placeholder.
 @Composable
-fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -1982,7 +1979,6 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, doneMime) },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }
@@ -2170,856 +2166,6 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
 // the list at once. PHONE FIX 2026-11-19 (issue 4): a swipe past the
 // zoomed page's edge changes page at the same zoom — the user is never
 // forced to zoom out to turn the page.
-private class ReaderSessionHolder {
-  var session: PdfReaderSession? = null
-  var gen: Int = 0
-  var disposed: Boolean = false
-}
-
-private class ReaderRegion(val tile: PdfRegionTile, val zoom: Float, val page: Int)
-
-private fun readerSha256(text: String): String {
-  val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
-  val sb = StringBuilder()
-  for (b in digest) sb.append(String.format("%02x", b.toInt() and 0xFF))
-  return sb.toString()
-}
-
-private fun readerDisplayName(context: Context, pdfUri: Uri): String {
-  if (pdfUri.scheme == "content") {
-    try {
-      context.contentResolver.query(
-        pdfUri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
-      )?.use { cursor ->
-        if (cursor.moveToFirst()) {
-          val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-          if (idx >= 0) cursor.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
-        }
-      }
-    } catch (_: Exception) {}
-  }
-  return pdfUri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "pdf"
-}
-
-// Same keying scheme as the bookmarks (SHA-256 of the Uri + sanitised file name,
-// same "chami_bookmarks" prefs file); only the prefix differs ("last_" vs "bm_").
-private fun readerLastPageKey(context: Context, pdfUri: Uri): String =
-  "last_" + readerSha256(pdfUri.toString()) + "_" +
-    readerDisplayName(context, pdfUri).replace(Regex("[^A-Za-z0-9._-]"), "_")
-
-private fun readLastPage(context: Context, pdfUri: Uri): Int =
-  try {
-    context.getSharedPreferences("chami_bookmarks", Context.MODE_PRIVATE)
-      .getInt(readerLastPageKey(context, pdfUri), 0)
-  } catch (_: Exception) { 0 }
-
-private fun saveLastPage(context: Context, pdfUri: Uri, page0: Int) {
-  try {
-    context.getSharedPreferences("chami_bookmarks", Context.MODE_PRIVATE)
-      .edit().putInt(readerLastPageKey(context, pdfUri), page0).apply()
-  } catch (_: Exception) {}
-}
-
-@Composable
-fun PdfReaderScreen(
-  theme: ChamiTheme,
-  initialFile: File? = null,
-  onOpenTool: ((String, Uri?) -> Unit)? = null,
-  onBack: () -> Unit
-) {
-  val ctx = LocalContext.current
-  val haptic = LocalHapticFeedback.current
-  val tm = remember { ThemeManager(ctx) }
-  val scope = rememberCoroutineScope()
-  // Short-lived work that must finish even if the screen is left (opening the
-  // document, delayed bitmap recycling), so a session can never be leaked.
-  val bgScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
-  val holder = remember { ReaderSessionHolder() }
-  var session by remember { mutableStateOf<PdfReaderSession?>(null) }
-  var pdfUri by rememberSaveableUri(initialFile?.let { Uri.fromFile(it) })
-  var totalPages by remember { mutableStateOf(0) }
-  var currentPage by rememberSaveable { mutableStateOf(0) }
-  var isNightMode by rememberSaveable { mutableStateOf(false) }
-  var pageInput by rememberSaveable { mutableStateOf("1") }
-  var zoom by rememberSaveable { mutableStateOf(1f) }
-  // While zoomed the reader is a single-page view of the current page only.
-  val zoomed = zoom > 1f
-  val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
-  var viewport by remember { mutableStateOf(ComposeRect.Zero) }
-  var showSearchBar by remember { mutableStateOf(false) }
-  var showBookmarksDialog by remember { mutableStateOf(false) }
-  var searchQuery by rememberSaveable { mutableStateOf("") }
-  var searchPages by remember { mutableStateOf<List<Int>>(emptyList()) }
-  var searchIndex by remember { mutableStateOf(0) }
-  var searching by remember { mutableStateOf(false) }
-  var searchProgress by remember { mutableStateOf("") }
-  var searchJob by remember { mutableStateOf<Job?>(null) }
-  val bookmarks = rememberSaveable(
-    saver = listSaver(
-      save = { it.toList() },
-      restore = { saved -> mutableStateListOf<Int>().apply { addAll(saved.filterIsInstance<Int>()) } }
-    )
-  ) { mutableStateListOf<Int>() }
-  var showGoToPage by remember { mutableStateOf(false) }
-  var goToInput by rememberSaveable { mutableStateOf("") }
-  var showOverflow by remember { mutableStateOf(false) }
-  var pdfLoadFailed by remember { mutableStateOf(false) }
-  var pdfReloadKey by remember { mutableStateOf(0) }
-
-  val recycleLater: (Bitmap) -> Unit = remember {
-    { b: Bitmap ->
-      bgScope.launch {
-        delay(400)
-        try { if (!b.isRecycled) b.recycle() } catch (_: Exception) {}
-      }
-    }
-  }
-
-  fun vibrate() {
-    if (tm.hapticOn()) {
-      try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
-    }
-  }
-
-  fun readerContentUri(): Uri? {
-    val u = pdfUri ?: return null
-    val f = initialFile
-    return if (f != null && u == Uri.fromFile(f)) {
-      try {
-        FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
-      } catch (_: Exception) {
-        u
-      }
-    } else u
-  }
-
-  fun jumpToPage(page1Based: Int) {
-    if (page1Based in 1..totalPages) {
-      currentPage = page1Based - 1
-      pageInput = "$page1Based"
-      scope.launch {
-        try { listState.scrollToItem(if (zoomed) 0 else page1Based - 1) } catch (_: Exception) {}
-      }
-    }
-  }
-
-  fun toggleBookmark(page1Based: Int) {
-    val u = pdfUri ?: return
-    if (bookmarks.contains(page1Based)) {
-      bookmarks.remove(page1Based)
-      removeBookmark(ctx, u, page1Based)
-    } else {
-      bookmarks.add(page1Based)
-      saveBookmark(ctx, u, page1Based)
-    }
-  }
-
-  // Opens ONE session per document. Any previous session is closed first; a
-  // result that arrives after the screen was left (or the file was changed) is
-  // closed immediately, so nothing is leaked.
-  fun openDocument(u: Uri) {
-    val gen = ++holder.gen
-    val old = holder.session
-    holder.session = null
-    session = null
-    old?.close()
-    totalPages = 0
-    pdfLoadFailed = false
-    bgScope.launch {
-      val s = PdfReaderSession.open(ctx, u)
-      if (holder.disposed || gen != holder.gen) {
-        s?.close()
-        return@launch
-      }
-      if (s == null) {
-        pdfLoadFailed = true
-        return@launch
-      }
-      val saved = withContext(Dispatchers.IO) { readLastPage(ctx, u) }
-      if (holder.disposed || gen != holder.gen) {
-        s.close()
-        return@launch
-      }
-      holder.session = s
-      session = s
-      val n = s.pageCount
-      val start = (if (currentPage > 0) currentPage else saved).coerceIn(0, n - 1)
-      currentPage = start
-      pageInput = "${start + 1}"
-      bookmarks.clear()
-      bookmarks.addAll(getBookmarks(ctx, u))
-      totalPages = n
-    }
-  }
-
-  // Search through the session: starts at the current page, wraps round, jumps
-  // to the first hit as soon as it is found. A false result means the text
-  // could not be read — it is never reported as "no matches".
-  fun runSearch() {
-    val q = searchQuery.trim()
-    val s = session
-    if (q.isEmpty() || s == null) return
-    searchJob?.cancel()
-    searching = true
-    searchPages = emptyList()
-    searchIndex = 0
-    searchProgress = ""
-    val startPage = currentPage
-    searchJob = scope.launch {
-      val hits = mutableListOf<Int>()
-      var firstHit = -1
-      var anyText = false
-      try {
-        anyText = s.search(
-          q, startPage,
-          onProgress = { done, total ->
-            searchProgress = LocaleHelper.t(ctx, "reader_search_progress")
-              .replace("{page}", "$done").replace("{total}", "$total")
-          },
-          onHit = { p0 ->
-            hits.add(p0 + 1)
-            if (firstHit < 0) {
-              firstHit = p0 + 1
-              jumpToPage(p0 + 1)
-            }
-          }
-        )
-      } catch (e: CancellationException) {
-        searching = false
-        searchPages = emptyList()
-        throw e
-      } catch (_: Exception) {
-      }
-      searching = false
-      val sorted = hits.sorted()
-      searchPages = sorted
-      searchIndex = sorted.indexOf(firstHit).coerceAtLeast(0)
-      if (sorted.isEmpty()) {
-        if (!anyText) Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_unavailable"), Toast.LENGTH_LONG).show()
-        else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_no_matches").replace("{q}", q), Toast.LENGTH_SHORT).show()
-      }
-    }
-  }
-
-  val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selected ->
-    pdfUri = selected
-    if (selected != null) {
-      totalPages = 0
-      pdfLoadFailed = false
-      pdfReloadKey++
-      currentPage = 0
-      pageInput = "1"
-      searchJob?.cancel()
-      searching = false
-      searchPages = emptyList()
-      bookmarks.clear()
-      scope.launch { try { listState.scrollToItem(0) } catch (_: Exception) {} }
-    }
-  }
-
-  LaunchedEffect(pdfUri, pdfReloadKey) {
-    val u = pdfUri ?: return@LaunchedEffect
-    openDocument(u)
-  }
-
-  // Never leak the session: closed when the screen leaves the composition.
-  DisposableEffect(Unit) {
-    onDispose {
-      holder.disposed = true
-      holder.gen++
-      holder.session?.close()
-      holder.session = null
-      searchJob?.cancel()
-    }
-  }
-
-  val leave: () -> Unit = {
-    holder.session?.close()
-    onBack()
-  }
-
-  // Resume reading: remember the last page of this file.
-  LaunchedEffect(currentPage, totalPages) {
-    val u = pdfUri
-    if (u != null && totalPages > 0) {
-      delay(400)
-      withContext(Dispatchers.IO) { saveLastPage(ctx, u, currentPage) }
-    }
-  }
-
-  // Restore the scroll position once the document has loaded.
-  LaunchedEffect(totalPages) {
-    if (totalPages > 0 && !zoomed && currentPage in 1 until totalPages) {
-      try { listState.scrollToItem(currentPage) } catch (_: Exception) {}
-    }
-  }
-
-  // The current page follows the first visible page (not while zoomed: the
-  // zoomed list holds a single item).
-  val firstVisiblePage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
-  LaunchedEffect(firstVisiblePage) {
-    if (totalPages > 0 && !zoomed) {
-      currentPage = firstVisiblePage.coerceIn(0, totalPages - 1)
-      pageInput = "${currentPage + 1}"
-    }
-  }
-
-  // Entering zoomed mode snaps the focused page to the top; leaving it
-  // restores the continuous list at the same page.
-  LaunchedEffect(zoomed) {
-    try {
-      if (zoomed) listState.scrollToItem(0)
-      else if (totalPages > 0) { delay(100); listState.scrollToItem(currentPage) }
-    } catch (_: Exception) {}
-  }
-
-  if (showGoToPage) {
-    ChamiAlertDialog(theme,
-      onDismissRequest = { showGoToPage = false },
-      title = { Text(LocaleHelper.t(ctx, "reader_goto_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
-      text = {
-        OutlinedTextField(
-          value = goToInput,
-          onValueChange = { goToInput = it.filter { ch -> ch.isDigit() } },
-          label = { Text(LocaleHelper.t(ctx, "reader_goto_range").replace("{total}", "$totalPages"), fontSize = Ds.HINT_SP.sp) },
-          singleLine = true,
-          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-          modifier = Modifier.fillMaxWidth(),
-          shape = RoundedCornerShape(Ds.tileRadius),
-          isError = goToInput.toIntOrNull()?.let { it !in 1..totalPages } == true
-        )
-      },
-      confirmButton = {
-        TextButton(
-          onClick = {
-            goToInput.toIntOrNull()?.let { jumpToPage(it) }
-            showGoToPage = false
-          },
-          modifier = Modifier.height(Ds.minTouch)
-        ) { Text(LocaleHelper.t(ctx, "reader_go"), color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
-      },
-      dismissButton = {
-        TextButton(onClick = { showGoToPage = false }, modifier = Modifier.height(Ds.minTouch)) { Text(LocaleHelper.t(ctx, "btn_cancel"), color = theme.text) }
-      }
-    )
-  }
-
-  if (showBookmarksDialog) {
-    ChamiAlertDialog(theme,
-      onDismissRequest = { showBookmarksDialog = false },
-      title = { Text(LocaleHelper.t(ctx, "reader_bookmarks_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
-      text = {
-        if (bookmarks.isEmpty()) {
-          Text(LocaleHelper.t(ctx, "reader_no_bookmarks_hint"), fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
-        } else {
-          Column {
-            bookmarks.sorted().forEach { b ->
-              Row(
-                Modifier.fillMaxWidth().heightIn(min = Ds.minTouch).clickable { showBookmarksDialog = false; jumpToPage(b) }.padding(vertical = Ds.s8),
-                verticalAlignment = Alignment.CenterVertically
-              ) {
-                Text(LocaleHelper.t(ctx, "label_page_number").replace("{n}", "$b"), fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text, modifier = Modifier.weight(1f))
-                ChamiIconButton(
-                  icon = Icons.Filled.Close, description = LocaleHelper.t(ctx, "reader_delete_bookmark"),
-                  onClick = { vibrate(); bookmarks.remove(b); pdfUri?.let { removeBookmark(ctx, it, b) } }
-                )
-              }
-            }
-          }
-        }
-      },
-      confirmButton = {
-        TextButton(onClick = { showBookmarksDialog = false }, modifier = Modifier.height(Ds.minTouch)) { Text(LocaleHelper.t(ctx, "btn_close"), color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
-      }
-    )
-  }
-
-  ToolScreenContainer(LocaleHelper.t(ctx, "pdf_reader"), theme, leave) {
-    if (pdfUri == null) {
-      Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        ToolEmptyState(Icons.Filled.PictureAsPdf, LocaleHelper.t(ctx, "btn_select_pdf"), theme)
-        Spacer(Modifier.height(Ds.s16))
-        ChamiPrimaryButton(text = LocaleHelper.t(ctx, "reader_open_pdf"), onClick = { vibrate(); picker.launch("application/pdf") }, modifier = Modifier.fillMaxWidth())
-      }
-    } else {
-      Column(Modifier.fillMaxSize()) {
-        ToolCard(theme, padding = Ds.s8) {
-          Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-          ) {
-          TextButton(
-            onClick = { goToInput = "${currentPage + 1}"; showGoToPage = true },
-            modifier = Modifier.height(Ds.minTouch)
-          ) {
-            Text(
-              "${currentPage + 1} / $totalPages",
-              fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text
-            )
-          }
-          Box {
-            ChamiIconButton(
-              icon = Icons.Filled.MoreVert, description = LocaleHelper.t(ctx, "reader_options"),
-              onClick = { vibrate(); showOverflow = true }
-            )
-            DropdownMenu(expanded = showOverflow, onDismissRequest = { showOverflow = false }) {
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_search"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; showSearchBar = true }
-              )
-              DropdownMenuItem(
-                text = { Text(if (bookmarks.contains(currentPage + 1)) LocaleHelper.t(ctx, "reader_menu_remove_bookmark") else LocaleHelper.t(ctx, "reader_menu_bookmark_page"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; vibrate(); toggleBookmark(currentPage + 1) }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_bookmarks"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; showBookmarksDialog = true }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_goto"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; goToInput = "${currentPage + 1}"; showGoToPage = true }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_zoom_in"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; vibrate(); zoom = (zoom + 0.25f).coerceIn(1f, 5f) }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_zoom_out"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; vibrate(); zoom = (zoom - 0.25f).coerceIn(1f, 5f) }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_fit"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; vibrate(); zoom = 1f }
-              )
-              DropdownMenuItem(
-                text = { Text(if (isNightMode) LocaleHelper.t(ctx, "reader_menu_day") else LocaleHelper.t(ctx, "reader_menu_night"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; vibrate(); isNightMode = !isNightMode }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_open_split"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; onOpenTool?.invoke("split", readerContentUri()) }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_open_merge"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; onOpenTool?.invoke("merge", readerContentUri()) }
-              )
-              DropdownMenuItem(
-                text = { Text(LocaleHelper.t(ctx, "reader_menu_open_compress"), fontSize = Ds.BODY_SP.sp) },
-                onClick = { showOverflow = false; onOpenTool?.invoke("compress", readerContentUri()) }
-              )
-            }
-          }
-          }
-        }
-
-        if (showSearchBar) {
-          Spacer(Modifier.height(Ds.s8))
-          Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(Ds.s8)
-          ) {
-            OutlinedTextField(
-              value = searchQuery,
-              onValueChange = { searchQuery = it },
-              label = { Text(LocaleHelper.t(ctx, "reader_search_hint"), fontSize = Ds.HINT_SP.sp) },
-              singleLine = true,
-              modifier = Modifier.weight(1f).height(Ds.primaryButtonHeight),
-              shape = RoundedCornerShape(Ds.tileRadius)
-            )
-            ChamiIconButton(
-              icon = Icons.Filled.Search, description = LocaleHelper.t(ctx, "reader_search_button"),
-              onClick = { vibrate(); runSearch() }
-            )
-            ChamiIconButton(
-              icon = Icons.Filled.Close, description = LocaleHelper.t(ctx, "reader_close_search"),
-              onClick = { showSearchBar = false }
-            )
-          }
-          if (searching) {
-            Spacer(Modifier.height(Ds.s4))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-              Text(searchProgress, fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
-              TextButton(onClick = { searchJob?.cancel(); searching = false }, modifier = Modifier.height(Ds.minTouch)) {
-                Text(LocaleHelper.t(ctx, "btn_cancel"), color = ChamiColors.errorRed, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
-              }
-            }
-            LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-          } else if (searchPages.isNotEmpty()) {
-            Spacer(Modifier.height(Ds.s4))
-            Row(
-              Modifier.fillMaxWidth(),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-              val shownSearchPages = searchPages.take(10)
-              val moreSearchPages = searchPages.size - shownSearchPages.size
-              val foundText = LocaleHelper.t(ctx, "reader_found_on_pages")
-                .replace("{pages}", shownSearchPages.joinToString(", ")) +
-                if (moreSearchPages > 0) " " + LocaleHelper.t(ctx, "reader_found_more").replace("{n}", "$moreSearchPages") else ""
-              Text(
-                foundText,
-                fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold
-              )
-              TextButton(
-                onClick = {
-                  vibrate()
-                  val next = (searchIndex + 1) % searchPages.size
-                  searchIndex = next
-                  jumpToPage(searchPages[next])
-                },
-                modifier = Modifier.height(Ds.minTouch)
-              ) {
-                Text(LocaleHelper.t(ctx, "reader_next_match"), fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = theme.primary)
-              }
-            }
-          }
-        }
-
-        val activeSession = session
-        if (pdfLoadFailed) {
-          Column(
-            Modifier.weight(1f).fillMaxWidth(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-          ) {
-            ChamiErrorBanner(
-              theme = theme,
-              title = LocaleHelper.t(ctx, "reader_open_failed_title"),
-              message = UNOPENABLE_PDF_MESSAGE
-            )
-            Spacer(Modifier.height(Ds.s16))
-            ChamiPrimaryButton(text = LocaleHelper.t(ctx, "reader_back"), onClick = { vibrate(); leave() }, modifier = Modifier.fillMaxWidth())
-          }
-        } else if (totalPages == 0 || activeSession == null) {
-          Column(
-            Modifier.weight(1f).fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-          ) {
-            PageSkeletonLoader()
-            Spacer(Modifier.height(Ds.s16))
-            Text(LocaleHelper.t(ctx, "reader_opening"), fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
-          }
-        } else {
-          LazyColumn(
-            state = listState,
-            modifier = Modifier
-              .weight(1f)
-              .fillMaxWidth()
-              .onGloballyPositioned { viewport = it.boundsInWindow() },
-            verticalArrangement = Arrangement.spacedBy(Ds.s12),
-            contentPadding = PaddingValues(vertical = Ds.s8)
-          ) {
-            if (zoomed) {
-              items(1, key = { currentPage }) {
-                ReaderPageView(
-                  theme = theme,
-                  session = activeSession,
-                  pageIndex = currentPage,
-                  zoom = zoom,
-                  onZoomChange = { zoom = it },
-                  isNightMode = isNightMode,
-                  viewport = viewport,
-                  recycle = recycleLater,
-                  isFocused = true,
-                  onRequestPageChange = { target ->
-                    if (target in 0 until totalPages) {
-                      currentPage = target
-                      pageInput = "${target + 1}"
-                      scope.launch { try { listState.scrollToItem(0) } catch (_: Exception) {} }
-                    }
-                  }
-                )
-              }
-            } else {
-              items(totalPages, key = { it }) { idx ->
-                ReaderPageView(
-                  theme = theme,
-                  session = activeSession,
-                  pageIndex = idx,
-                  zoom = zoom,
-                  onZoomChange = { zoom = it },
-                  isNightMode = isNightMode,
-                  viewport = viewport,
-                  recycle = recycleLater,
-                  isFocused = false,
-                  onRequestPageChange = { target -> jumpToPage(target + 1) }
-                )
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-// One page of the continuous reader. The box height comes from the session's
-// exact page aspect, so the list never jumps while pages load. Unzoomed it
-// shows renderFit at the list width; zoomed (focused single page) the fit
-// bitmap is only a placeholder and the VISIBLE part of the page is re-rendered
-// with renderRegion so text stays sharp. Night mode is a ColorMatrix applied
-// when drawing — nothing is re-rendered. Bitmaps are recycled when they scroll
-// off-screen or are replaced.
-@Composable
-private fun ReaderPageView(
-  theme: ChamiTheme,
-  session: PdfReaderSession,
-  pageIndex: Int,
-  zoom: Float,
-  onZoomChange: (Float) -> Unit,
-  isNightMode: Boolean,
-  viewport: ComposeRect,
-  recycle: (Bitmap) -> Unit,
-  isFocused: Boolean = false,
-  onRequestPageChange: ((Int) -> Unit)? = null
-) {
-  val ctx = LocalContext.current
-  var bmp by remember(session, pageIndex) { mutableStateOf<Bitmap?>(null) }
-  var region by remember(session, pageIndex) { mutableStateOf<ReaderRegion?>(null) }
-  var pan by remember { mutableStateOf(Offset.Zero) }
-  var pageSize by remember { mutableStateOf(IntSize.Zero) }
-  var boxPos by remember { mutableStateOf(Offset.Zero) }
-  val currentZoom by rememberUpdatedState(zoom)
-  val currentPageChange by rememberUpdatedState(onRequestPageChange)
-  val currentPageIndex by rememberUpdatedState(pageIndex)
-  val edgeSwipeThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
-  val currentEdgeThreshold by rememberUpdatedState(edgeSwipeThresholdPx)
-  val latestBmp by rememberUpdatedState(bmp)
-  val latestRegion by rememberUpdatedState(region)
-
-  val paint = remember(isNightMode) {
-    Paint(Paint.FILTER_BITMAP_FLAG).apply {
-      if (isNightMode) {
-        colorFilter = ColorMatrixColorFilter(
-          android.graphics.ColorMatrix(
-            floatArrayOf(
-              -1f, 0f, 0f, 0f, 255f,
-              0f, -1f, 0f, 0f, 255f,
-              0f, 0f, -1f, 0f, 255f,
-              0f, 0f, 0f, 1f, 0f
-            )
-          )
-        )
-      }
-    }
-  }
-  val drawMatrix = remember { android.graphics.Matrix() }
-
-  DisposableEffect(Unit) {
-    onDispose {
-      latestBmp?.let(recycle)
-      latestRegion?.tile?.bitmap?.let(recycle)
-    }
-  }
-
-  // Whole page at the list width (placeholder while zoomed).
-  LaunchedEffect(session, pageIndex, pageSize.width) {
-    val w = pageSize.width
-    if (w <= 0) return@LaunchedEffect
-    delay(50) // skip pages that are only flicked past
-    val rendered = session.renderFit(pageIndex, w)
-    if (rendered != null) {
-      val old = bmp
-      bmp = rendered
-      if (old != null) recycle(old)
-    }
-  }
-
-  // Zoomed: render ONLY the visible part of the page at the zoom level.
-  LaunchedEffect(session, pageIndex, pageSize, zoom, pan, boxPos, viewport, isFocused) {
-    val z = zoom
-    val w = pageSize.width
-    val h = pageSize.height
-    if (!isFocused || z <= 1.01f || w <= 0 || h <= 0 || viewport.width <= 0f || viewport.height <= 0f) {
-      region?.let { recycle(it.tile.bitmap) }
-      region = null
-      return@LaunchedEffect
-    }
-    val pw = w.toFloat()
-    val ph = h.toFloat()
-    val cx = pw / 2f
-    val cy = ph / 2f
-    // viewport (window px) -> page-layout px, inverting scale-about-centre + pan
-    val vl = viewport.left - boxPos.x
-    val vr = viewport.right - boxPos.x
-    val vt = viewport.top - boxPos.y
-    val vb = viewport.bottom - boxPos.y
-    val visL = (cx + (vl - cx - pan.x) / z).coerceIn(0f, pw)
-    val visR = (cx + (vr - cx - pan.x) / z).coerceIn(0f, pw)
-    val visT = (cy + (vt - cy - pan.y) / z).coerceIn(0f, ph)
-    val visB = (cy + (vb - cy - pan.y) / z).coerceIn(0f, ph)
-    if (visR - visL < 1f || visB - visT < 1f) return@LaunchedEffect
-
-    val cur = region
-    if (cur != null && cur.page == pageIndex && kotlin.math.abs(cur.zoom - z) / z < 0.02f) {
-      val t = cur.tile
-      val tr = t.left + t.bitmap.width * t.invScale
-      val tb = t.top + t.bitmap.height * t.invScale
-      if (t.left <= visL + 0.5f && t.top <= visT + 0.5f && tr >= visR - 0.5f && tb >= visB - 0.5f) {
-        return@LaunchedEffect
-      }
-    }
-
-    delay(150) // debounce pinch / pan
-    val mx = (visR - visL) * 0.15f
-    val my = (visB - visT) * 0.15f
-    val tile = session.renderRegion(
-      pageIndex, w,
-      (visL - mx).coerceAtLeast(0f), (visT - my).coerceAtLeast(0f),
-      (visR + mx).coerceAtMost(pw), (visB + my).coerceAtMost(ph),
-      z
-    )
-    if (tile != null) {
-      val old = region
-      region = ReaderRegion(tile, z, pageIndex)
-      if (old != null) {
-        withFrameNanos { }
-        withFrameNanos { }
-        recycle(old.tile.bitmap)
-      }
-    }
-  }
-
-  LaunchedEffect(zoom) { if (zoom == 1f) pan = Offset.Zero }
-  LaunchedEffect(pageIndex) { pan = Offset.Zero }
-
-  Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-    Box(
-      Modifier
-        .fillMaxWidth()
-        .aspectRatio(1f / session.aspect(pageIndex))
-        .then(if (isFocused) Modifier else Modifier.clip(RoundedCornerShape(Ds.tileRadius)))
-        .background(Color(0xFF121212))
-        .onGloballyPositioned { if (isFocused) boxPos = it.positionInWindow() },
-      contentAlignment = Alignment.Center
-    ) {
-      if (bmp == null) {
-        PageSkeletonLoader(Modifier.fillMaxSize())
-      }
-      Canvas(
-        Modifier
-          .fillMaxSize()
-          .onSizeChanged { pageSize = it }
-          .semantics {
-            contentDescription = LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${pageIndex + 1}")
-          }
-          .graphicsLayer {
-            scaleX = zoom
-            scaleY = zoom
-            translationX = pan.x
-            translationY = pan.y
-          }
-          // Pinch zoom (two fingers), pan while zoomed (one finger), and a
-          // swipe past the page edge changes page at the same zoom.
-          .pointerInput(Unit) {
-            awaitEachGesture {
-              awaitFirstDown(requireUnconsumed = false)
-              var edgeOverscroll = Offset.Zero
-              var edgePageChangeSent = false
-              do {
-                val event = awaitPointerEvent()
-                val pressed = event.changes.count { it.pressed }
-                val canceled = event.changes.any { it.isConsumed }
-                if (!canceled) {
-                  if (pressed >= 2) {
-                    val zoomChange = event.calculateZoom()
-                    val panChange = event.calculatePan()
-                    val centroid = event.calculateCentroid(useCurrent = true)
-                    val z = (currentZoom * zoomChange).coerceIn(1f, 5f)
-                    if (z == 1f) {
-                      onZoomChange(1f)
-                      pan = Offset.Zero
-                    } else {
-                      val k = z / currentZoom
-                      val centre = Offset(pageSize.width / 2f, pageSize.height / 2f)
-                      val q = centroid - centre - pan
-                      var next = pan + panChange + q * (1f - k)
-                      if (pageSize.width > 0 && pageSize.height > 0) {
-                        val maxX = pageSize.width * (z - 1f) / 2f
-                        val maxY = pageSize.height * (z - 1f) / 2f
-                        next = Offset(
-                          next.x.coerceIn(-maxX, maxX),
-                          next.y.coerceIn(-maxY, maxY)
-                        )
-                      }
-                      pan = next
-                      onZoomChange(z)
-                    }
-                    edgeOverscroll = Offset.Zero
-                    edgePageChangeSent = false
-                    event.changes.forEach { it.consume() }
-                  } else if (pressed == 1 && currentZoom > 1f) {
-                    val panChange = event.calculatePan()
-                    if (panChange != Offset.Zero) {
-                      var next = pan + panChange
-                      if (pageSize.width > 0 && pageSize.height > 0) {
-                        val maxX = pageSize.width * (currentZoom - 1f) / 2f
-                        val maxY = pageSize.height * (currentZoom - 1f) / 2f
-                        next = Offset(
-                          next.x.coerceIn(-maxX, maxX),
-                          next.y.coerceIn(-maxY, maxY)
-                        )
-                      }
-                      val moved = next - pan
-                      pan = next
-                      if (moved != Offset.Zero) {
-                        edgeOverscroll = Offset.Zero
-                        event.changes.forEach { it.consume() }
-                      } else {
-                        edgeOverscroll += panChange
-                        val threshold = currentEdgeThreshold
-                        if (!edgePageChangeSent &&
-                          (kotlin.math.abs(edgeOverscroll.x) >= threshold ||
-                            kotlin.math.abs(edgeOverscroll.y) >= threshold)
-                        ) {
-                          val verticalFirst = kotlin.math.abs(edgeOverscroll.y) >= kotlin.math.abs(edgeOverscroll.x)
-                          val delta = if (verticalFirst) {
-                            if (edgeOverscroll.y < 0f) 1 else -1
-                          } else {
-                            if (edgeOverscroll.x < 0f) 1 else -1
-                          }
-                          edgePageChangeSent = true
-                          edgeOverscroll = Offset.Zero
-                          currentPageChange?.invoke(currentPageIndex + delta)
-                        }
-                      }
-                    }
-                  }
-                }
-              } while (event.changes.any { it.pressed })
-            }
-          }
-          .pointerInput(Unit) {
-            detectTapGestures(
-              onDoubleTap = {
-                if (currentZoom > 1f) onZoomChange(1f)
-                else onZoomChange(2.5f)
-              }
-            )
-          }
-      ) {
-        val nc = drawContext.canvas.nativeCanvas
-        val b = bmp
-        if (b != null && !b.isRecycled) {
-          drawMatrix.reset()
-          drawMatrix.setScale(size.width / b.width, size.height / b.height)
-          nc.drawBitmap(b, drawMatrix, paint)
-        }
-        val r = region
-        if (r != null && !r.tile.bitmap.isRecycled) {
-          drawMatrix.reset()
-          drawMatrix.setScale(r.tile.invScale, r.tile.invScale)
-          drawMatrix.postTranslate(r.tile.left, r.tile.top)
-          nc.drawBitmap(r.tile.bitmap, drawMatrix, paint)
-        }
-      }
-    }
-    Spacer(Modifier.height(Ds.s4))
-    Text(LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${pageIndex + 1}"), fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
-  }
-}
 
 
 
@@ -3041,7 +2187,7 @@ private enum class PasswordStrength { EMPTY, TOO_SHORT, WEAK, OK, STRONG }
 // Standard encryption (PdfProtector, V=4/R=4); files protected by
 // older versions with 40-bit RC4 still open and unlock.
 @Composable
-fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
+fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
@@ -3214,7 +2360,6 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
       savedLocationText = savedLocationText,
-      onOpenPdfInReader = onOpenPdfInReader
     )
     return
   }

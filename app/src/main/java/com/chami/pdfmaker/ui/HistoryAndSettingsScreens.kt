@@ -458,12 +458,6 @@ private fun FontScaledSectionHeader(
 @Composable
 fun HistoryScreen(
   theme: ChamiTheme,
-  // FIX 2026-11-18 (Fix 9): required, NOT nullable — a PDF tap in
-  // History must ALWAYS open the inbuilt PDF Reader. The old nullable
-  // default silently fell back to an external viewer whenever a caller
-  // forgot the callback; that fallback is gone for PDFs (images still
-  // open externally, the Reader is PDF-only).
-  onOpenInReader: (File) -> Unit,
   listState: LazyListState = rememberLazyListState(),
 ) {
   val ctx = LocalContext.current
@@ -602,8 +596,8 @@ fun HistoryScreen(
 
   // Search + filter + favourite-first + sort. Tool filter uses the
   // HistoryStore record first, falling back to the file-name prefix
-  // (see historyToolName); "PDF to Images", "Reader" and
-  // "OCR" write no files into the Chami folder, so those chips are
+  // (see historyToolName); "PDF to Images" and "OCR"
+  // write no files into the Chami folder, so those chips are
   // honestly empty unless such a file exists.
   val visible = remember(fileList, query, filter, sortMode, favourites, toolMap) {
     var list = fileList.filter { f ->
@@ -640,7 +634,7 @@ fun HistoryScreen(
   }
 
   // Filter chips: All + one chip per tool that can actually produce a
-  // file (and has produced one here). PDF to Images / Reader / OCR
+  // file (and has produced one here). PDF to Images / OCR
   // write no files into the Chami folder, so those dead chips are gone.
   // FIX 2026-11-18 (report #37): "Scan" removed — Scan was removed
   // in Run #150, so there is no Scan chip any more.
@@ -954,9 +948,6 @@ fun HistoryScreen(
                       if (multiSelect) {
                         selected = if (isSel) selected - file.absolutePath
                         else selected + file.absolutePath
-                      } else if (isPdf) {
-                        // Tap opens the file in the inbuilt PDF Reader.
-                        onOpenInReader(file)
                       } else {
                         ShareHelper.openFile(ctx, file, mime)
                       }
@@ -1055,8 +1046,7 @@ fun HistoryScreen(
                         text = { Text(LocaleHelper.t(ctx, "done_open"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = theme.text) },
                         onClick = {
                           menuFor = null
-                          if (isPdf) onOpenInReader(file)
-                          else ShareHelper.openFile(ctx, file, mime)
+                          ShareHelper.openFile(ctx, file, mime)
                         }
                       )
                       DropdownMenuItem(

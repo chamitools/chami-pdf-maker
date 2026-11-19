@@ -24,7 +24,9 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -70,12 +72,9 @@ import com.chami.pdfmaker.pdf.*
 import com.chami.pdfmaker.theme.ChamiTheme
 import com.chami.pdfmaker.theme.ThemeManager
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -100,7 +99,12 @@ import java.security.MessageDigest
 //   it was removed at the user's request (2026-11-14).
 // - PdfProtector already exposes unlockPdf / setPermissions /
 //   verifyPassword in this copy; Protect uses them instead of the old
-//   local RC4 unlock (kept only where still needed: patchPdfPermissions).
+//   local RC4 unlock (kept only where still needed:
+//   patchPdfPermissions). PHASE 2 (H6-part + L10) tried deleting the
+//   local RC4/MD5 helpers, but their only callers live in
+//   ToolScreens2.kt, whose migration to PdfProtector.patchPermissions
+//   could not be completed in this phase — so the helpers were
+//   restored verbatim from HEAD 4a7453d (see the note above them).
 // - ReaderTextTools already exposes saveBookmark / getBookmarks
 //   (SharedPreferences "chami_bookmarks"); the Reader uses them, plus a
 //   local removeBookmark with the same key scheme.
@@ -133,6 +137,11 @@ fun baseNameOf(ctx: Context, uri: Uri, fallback: String): String {
  *  picks a PDF, so the message is identical everywhere. */
 const val UNOPENABLE_PDF_MESSAGE = "This PDF can't be opened (password-protected or damaged)"
 
+/** PHASE 2 (H10): most page thumbnails the PDF-to-Images screen keeps
+ *  at once. Thumbnails render on demand for visible grid cells; when
+ *  the cap is reached the farthest page's thumbnail is recycled. */
+const val MAX_PAGE_THUMBS = 60
+
 /** rememberSaveable for picked-file Uris (report #47): the saver
  *  stores the state's CURRENT Uri as a string (parsed back on
  *  restore), so picked work survives process death. The saver reads
@@ -159,6 +168,14 @@ fun rememberSaveableUriList(initialValue: List<Uri> = emptyList()): MutableState
 // Protect uses them. The RC4 helpers below stay only for
 // patchPdfPermissions (permission-bit patching on the app's own V1/R2
 // files) and the unlock fallback path.
+//
+// COORDINATOR NOTE (Phase 2 final pass): the H6-part/L10 dedupe deleted
+// these helpers, but their only callers live in ToolScreens2.kt, whose
+// migration to PdfProtector.patchPermissions / unlockPdf-only could not
+// be completed in this phase — so the helpers are restored verbatim
+// from HEAD 4a7453d until that migration lands. PdfProtector already
+// exposes patchPermissions / unlockPdf; the next pass should switch the
+// two ToolScreens2.kt call sites over and delete this block again.
 
 val PDF_PADDING = byteArrayOf(
   0x28.toByte(), 0xBF.toByte(), 0x4E.toByte(), 0x5E.toByte(), 0x4E.toByte(), 0x75.toByte(), 0x8A.toByte(), 0x41.toByte(),
@@ -354,7 +371,11 @@ class PagesViewModel : ViewModel() {
   var pages by mutableStateOf<List<PageItem>>(emptyList())
   var selectedUri by mutableStateOf<Uri?>(null)
   val filterModes = mutableStateMapOf<Uri, Int>()
-  val filterOriginals = mutableStateMapOf<Uri, Bitmap>()
+  // PHASE 2 (L5): the edit guard lives here, in the ViewModel, as state —
+  // not as a plain var on the remembered PageEditor object, so a second
+  // edit cannot start mid-edit even if the composition is recreated
+  // while an edit is running. PageEditor reads/writes this.
+  val editBusy = mutableStateOf(false)
 
   val selectedIndex: Int
     get() = pages.indexOfFirst { it.uri == selectedUri }.takeIf { it >= 0 } ?: 0
@@ -378,13 +399,16 @@ class PagesViewModel : ViewModel() {
   }
 
   /** Removes the page at [index]. The Uri is looked up BEFORE the list
-   *  is filtered, so the filter maps lose the right entry. */
+   *  is filtered, so the filter maps lose the right entry. PHASE 2 (H2):
+   *  the removed page's bitmap is recycled here — it is no longer shown
+   *  anywhere (the thumbnail strip keeps its own downscaled copies). */
   fun deleteAt(index: Int) {
-    val uri = pages.getOrNull(index)?.uri ?: return
+    val page = pages.getOrNull(index) ?: return
+    val uri = page.uri
     filterModes.remove(uri)
-    filterOriginals.remove(uri)
     pages = pages.filterIndexed { i, _ -> i != index }
     if (selectedUri == uri) selectedUri = pages.getOrNull((index - 1).coerceAtLeast(0))?.uri
+    if (!page.bitmap.isRecycled) page.bitmap.recycle()
   }
 }
 
@@ -507,6 +531,20 @@ fun DebouncedTextField(
 
 /** Save-every-output flow: asks the folder ONCE (system folder picker),
  *  writes every file there, then reports the saved files.
+ *
+ *  PHASE 2 (M9): the pending save is persisted in SharedPreferences
+ *  ("chami_pending_save") when the picker launches — file paths + MIME
+ *  types — and cleared when the picker returns (saved or cancelled).
+ *  Plain `remember` state does not survive process death, so if the
+ *  system kills the app while the picker is open the in-memory pending
+ *  list is gone; on the next composition the LaunchedEffect below
+ *  finds the stale persisted entry and surfaces the Done state for
+ *  those files (they already exist in the Chami folder) instead of
+ *  silently dropping the save. Files that no longer exist are not
+ *  surfaced. Note the entry is not scoped to one tool: whichever tool
+ *  screen opens first after the death surfaces it, and the Done screen
+ *  shows the real file names so the user can tell what they are.
+ *
  *  FIX 2026-11-18 (Format Convert save): two bugs.
  *  (1) createDocument was passed the raw tree URI from OpenDocumentTree,
  *      but it needs a DOCUMENT URI — the tree URI is not a valid parent
@@ -519,6 +557,54 @@ fun DebouncedTextField(
  *      a folder. "Cancelled" now fires ONLY when the picker itself is
  *      dismissed (treeUri == null); a write failure shows the real
  *      error, and a partial save reports how many files were saved. */
+private const val PENDING_SAVE_PREFS = "chami_pending_save"
+private const val PENDING_FOLDER_PATHS = "folder_paths"
+private const val PENDING_FOLDER_MIMES = "folder_mimes"
+private const val PENDING_SINGLE_PATH = "single_path"
+private const val PENDING_SINGLE_MIME = "single_mime"
+
+private fun pendingSavePrefs(ctx: Context) =
+  ctx.getSharedPreferences(PENDING_SAVE_PREFS, Context.MODE_PRIVATE)
+
+private fun readPendingFolderSave(ctx: Context): List<Pair<File, String>>? {
+  val prefs = pendingSavePrefs(ctx)
+  val paths = prefs.getString(PENDING_FOLDER_PATHS, null)?.split("\n")?.filter { it.isNotEmpty() } ?: return null
+  val mimes = prefs.getString(PENDING_FOLDER_MIMES, null)?.split("\n") ?: emptyList()
+  if (paths.isEmpty()) return null
+  return paths.mapIndexed { i, path -> File(path) to (mimes.getOrNull(i) ?: "application/pdf") }
+}
+
+private fun writePendingFolderSave(ctx: Context, files: List<Pair<File, String>>) {
+  pendingSavePrefs(ctx).edit()
+    .putString(PENDING_FOLDER_PATHS, files.joinToString("\n") { it.first.absolutePath })
+    .putString(PENDING_FOLDER_MIMES, files.joinToString("\n") { it.second })
+    .apply()
+}
+
+private fun clearPendingFolderSave(ctx: Context) {
+  pendingSavePrefs(ctx).edit()
+    .remove(PENDING_FOLDER_PATHS).remove(PENDING_FOLDER_MIMES).apply()
+}
+
+private fun readPendingSingleSave(ctx: Context): Pair<File, String>? {
+  val path = pendingSavePrefs(ctx).getString(PENDING_SINGLE_PATH, null) ?: return null
+  if (path.isEmpty()) return null
+  val mime = pendingSavePrefs(ctx).getString(PENDING_SINGLE_MIME, null) ?: "application/pdf"
+  return File(path) to mime
+}
+
+private fun writePendingSingleSave(ctx: Context, file: File, mimeType: String) {
+  pendingSavePrefs(ctx).edit()
+    .putString(PENDING_SINGLE_PATH, file.absolutePath)
+    .putString(PENDING_SINGLE_MIME, mimeType)
+    .apply()
+}
+
+private fun clearPendingSingleSave(ctx: Context) {
+  pendingSavePrefs(ctx).edit()
+    .remove(PENDING_SINGLE_PATH).remove(PENDING_SINGLE_MIME).apply()
+}
+
 @Composable
 fun rememberFolderSaver(
   onSaved: (List<File>) -> Unit,
@@ -528,9 +614,21 @@ fun rememberFolderSaver(
   val ctx = LocalContext.current
   val scope = rememberCoroutineScope()
   var pending by remember { mutableStateOf<List<Pair<File, String>>?>(null) }
+  // PHASE 2 (M9): recover a save whose picker was open when the process
+  // died — the files already exist in the Chami folder, so show Done
+  // for them instead of dropping the save silently.
+  LaunchedEffect(Unit) {
+    val stale = readPendingFolderSave(ctx)
+    if (stale != null) {
+      clearPendingFolderSave(ctx)
+      val existing = stale.filter { it.first.exists() }.map { it.first }
+      if (existing.isNotEmpty()) onSaved(existing)
+    }
+  }
   val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
     val files = pending
     pending = null
+    clearPendingFolderSave(ctx)
     if (treeUri == null || files == null) {
       if (files != null) onCancelled()
       return@rememberLauncherForActivityResult
@@ -565,16 +663,24 @@ fun rememberFolderSaver(
         when {
           saved.isNotEmpty() && failed == 0 -> onSaved(saved)
           saved.isNotEmpty() -> {
-            Toast.makeText(ctx, "Saved ${saved.size} of ${files.size} files — $failed could not be saved to the chosen folder", Toast.LENGTH_LONG).show()
+            Toast.makeText(
+              ctx,
+              LocaleHelper.t(ctx, "toast_save_partial")
+                .replace("{saved}", "${saved.size}")
+                .replace("{total}", "${files.size}")
+                .replace("{failed}", "$failed"),
+              Toast.LENGTH_LONG
+            ).show()
             onSaved(saved)
           }
-          else -> Toast.makeText(ctx, "Could not save to the chosen folder — files kept in Chami folder", Toast.LENGTH_LONG).show()
+          else -> Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_failed_folder"), Toast.LENGTH_LONG).show()
         }
       }
     }
   }
   return { files ->
     pending = files
+    writePendingFolderSave(ctx, files)
     launcher.launch(null)
   }
 }
@@ -601,6 +707,18 @@ fun rememberSingleFileSaver(
   val ctx = LocalContext.current
   val scope = rememberCoroutineScope()
   var pending by remember { mutableStateOf<File?>(null) }
+  // PHASE 2 (M9): same recovery as rememberFolderSaver — if the process
+  // died while the picker was open, the file already exists in the
+  // Chami folder, so show Done for it instead of dropping the save.
+  // The persisted MIME is kept with the path (see writePendingSingleSave)
+  // even though recovery only needs the file itself.
+  LaunchedEffect(Unit) {
+    val stale = readPendingSingleSave(ctx)
+    if (stale != null) {
+      clearPendingSingleSave(ctx)
+      if (stale.first.exists()) onSaved(stale.first)
+    }
+  }
   // FIX 2026-11-18 (report #21): the launcher is keyed on the MIME
   // type, so changing format (JPG -> PNG) after picking an image
   // recreates the picker with the current format instead of offering
@@ -612,21 +730,23 @@ fun rememberSingleFileSaver(
     rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(mimeType)) { uri ->
       val file = pending
       pending = null
+      clearPendingSingleSave(ctx)
       if (uri != null && file != null) {
         scope.launch {
           val ok = withContext(Dispatchers.IO) { SaveLocation.copyToUri(ctx, file, uri) }
           if (ok) {
             onSavedToUri?.invoke(uri)
             onSaved(file)
-          } else Toast.makeText(ctx, "Could not save to chosen folder", Toast.LENGTH_SHORT).show()
+          } else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_failed_file"), Toast.LENGTH_SHORT).show()
         }
       } else if (uri == null && file != null) {
-        Toast.makeText(ctx, "Save cancelled — file kept in Chami folder", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_cancelled_file"), Toast.LENGTH_SHORT).show()
       }
     }
   }
   return { file ->
     pending = file
+    writePendingSingleSave(ctx, file, mimeType)
     launcher.launch(file.name)
   }
 }
@@ -644,6 +764,10 @@ fun MultiDoneScreen(
   onOpenPdfInReader: ((File) -> Unit)? = null
 ) {
   val ctx = LocalContext.current
+  // PHASE 2 (H1): system Back on a multi-file Done screen goes Home
+  // instead of exiting the app (this screen early-returns before
+  // ToolScreenContainer, so it never gets that container's BackHandler).
+  BackHandler { onBackHome() }
   Column(
     Modifier
       .fillMaxSize()
@@ -672,7 +796,7 @@ fun MultiDoneScreen(
     // chose in the save picker, instead of "Chami folder".
     if (savedLocationText != null) {
       Text(
-        "Saved to: $savedLocationText",
+        LocaleHelper.t(ctx, "label_saved_to").replace("{location}", savedLocationText),
         fontSize = Ds.BODY_SP.sp, color = theme.text, lineHeight = (Ds.BODY_SP * 1.4).sp,
         maxLines = 1, overflow = TextOverflow.Ellipsis
       )
@@ -706,7 +830,7 @@ fun MultiDoneScreen(
     }
     Spacer(Modifier.height(Ds.s24))
     ChamiPrimaryButton(
-      text = "Open first file",
+      text = LocaleHelper.t(ctx, "btn_open_first_file"),
       onClick = {
         files.firstOrNull()?.let {
           // FIX 2026-11-18 (report #4): a PDF opens in the inbuilt
@@ -720,11 +844,11 @@ fun MultiDoneScreen(
     Spacer(Modifier.height(Ds.s12))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
       ChamiSecondaryButton(
-        text = "Share first file",
+        text = LocaleHelper.t(ctx, "btn_share_first_file"),
         onClick = { files.firstOrNull()?.let { ShareHelper.shareFile(ctx, it.file, it.mimeType) } },
         modifier = Modifier.weight(1f)
       )
-      ChamiSecondaryButton(text = "Done", onClick = onBackHome, modifier = Modifier.weight(1f))
+      ChamiSecondaryButton(text = LocaleHelper.t(ctx, "done"), onClick = onBackHome, modifier = Modifier.weight(1f))
     }
     Spacer(Modifier.height(Ds.s16))
   }
@@ -746,6 +870,7 @@ fun BigPagePreview(
   onAdjust: () -> Unit,
   height: Dp = 340.dp
 ) {
+  val ctx = LocalContext.current
   Box(
     Modifier
       .fillMaxWidth()
@@ -787,23 +912,27 @@ fun BigPagePreview(
       }
     } else {
       Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("No page yet", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
+        Text(LocaleHelper.t(ctx, "label_no_page_yet"), fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
       }
     }
     Column(
       Modifier.align(Alignment.TopStart).padding(Ds.s8),
       verticalArrangement = Arrangement.spacedBy(Ds.s8)
     ) {
-      PreviewActionButton(Icons.Filled.Crop, "Crop — cut the image", onCrop)
-      PreviewActionButton(Icons.Filled.Delete, "Delete this page", onDelete)
+      // NOTE (M13): these descriptions are also the VISIBLE short labels
+      // under the icons — DesignSystem derives the label from the text
+      // before " —" (or the first word). Translations must keep the short
+      // label first (and keep " —" where present) or the label breaks.
+      PreviewActionButton(Icons.Filled.Crop, LocaleHelper.t(ctx, "preview_action_crop"), onCrop)
+      PreviewActionButton(Icons.Filled.Delete, LocaleHelper.t(ctx, "preview_action_delete"), onDelete)
       // FIX 2026-11-18 (Fix 11): FilterList, NOT Filter. Verified by
       // rendering the exact vectors from material-icons-extended 1.7.0:
       // Icons.Filled.Filter draws a picture frame with mountains (the
       // user rightly read it as an image icon); FilterList is the
       // proper funnel glyph. Crop = crop corners, Delete = trash,
       // Tune = sliders — all three already read correctly, unchanged.
-      PreviewActionButton(Icons.Filled.FilterList, "Filter", onFilter)
-      PreviewActionButton(Icons.Filled.Tune, "Adjust brightness", onAdjust)
+      PreviewActionButton(Icons.Filled.FilterList, LocaleHelper.t(ctx, "preview_action_filter"), onFilter)
+      PreviewActionButton(Icons.Filled.Tune, LocaleHelper.t(ctx, "preview_action_adjust"), onAdjust)
     }
   }
 }
@@ -822,11 +951,30 @@ fun PageThumbnailStrip(
   onAddPages: () -> Unit
 ) {
   val density = LocalDensity.current
+  val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val listState = rememberLazyListState()
   val latestPages by rememberUpdatedState(pages)
   val latestOnMove by rememberUpdatedState(onMove)
+  // PHASE 2 (M11): thumbnails are ~200px downscales, same pattern as
+  // ImagePageEditor.thumbnailBitmap — but ALWAYS a copy, never the page
+  // bitmap itself, so the cache owns its bitmaps and can recycle them.
+  // Keyed by page Uri (the Uri changes on every crop/rotate, so a stale
+  // thumbnail cannot survive an edit); entries for removed pages are
+  // recycled below, and the whole cache is recycled when the strip
+  // leaves composition.
+  val thumbCache = remember { HashMap<Uri, Bitmap>() }
+  val currentUris = pages.map { it.uri }.toSet()
+  thumbCache.keys.filter { it !in currentUris }.forEach { uri ->
+    thumbCache.remove(uri)?.let { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+  }
+  DisposableEffect(Unit) {
+    onDispose {
+      thumbCache.values.forEach { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+      thumbCache.clear()
+    }
+  }
   var draggingUri by remember { mutableStateOf<Uri?>(null) }
   var dragOffsetX by remember { mutableStateOf(0f) }
   val cardPx = with(density) { Ds.thumbStripHeight.toPx() }
@@ -840,11 +988,16 @@ fun PageThumbnailStrip(
     itemsIndexed(pages, key = { _, page -> page.uri.toString() }) { index, page ->
       val isSel = index == selectedIndex
       val isDragging = draggingUri == page.uri
-      // PERFORMANCE: wrap once per page — the strip recomposes on every
-      // reorder-drag frame, and re-wrapping every full-res bitmap each
-      // frame dropped frames. The Uri changes whenever a page is edited,
-      // so a stale thumbnail cannot survive an edit.
-      val thumbImage = remember(page.uri) { page.bitmap.asImageBitmap() }
+      // PHASE 2 (M11): ~200px cached downscale, never the full-res
+      // bitmap — wrapping the full bitmap with asImageBitmap() uploaded
+      // a full-res texture per thumbnail and stuttered the drag surface.
+      val thumbImage = remember(page.uri) {
+        thumbCache.getOrPut(page.uri) {
+          val bmp = page.bitmap
+          val h = (bmp.height * (200f / bmp.width)).toInt().coerceAtLeast(1)
+          Bitmap.createScaledBitmap(bmp, 200, h, true)
+        }.asImageBitmap()
+      }
       Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
           Modifier
@@ -912,8 +1065,7 @@ fun PageThumbnailStrip(
           }
         }
         Spacer(Modifier.height(Ds.s4))
-        Text(
-          "Page ${index + 1}",
+        Text(LocaleHelper.t(ctx, "label_page_number").replace("{n}", "${index + 1}"),
           fontSize = Ds.HINT_SP.sp,
           fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
           color = if (isSel) theme.primary else theme.text
@@ -934,7 +1086,7 @@ fun PageThumbnailStrip(
           Icon(Icons.Filled.Add, contentDescription = "Add pages", tint = theme.primary, modifier = Modifier.size(24.dp))
         }
         Spacer(Modifier.height(Ds.s4))
-        Text("Add", fontSize = Ds.HINT_SP.sp, color = theme.text)
+        Text(LocaleHelper.t(ctx, "btn_add"), fontSize = Ds.HINT_SP.sp, color = theme.text)
       }
     }
   }
@@ -947,10 +1099,16 @@ fun FilterPickerDialog(
   onPick: (Int) -> Unit,
   onDismiss: () -> Unit
 ) {
-  val names = listOf("Original", "B&W", "Grayscale", "Enhance")
+  val ctx = LocalContext.current
+  val names = listOf(
+    LocaleHelper.t(ctx, "label_original"),
+    LocaleHelper.t(ctx, "filter_name_bw"),
+    LocaleHelper.t(ctx, "filter_name_grayscale"),
+    LocaleHelper.t(ctx, "filter_name_enhance")
+  )
   ChamiAlertDialog(theme,
     onDismissRequest = onDismiss,
-    title = { Text("Filter", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
+    title = { Text(LocaleHelper.t(ctx, "dialog_filter_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
     text = {
       Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
         Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
@@ -964,14 +1122,14 @@ fun FilterPickerDialog(
             ChamiChip(n, selected == i, { onPick(i) }, Modifier.weight(1f))
           }
         }
-        HintText("Filter applies to this page only.")
+        HintText(LocaleHelper.t(ctx, "hint_filter_page_only"))
       }
     },
     // FIX 2026-11-18 (report #9): filters apply on tap, so this
     // button only closes the dialog — label it "Close", not "Done".
     confirmButton = {
       TextButton(onClick = onDismiss) {
-        Text("Close", color = theme.primaryDark, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+        Text(LocaleHelper.t(ctx, "btn_close"), color = theme.primaryDark, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
       }
     }
   )
@@ -986,9 +1144,10 @@ fun BrightnessDialog(
   onDismiss: () -> Unit,
   bitmap: Bitmap? = null
 ) {
+  val ctx = LocalContext.current
   ChamiAlertDialog(theme,
     onDismissRequest = onDismiss,
-    title = { Text("Adjust brightness", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
+    title = { Text(LocaleHelper.t(ctx, "dialog_brightness_title"), fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text) },
     text = {
       Column {
         // FIX 2026-11-18 (report #8): live preview — the image is
@@ -1014,7 +1173,7 @@ fun BrightnessDialog(
           )
           Spacer(Modifier.height(Ds.s12))
         }
-        Text("Brightness: ${value.toInt()}", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
+        Text(LocaleHelper.t(ctx, "label_brightness_value").replace("{n}", "${value.toInt()}"), fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
         Slider(
           value = value,
           onValueChange = onValueChange,
@@ -1025,11 +1184,11 @@ fun BrightnessDialog(
     },
     confirmButton = {
       Button(onClick = onApply, colors = ButtonDefaults.buttonColors(containerColor = theme.primary)) {
-        Text("Apply", color = theme.textOnPrimary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+        Text(LocaleHelper.t(ctx, "btn_apply"), color = theme.textOnPrimary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
       }
     },
     dismissButton = {
-      TextButton(onClick = onDismiss) { Text("Cancel", color = theme.text) }
+      TextButton(onClick = onDismiss) { Text(LocaleHelper.t(ctx, "btn_cancel"), color = theme.text) }
     }
   )
 }
@@ -1050,6 +1209,7 @@ fun RectCropDialog(
 ) {
   var rect by remember(bitmap) { mutableStateOf(ComposeRect(0f, 0f, 1f, 1f)) }
   var ratioLabel by rememberSaveable { mutableStateOf("Free") }
+  val ctx = LocalContext.current
   // PERFORMANCE: wrap the bitmap once — the drag path recomposes on every
   // pointer move, and asImageBitmap() on every frame made the crop drag
   // stutter on low-end phones.
@@ -1089,9 +1249,9 @@ fun RectCropDialog(
     ) {
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = onDismiss, modifier = Modifier.height(Ds.minTouch)) {
-          Text("Cancel", color = Color.White, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+          Text(LocaleHelper.t(ctx, "btn_cancel"), color = Color.White, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
         }
-        Text("Crop — cuts the image", color = Color.White, fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold)
+        Text(LocaleHelper.t(ctx, "dialog_crop_title"), color = Color.White, fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold)
         TextButton(
           onClick = {
             try {
@@ -1100,12 +1260,12 @@ fun RectCropDialog(
           },
           modifier = Modifier.height(Ds.minTouch)
         ) {
-          Text("Apply", color = theme.primaryDark, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+          Text(LocaleHelper.t(ctx, "btn_apply"), color = theme.primaryDark, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
         }
       }
       Spacer(Modifier.height(Ds.s8))
       Text(
-        "Drag the box to move it, or a corner / edge to resize it. With a ratio selected the box keeps that ratio. Everything outside the frame is removed.",
+        LocaleHelper.t(ctx, "hint_crop_drag"),
         fontSize = Ds.HINT_SP.sp, color = Color(0xFFCBD5E1)
       )
       Spacer(Modifier.height(Ds.s8))
@@ -1114,7 +1274,15 @@ fun RectCropDialog(
         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
       ) {
         ratios.forEach { (label, ratio) ->
-          ChamiChip(label, ratioLabel == label, {
+          // The ratio label is the internal lock key ("Free"/"Original"
+          // drive the ratio logic), so only the DISPLAY text is
+          // translated — numeric ratios ("1:1", "A4") need no key.
+          val displayLabel = when (label) {
+            "Free" -> LocaleHelper.t(ctx, "label_free")
+            "Original" -> LocaleHelper.t(ctx, "label_original")
+            else -> label
+          }
+          ChamiChip(displayLabel, ratioLabel == label, {
             ratioLabel = label
             rect = ratioRect(ratio)
           })
@@ -1308,8 +1476,13 @@ fun RectCropDialog(
           // declared after this layer, so a drag starting on a handle
           // still goes to the handle; the 24dp exclusion below is the
           // belt-and-braces for the same rule.
+          // PHASE 2 (M21): the move handler reads the display geometry
+          // (toPxX/toPxY/dispW/dispH) captured at setup — keying the
+          // pointerInput on the box size restarts it after a rotation,
+          // so drags map to the new geometry instead of the stale one.
+          // The current rect/ratio are still read via rememberUpdatedState.
           Box(
-            Modifier.fillMaxSize().pointerInput("move") {
+            Modifier.fillMaxSize().pointerInput("move", boxW, boxH) {
               var moveActive = false
               detectDragGestures(
                 onDragStart = { start ->
@@ -1348,7 +1521,12 @@ fun RectCropDialog(
                   y = with(density) { (toPxY(frac.y) - 24.dp.toPx()).toDp() }
                 )
                 .size(Ds.minTouch)
-                .pointerInput(id) {
+                // PHASE 2 (M21): keyed on the display size as well as the
+                // handle id, so a rotation restarts the handler with fresh
+                // geometry instead of dragging against stale coordinates.
+                // (Still NOT keyed on rect — that would cancel the drag
+                // on its first pixel.)
+                .pointerInput(id, dispW, dispH) {
                   detectDragGestures { change, drag ->
                     change.consume()
                     val cur = latestRect
@@ -1386,68 +1564,116 @@ fun RectCropDialog(
       }
       Spacer(Modifier.height(Ds.s16))
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        ChamiSecondaryButton(text = "Reset", onClick = { rect = ratioRect(ratios.first { it.first == ratioLabel }.second) }, modifier = Modifier.weight(1f))
-        ChamiSecondaryButton(text = "Rotate 90°", onClick = onRotate, modifier = Modifier.weight(1f))
+        ChamiSecondaryButton(text = LocaleHelper.t(ctx, "btn_reset"), onClick = { rect = ratioRect(ratios.first { it.first == ratioLabel }.second) }, modifier = Modifier.weight(1f))
+        ChamiSecondaryButton(text = LocaleHelper.t(ctx, "btn_rotate_90"), onClick = onRotate, modifier = Modifier.weight(1f))
       }
     }
   }
 }
 
 // --- Shared page-editing helper (Images to PDF) ---------------------------
+// PHASE 2 (H2): there is exactly ONE bitmap per page in memory. The old
+// filterOriginals map held a second full-res copy of every filtered page.
+// The filter base is now re-derived from the page's source Uri whenever
+// a filter is (re-)applied: replacePage persists the unfiltered base
+// bitmap to the page's temp file, so loading that Uri gives the base
+// back — no second copy is ever held. (Crop/rotate/brightness persist
+// the displayed bitmap itself, which is the base for later filters.)
+// PHASE 2 (L5): the busy guard is vm.editBusy (ViewModel state), not a
+// plain var on this remembered object, so it survives composition
+// recreation and a second edit cannot start mid-edit.
 class PageEditor(
   private val ctx: Context,
   private val scope: kotlinx.coroutines.CoroutineScope,
   private val vm: PagesViewModel
 ) {
-  private var busy = false
-
   /** Replaces page [index] with [bmp], saving it to a temp file first so
-   *  the PDF uses the edited image. [newOriginal] becomes the filter
-   *  base stored under the new Uri (crop/rotate = new base). */
+   *  the PDF uses the edited image. [newOriginal] is the bitmap written
+   *  to that temp file — the filter base. It defaults to [bmp] (crop /
+   *  rotate / brightness: the displayed image IS the base); a filter
+   *  apply passes the unfiltered base here so "reset filter" can reload
+   *  it from the Uri later. Pass null to persist [bmp] itself. */
   fun replacePage(index: Int, bmp: Bitmap, newOriginal: Bitmap? = bmp, onDone: () -> Unit = {}) {
     val page = vm.pages.getOrNull(index) ?: return
-    if (busy) {
+    if (vm.editBusy.value) {
       // FIX 2026-11-18 (report #49): a tap dropped while an edit is
       // running says so, instead of silently doing nothing (same
       // wording as applyFilter's busy toast below).
-      Toast.makeText(ctx, "Please wait — finishing the last edit", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_edit_busy"), Toast.LENGTH_SHORT).show()
       return
     }
-    busy = true
+    vm.editBusy.value = true
     scope.launch {
       try {
-        val newUri = ImagePageEditor.bitmapToUri(ctx, bmp, "page_${index}_${System.currentTimeMillis()}.jpg")
-        val oldUri = page.uri
-        val wasSelected = vm.selectedUri == oldUri
-        val oldMode = vm.filterModes.remove(oldUri)
-        val updated = vm.pages.toMutableList()
-        if (index in updated.indices) updated[index] = PageItem(newUri, bmp, cropped = true)
-        vm.setPages(updated)
-        if (wasSelected) vm.selectedUri = newUri
-        if (oldMode != null) vm.filterModes[newUri] = oldMode
-        vm.filterOriginals.remove(oldUri)
-        if (newOriginal != null) vm.filterOriginals[newUri] = newOriginal
+        replacePageInternal(index, bmp, newOriginal)
         onDone()
       } catch (_: Exception) {
-        Toast.makeText(ctx, "Could not apply that edit", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_edit_failed"), Toast.LENGTH_SHORT).show()
+      } finally {
+        vm.editBusy.value = false
       }
-      busy = false
     }
+  }
+
+  /** The shared write + list update. Runs inside the caller's coroutine
+   *  (which already holds the busy guard). The superseded page bitmap
+   *  is recycled when nothing else needs it. */
+  private suspend fun replacePageInternal(index: Int, bmp: Bitmap, newOriginal: Bitmap?) {
+    val page = vm.pages.getOrNull(index) ?: return
+    val fileBmp = newOriginal ?: bmp
+    val newUri = ImagePageEditor.bitmapToUri(ctx, fileBmp, "page_${index}_${System.currentTimeMillis()}.jpg")
+    val oldUri = page.uri
+    val oldBitmap = page.bitmap
+    val wasSelected = vm.selectedUri == oldUri
+    val oldMode = vm.filterModes.remove(oldUri)
+    val updated = vm.pages.toMutableList()
+    if (index in updated.indices) updated[index] = PageItem(newUri, bmp, cropped = true)
+    vm.setPages(updated)
+    if (wasSelected) vm.selectedUri = newUri
+    if (oldMode != null) vm.filterModes[newUri] = oldMode
+    if (oldBitmap !== bmp && oldBitmap !== fileBmp && !oldBitmap.isRecycled) oldBitmap.recycle()
+  }
+
+  /** Loads the unfiltered base for [page] from its source Uri (2048px
+   *  working cap, same as the picker). Falls back to the displayed
+   *  bitmap if the Uri cannot be reloaded, so a filter tap never
+   *  fails outright — it just filters the current image. */
+  private suspend fun loadFilterBase(page: PageItem): Bitmap {
+    val loaded = try {
+      withContext(Dispatchers.IO) { PdfEngine.loadBitmap(ctx, page.uri, 2048) }
+    } catch (_: OutOfMemoryError) {
+      null
+    } catch (_: Exception) {
+      null
+    }
+    return loaded ?: page.bitmap
   }
 
   /** Applies filter [mode] to page [index] (0 = Original). The mode is
    *  stored per page Uri, so switching pages never resets it, and
-   *  filters never stack: each applies to the stored original. */
+   *  filters never stack: each applies to the base reloaded from the
+   *  page's Uri (see loadFilterBase). */
   fun applyFilter(index: Int, mode: Int) {
     val page = vm.pages.getOrNull(index) ?: return
-    if (busy) {
-      Toast.makeText(ctx, "Please wait — finishing the last edit", Toast.LENGTH_SHORT).show()
+    if (vm.editBusy.value) {
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_edit_busy"), Toast.LENGTH_SHORT).show()
       return
     }
-    val base = vm.filterOriginals.getOrPut(page.uri) { page.bitmap }
+    vm.editBusy.value = true
     vm.filterModes[page.uri] = mode
-    if (mode == 0) replacePage(index, base, newOriginal = base)
-    else replacePage(index, ImagePageEditor.applyFilter(base, mode), newOriginal = base)
+    scope.launch {
+      try {
+        val base = loadFilterBase(page)
+        val result = if (mode == 0) base else ImagePageEditor.applyFilter(base, mode)
+        replacePageInternal(index, result, base)
+      } catch (_: OutOfMemoryError) {
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_edit_failed"), Toast.LENGTH_SHORT).show()
+      } catch (_: Exception) {
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_edit_failed"), Toast.LENGTH_SHORT).show()
+      } finally {
+        vm.editBusy.value = false
+      }
+    }
   }
 
   fun filterModeFor(page: PageItem): Int = vm.filterModes[page.uri] ?: 0
@@ -1458,7 +1684,8 @@ class PageEditor(
 //   FIXED defaults — A4 page (595x842pt, fixed whatever the crop),
 //   full-resolution quality, no watermark, no page numbers, 15mm
 //   default margins (no option controls).
-// - Picker loads at full resolution (loadBitmap cap 8000).
+// - Picker loads at a 2048px working cap (PHASE 2, H2 — the old 8000px
+//   cap kept every phone photo at full resolution in memory).
 // - Crop CUTS by default (RectCropDialog) — the only crop on this
 //   screen; the second crop (Straighten / warp) was removed at the
 //   user's request. Per-page filter state, correct delete, selection
@@ -1507,13 +1734,34 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       showDone = false
       doneFile = null
       scope.launch(Dispatchers.IO) {
-        // Full resolution: cap 8000 effectively keeps the source pixels.
-        val added = selected.mapNotNull { uri ->
-          PdfEngine.loadBitmap(ctx, uri, 8000)?.let { bmp -> PageItem(uri, bmp) }
+        // PHASE 2 (H2): 2048px long-side working cap — a 4000x3000 phone
+        // photo stays ~12 MB instead of ~48 MB, and every page holds
+        // exactly one bitmap (no second full-res copy anywhere).
+        // PHASE 2 (M5): unloadable photos are counted, not silently
+        // dropped — the user is told how many were skipped.
+        var skipped = 0
+        val added = mutableListOf<PageItem>()
+        for (uri in selected) {
+          val bmp = try {
+            PdfEngine.loadBitmap(ctx, uri, 2048)
+          } catch (_: OutOfMemoryError) {
+            null
+          } catch (_: Exception) {
+            null
+          }
+          if (bmp == null) skipped++ else added.add(PageItem(uri, bmp))
         }
         withContext(Dispatchers.Main) {
           val firstNew = pages.size
           vm.setPages(pages + added, selectFirstNew = firstNew)
+          if (skipped > 0) {
+            Toast.makeText(
+              ctx,
+              if (skipped == 1) LocaleHelper.t(ctx, "toast_photo_skipped_one")
+              else LocaleHelper.t(ctx, "toast_photos_skipped").replace("{n}", "$skipped"),
+              Toast.LENGTH_LONG
+            ).show()
+          }
         }
       }
     }
@@ -1521,13 +1769,12 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
 
   fun buildPdf() {
     if (pages.isEmpty()) {
-      Toast.makeText(ctx, "Please select at least 1 image", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_select_image"), Toast.LENGTH_SHORT).show()
       return
     }
     isProcessing = true
     progressText = "Page 1 of ${pages.size}"
     scope.launch {
-      val out = PdfEngine.outFile(ctx, "IMG_PDF_${System.currentTimeMillis()}.pdf")
       // FIX 2026-11-18 (fixed A4 page): pageSize was "Original", so the
       // PDF page became the cropped image's own pixel size — the page
       // changed with every crop. Now FIXED A4 (595x842pt) with the
@@ -1549,6 +1796,12 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
             scope.launch { progressText = "Page $done of $total" }
           }
         }
+      } catch (_: OutOfMemoryError) {
+        // PHASE 2 (H2): out of memory mid-build — the page set is kept
+        // and the user can retry (fewer/smaller photos). Never crash,
+        // never silently drop the pages.
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_images_pdf_oom"), Toast.LENGTH_LONG).show()
+        null
       } catch (e: Exception) {
         e.printStackTrace()
         null
@@ -1556,7 +1809,7 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       isProcessing = false
       progressText = ""
       if (file != null) saveFile(file)
-      else Toast.makeText(ctx, "Failed to create PDF", Toast.LENGTH_SHORT).show()
+      else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_create_pdf_failed"), Toast.LENGTH_SHORT).show()
     }
   }
 
@@ -1567,12 +1820,10 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         bitmap = page.bitmap,
         theme = theme,
         onApply = { bmp ->
-          vm.filterOriginals.remove(page.uri)
           editor.replacePage(index, bmp, newOriginal = bmp) { cropIndex = null }
         },
         onDismiss = { cropIndex = null },
         onRotate = {
-          vm.filterOriginals.remove(page.uri)
           editor.replacePage(index, ImagePageEditor.rotate90(page.bitmap), newOriginal = null)
           cropIndex = null
         }
@@ -1618,12 +1869,12 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
 
   ToolScreenContainer("Images to PDF", theme, onBack) {
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-      Text("Select photos from gallery", fontSize = Ds.BODY_SP.sp, color = theme.text)
+      Text(LocaleHelper.t(ctx, "label_select_photos"), fontSize = Ds.BODY_SP.sp, color = theme.text)
       Spacer(Modifier.height(Ds.s16))
 
       if (pages.isEmpty()) {
         ChamiPrimaryButton(
-          text = "Choose images",
+          text = LocaleHelper.t(ctx, "btn_choose_images"),
           onClick = { vibrate(); picker.launch("image/*") },
           modifier = Modifier.fillMaxWidth()
         )
@@ -1639,12 +1890,14 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         )
         Spacer(Modifier.height(Ds.s8))
         Text(
-          "Page ${safeSelected + 1} of ${pages.size}",
+          LocaleHelper.t(ctx, "label_page_of")
+            .replace("{n}", "${safeSelected + 1}")
+            .replace("{total}", "${pages.size}"),
           fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text
         )
         if (pages.size > 50) {
           Spacer(Modifier.height(Ds.s4))
-          HintText("Over 50 pages — processing may take longer.")
+          HintText(LocaleHelper.t(ctx, "hint_over_50_pages"))
         }
         Spacer(Modifier.height(Ds.s12))
         PageThumbnailStrip(
@@ -1669,14 +1922,14 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       label = LocaleHelper.t(ctx, "slide_convert"),
       theme = theme,
       enabled = !isProcessing && pages.isNotEmpty(),
-      disabledReason = if (pages.isEmpty()) "Select at least 1 image first" else null,
+      disabledReason = if (pages.isEmpty()) LocaleHelper.t(ctx, "reason_select_image_first") else null,
       onSlideComplete = { vibrate(); buildPdf() }
     )
   }
 }
 
 // 3. PDF TO IMAGES — JPG (default) / PNG, resolution Screen 150 /
-// High 300 (default) / Print 600 DPI, page range with live validation,
+// High 300 (default) DPI, page range with live validation,
 // per-page progress, images named NAME_p1, NAME_p2... The save folder
 // is asked ONCE and every image is saved there, then a Done screen
 // lists them all.
@@ -1694,15 +1947,39 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
   var pageOnePreview by remember { mutableStateOf<Bitmap?>(null) }
   // FIX 2026-11-18 (Fix 6): page selection. All pages are selected by
   // default (same behaviour as before); tapping a thumbnail toggles
-  // it. Thumbnails render in the background, one page at a time, at
-  // small scale; picking another PDF cancels the old render job so
-  // stale thumbnails never land on the new document.
+  // it. PHASE 2 (H10): thumbnails render ON DEMAND per visible grid
+  // cell (see the LazyVerticalGrid below), capped at MAX_PAGE_THUMBS —
+  // the old version rendered every page up front in a background job.
   val selectedPages = remember { mutableStateListOf<Int>() }
+  // PHASE 2 (H10): page thumbnails are capped and owned by this screen.
+  // They render ON DEMAND per visible grid cell (see the LazyVerticalGrid
+  // below) instead of all up front, the map holds at most MAX_PAGE_THUMBS
+  // entries (farthest pages evicted first), every bitmap is recycled when
+  // its entry is replaced/evicted/cleared, and the whole map plus the
+  // page-1 preview are recycled when the screen leaves composition.
+  // A 200-page PDF no longer holds 200 thumbnails in memory.
   val pageThumbs = remember { mutableStateMapOf<Int, Bitmap>() }
-  var thumbJob by remember { mutableStateOf<Job?>(null) }
-  // FIX 2026-11-18 (report #19): thumbnail-render progress + cancel.
-  var thumbsRendering by remember { mutableStateOf(false) }
-  var thumbRenderProgress by remember { mutableStateOf("") }
+  fun recyclePageThumb(page: Int) {
+    pageThumbs.remove(page)?.let { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+  }
+  fun recycleAllPageThumbs() {
+    pageThumbs.values.forEach { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+    pageThumbs.clear()
+  }
+  fun putPageThumb(page: Int, bmp: Bitmap) {
+    recyclePageThumb(page)
+    while (pageThumbs.size >= MAX_PAGE_THUMBS) {
+      val farthest = pageThumbs.keys.maxByOrNull { kotlin.math.abs(it - page) } ?: break
+      recyclePageThumb(farthest)
+    }
+    pageThumbs[page] = bmp
+  }
+  DisposableEffect(Unit) {
+    onDispose {
+      recycleAllPageThumbs()
+      pageOnePreview?.let { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+    }
+  }
   // FIX 2026-11-18 (report #24): a picked PDF that cannot be opened.
   var pdfLoadFailed by remember { mutableStateOf(false) }
   var loadedPdfUri by remember { mutableStateOf<Uri?>(null) }
@@ -1722,7 +1999,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       doneFiles = files.map { DoneFileInfo(it, if (format == "PNG") "image/png" else "image/jpeg", formatSizeText(it.length())) }
       showDone = true
     },
-    onCancelled = { Toast.makeText(ctx, "Save cancelled — images kept in Chami folder", Toast.LENGTH_SHORT).show() },
+    onCancelled = { Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_cancelled_images"), Toast.LENGTH_SHORT).show() },
     onSavedToFolder = { uri -> savedLocationText = displayNameOf(ctx, uri) }
   )
   fun vibrate() {
@@ -1737,45 +2014,35 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
   // when a restored Uri has no page count yet.
   fun loadPdf(uri: Uri) {
     loadedPdfUri = uri
-    thumbJob?.cancel()
-    thumbsRendering = true
-    thumbRenderProgress = ""
-    thumbJob = scope.launch(Dispatchers.IO) {
+    scope.launch(Dispatchers.IO) {
       val n = PdfEngine.pageCount(ctx, uri)
       val bmp = PdfReader.renderPageBitmap(ctx, uri, 0, 2.0f)
       withContext(Dispatchers.Main) {
         totalPages = n
         pdfLoadFailed = n == 0
         for (i in 1..n) selectedPages.add(i)
+        // PHASE 2 (H10): the old preview is recycled before the new one
+        // lands, so re-picking never leaks a full-size page bitmap.
+        val oldPreview = pageOnePreview
         pageOnePreview = bmp
+        if (oldPreview != null && oldPreview !== bmp && !oldPreview.isRecycled) oldPreview.recycle()
         rangeFrom = "1"
         rangeTo = "$n"
-      }
-      // Thumbnails for every page, small scale, one at a time.
-      // FIX 2026-11-18 (report #19): progress ("Rendering page X of
-      // N") with a Cancel button; the loop stops promptly when the
-      // job is cancelled.
-      for (p in 1..n) {
-        if (!isActive) break
-        withContext(Dispatchers.Main) { thumbRenderProgress = "Rendering page $p of $n" }
-        val thumb = PdfReader.renderPageBitmap(ctx, uri, p - 1, 0.4f) ?: continue
-        withContext(Dispatchers.Main) { pageThumbs[p] = thumb }
-      }
-      withContext(Dispatchers.Main) {
-        thumbsRendering = false
-        thumbRenderProgress = ""
       }
     }
   }
 
   val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { selected ->
     pdfUri = selected
+    // PHASE 2 (H10): re-picking recycles every held thumbnail and the
+    // old preview instead of dropping the Bitmaps for the GC to find.
+    recycleAllPageThumbs()
+    pageOnePreview?.let { bmp -> if (!bmp.isRecycled) bmp.recycle() }
     pageOnePreview = null
     showDone = false
     doneFiles = null
     pdfLoadFailed = false
     selectedPages.clear()
-    pageThumbs.clear()
     if (selected != null) loadPdf(selected)
   }
 
@@ -1798,53 +2065,98 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
   fun extract() {
     val u = pdfUri ?: return
     if (!rangeValid) {
-      Toast.makeText(ctx, "Check the page range first", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_range_check"), Toast.LENGTH_SHORT).show()
       return
     }
     if (effectivePages.isEmpty()) {
-      Toast.makeText(ctx, "Select at least 1 page to extract", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_select_page_extract"), Toast.LENGTH_SHORT).show()
       return
     }
     isProcessing = true
     scope.launch {
       val dir = File(ctx.getExternalFilesDir(null), "Chami/Images_${System.currentTimeMillis()}")
       if (!dir.exists()) dir.mkdirs()
-      val dpi = when (resolution) { "Screen 150" -> 150; "Print 600" -> 600; else -> 300 }
+      // PHASE 2 (H3): "Print 600" is gone — one A4 page at 600 DPI is a
+      // ~139 MB bitmap. Screen 150 / High 300 only. A saved "Print 600"
+      // value from an older run falls through to High 300 here.
+      val dpi = if (resolution == "Screen 150") 150 else 300
       val scale = dpi / 72f
       val fmt = if (format == "PNG") Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
       val ext = if (format == "PNG") "png" else "jpg"
       val base = baseNameOf(ctx, u, "PDF")
       val files = mutableListOf<File>()
+      // PHASE 2 (M5): a page whose bitmap cannot be rendered (the engine
+      // returns null, e.g. on out-of-memory) is a FAILED page, counted
+      // and reported — never silently skipped.
+      var failedPages = 0
       withContext(Dispatchers.IO) {
         for ((idx, p) in effectivePages.withIndex()) {
           withContext(Dispatchers.Main) { progressText = "Image ${idx + 1} of ${effectivePages.size}" }
-          val bmp = PdfReader.renderPageBitmap(ctx, u, p - 1, scale) ?: continue
+          val bmp = try {
+            PdfReader.renderPageBitmap(ctx, u, p - 1, scale)
+          } catch (_: OutOfMemoryError) {
+            null
+          } catch (_: Exception) {
+            null
+          }
+          if (bmp == null) {
+            failedPages++
+            continue
+          }
           val f = File(dir, "${base}_p$p.$ext")
           try {
             FileOutputStream(f).use { bmp.compress(fmt, 90, it) }
             files.add(f)
-          } catch (_: Exception) { }
+          } catch (_: Exception) {
+            // PHASE 2 (L18): a failed write leaves no orphan partial
+            // file behind in the Chami folder.
+            f.delete()
+            failedPages++
+          }
           bmp.recycle()
         }
       }
       isProcessing = false
       progressText = ""
       if (files.isNotEmpty()) {
+        if (failedPages > 0) {
+          Toast.makeText(
+            ctx,
+            LocaleHelper.t(ctx, "toast_extract_partial")
+              .replace("{saved}", "${files.size}")
+              .replace("{total}", "${effectivePages.size}")
+              .replace("{failed}", "$failedPages"),
+            Toast.LENGTH_LONG
+          ).show()
+        }
         val mime = if (format == "PNG") "image/png" else "image/jpeg"
         folderSave(files.map { it to mime })
       } else {
-        Toast.makeText(ctx, "Could not extract images", Toast.LENGTH_SHORT).show()
+        // Whole extract failed — the page set and selection are kept,
+        // so the user can retry (e.g. at a lower resolution).
+        Toast.makeText(
+          ctx,
+          LocaleHelper.t(ctx, "toast_extract_failed").replace("{failed}", "$failedPages"),
+          Toast.LENGTH_LONG
+        ).show()
       }
     }
   }
 
+  // PHASE 2 (H3): a "Print 600" resolution saved by an older run is
+  // shown as High 300 — the 600 DPI choice was removed (one A4 page
+  // at 600 DPI allocates ~139 MB and crashes most phones).
+  val resolutionLabel = if (resolution == "Screen 150") "Screen 150" else "High 300"
   if (showDone && doneFiles != null) {
     MultiDoneScreen(
       files = doneFiles!!,
-      title = "Images extracted",
+      title = LocaleHelper.t(ctx, "done_images_title"),
       summaryLines = listOf(
-        "${doneFiles!!.size} images created as $format at $resolution DPI.",
-        "Saved to the folder you chose."
+        LocaleHelper.t(ctx, "done_images_summary")
+          .replace("{n}", "${doneFiles!!.size}")
+          .replace("{format}", format)
+          .replace("{resolution}", resolutionLabel),
+        LocaleHelper.t(ctx, "done_images_saved")
       ),
       theme = theme,
       onBackHome = onBack,
@@ -1858,7 +2170,9 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
   ToolScreenContainer("PDF to Images", theme, onBack) {
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
       ChamiSecondaryButton(
-        text = if (pdfLoadFailed) "PDF can't be opened — pick another" else if (pdfUri != null) "PDF selected ($totalPages pages)" else "Select PDF",
+        text = if (pdfLoadFailed) LocaleHelper.t(ctx, "btn_pdf_unopenable")
+          else if (pdfUri != null) LocaleHelper.t(ctx, "btn_pdf_selected").replace("{n}", "$totalPages")
+          else LocaleHelper.t(ctx, "btn_select_pdf"),
         onClick = { vibrate(); picker.launch("application/pdf") },
         modifier = Modifier.fillMaxWidth()
       )
@@ -1866,24 +2180,12 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       // instead of showing "0 pages" with a disabled slide.
       if (pdfLoadFailed) {
         Spacer(Modifier.height(Ds.s8))
-        Text(UNOPENABLE_PDF_MESSAGE, fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
-      }
-      // FIX 2026-11-18 (report #19): thumbnail-render progress with
-      // a Cancel button that stops the background rendering job.
-      if (thumbsRendering) {
-        Spacer(Modifier.height(Ds.s16))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-          Text(thumbRenderProgress, fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
-          TextButton(onClick = { thumbJob?.cancel(); thumbsRendering = false; thumbRenderProgress = "" }, modifier = Modifier.height(Ds.minTouch)) {
-            Text("Cancel", color = ChamiColors.errorRed, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
-          }
-        }
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
+        Text(LocaleHelper.t(ctx, "label_pdf_unopenable"), fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
       }
 
       if (pageOnePreview != null) {
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Preview (page 1 of $totalPages)", color = theme.text)
+        SectionText(LocaleHelper.t(ctx, "label_preview_page_1").replace("{n}", "$totalPages"), color = theme.text)
         Spacer(Modifier.height(Ds.s8))
         Column(
           modifier = Modifier
@@ -1904,7 +2206,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
 
       if (pdfUri != null) {
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Format", color = theme.text)
+        SectionText(LocaleHelper.t(ctx, "label_format"), color = theme.text)
         Spacer(Modifier.height(Ds.s8))
         Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
           listOf("JPG", "PNG").forEach { f ->
@@ -1913,29 +2215,30 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         }
         if (format == "PNG") {
           Spacer(Modifier.height(Ds.s4))
-          HintText("PNG files are larger than JPG.")
+          HintText(LocaleHelper.t(ctx, "hint_png_larger"))
         }
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Resolution", color = theme.text)
+        SectionText(LocaleHelper.t(ctx, "label_resolution"), color = theme.text)
         Spacer(Modifier.height(Ds.s8))
         Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          listOf("Screen 150", "High 300", "Print 600").forEach { r ->
-            ChamiChip(r, resolution == r, { vibrate(); resolution = r })
+          // PHASE 2 (H3): "Print 600" removed — see extract().
+          listOf("Screen 150", "High 300").forEach { r ->
+            ChamiChip(r, resolutionLabel == r, { vibrate(); resolution = r })
           }
         }
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Page range", color = theme.text)
+        SectionText(LocaleHelper.t(ctx, "label_page_range"), color = theme.text)
         Spacer(Modifier.height(Ds.s8))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
           DebouncedTextField(
             value = rangeFrom, onValueChange = { rangeFrom = it.filter { ch -> ch.isDigit() } },
-            label = "From page", keyboardType = KeyboardType.Number,
+            label = LocaleHelper.t(ctx, "label_from_page"), keyboardType = KeyboardType.Number,
             isError = !rangeValid,
             modifier = Modifier.weight(1f)
           )
           DebouncedTextField(
             value = rangeTo, onValueChange = { rangeTo = it.filter { ch -> ch.isDigit() } },
-            label = "To page", keyboardType = KeyboardType.Number,
+            label = LocaleHelper.t(ctx, "label_to_page"), keyboardType = KeyboardType.Number,
             isError = !rangeValid,
             modifier = Modifier.weight(1f)
           )
@@ -1943,13 +2246,14 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         if (!rangeValid) {
           Spacer(Modifier.height(Ds.s4))
           Text(
-            "Enter pages from 1 to $totalPages, From before To.",
+            LocaleHelper.t(ctx, "label_range_error").replace("{n}", "$totalPages"),
             fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed
           )
         } else if (imageCount > 0) {
           Spacer(Modifier.height(Ds.s8))
           Text(
-            "$imageCount image${if (imageCount == 1) "" else "s"} will be created",
+            if (imageCount == 1) LocaleHelper.t(ctx, "label_image_will_create_one")
+            else LocaleHelper.t(ctx, "label_images_will_create").replace("{n}", "$imageCount"),
             fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold, color = theme.text
           )
         }
@@ -1959,94 +2263,113 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         // thumbnails, labelled Page N. Extraction converts only the
         // selected pages inside the range above.
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Pages — tap to select", color = theme.text)
+        SectionText(LocaleHelper.t(ctx, "label_pages_tap_select"), color = theme.text)
         Spacer(Modifier.height(Ds.s8))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
           Text(
-            "${selectedPages.size}/$totalPages selected",
+            LocaleHelper.t(ctx, "label_selected_pages_count")
+              .replace("{selected}", "${selectedPages.size}")
+              .replace("{total}", "$totalPages"),
             fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold, color = theme.text
           )
           Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
             TextButton(onClick = { vibrate(); selectedPages.clear(); for (i in 1..totalPages) selectedPages.add(i) }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Select all", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text(LocaleHelper.t(ctx, "btn_select_all"), color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
             TextButton(onClick = { vibrate(); selectedPages.clear() }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Clear", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text(LocaleHelper.t(ctx, "btn_clear"), color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
           }
         }
         Spacer(Modifier.height(Ds.s8))
-        Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          (1..totalPages).chunked(3).forEach { rowPages ->
-            Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-              rowPages.forEach { p ->
-                val isSelected = selectedPages.contains(p)
-                val thumb = pageThumbs[p]
-                Column(
-                  Modifier.weight(1f).clickable {
-                    vibrate()
-                    if (isSelected) selectedPages.remove(p) else selectedPages.add(p)
-                  },
-                  horizontalAlignment = Alignment.CenterHorizontally
-                ) {
+        // PHASE 2 (L6 + H10): lazy grid, not a chunked Column — a
+        // 500-page PDF composes only the visible cells. Each cell
+        // renders its own thumbnail on demand (small scale, one at a
+        // time); the cell's LaunchedEffect is cancelled when the cell
+        // leaves composition, and the map is capped (see putPageThumb),
+        // so a long PDF never holds every thumbnail at once.
+        val pdfU = pdfUri
+        LazyVerticalGrid(
+          columns = GridCells.Fixed(3),
+          modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp),
+          horizontalArrangement = Arrangement.spacedBy(Ds.s8),
+          verticalArrangement = Arrangement.spacedBy(Ds.s8)
+        ) {
+          gridItems((1..totalPages).toList(), key = { it }) { p ->
+            val isSelected = selectedPages.contains(p)
+            val thumb = pageThumbs[p]
+            if (pdfU != null) {
+              LaunchedEffect(p, pdfU) {
+                if (pageThumbs.containsKey(p)) return@LaunchedEffect
+                val rendered = try {
+                  withContext(Dispatchers.IO) { PdfReader.renderPageBitmap(ctx, pdfU, p - 1, 0.4f) }
+                } catch (_: OutOfMemoryError) {
+                  null
+                } catch (_: Exception) {
+                  null
+                }
+                if (rendered != null) putPageThumb(p, rendered)
+              }
+            }
+            Column(
+              Modifier.clickable {
+                vibrate()
+                if (isSelected) selectedPages.remove(p) else selectedPages.add(p)
+              },
+              horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+              Box(
+                Modifier
+                  .fillMaxWidth()
+                  .aspectRatio(595f / 842f)
+                  .clip(RoundedCornerShape(Ds.s8))
+                  .background(theme.card)
+                  .border(
+                    2.dp,
+                    if (isSelected) theme.primary else theme.cardBorder,
+                    RoundedCornerShape(Ds.s8)
+                  ),
+                contentAlignment = Alignment.Center
+              ) {
+                if (thumb != null) {
+                  Image(
+                    bitmap = thumb.asImageBitmap(),
+                    contentDescription = "Page $p",
+                    modifier = Modifier.fillMaxSize().padding(Ds.s4),
+                    contentScale = ContentScale.Fit
+                  )
+                } else {
+                  Text("…", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
+                }
+                if (isSelected) {
                   Box(
                     Modifier
-                      .fillMaxWidth()
-                      .aspectRatio(595f / 842f)
-                      .clip(RoundedCornerShape(Ds.s8))
-                      .background(theme.card)
-                      .border(
-                        2.dp,
-                        if (isSelected) theme.primary else theme.cardBorder,
-                        RoundedCornerShape(Ds.s8)
-                      ),
+                      .align(Alignment.TopEnd)
+                      .padding(Ds.s4)
+                      .size(22.dp)
+                      .clip(CircleShape)
+                      .background(theme.primary)
+                      .border(1.dp, Color.White, CircleShape),
                     contentAlignment = Alignment.Center
                   ) {
-                    if (thumb != null) {
-                      Image(
-                        bitmap = thumb.asImageBitmap(),
-                        contentDescription = "Page $p",
-                        modifier = Modifier.fillMaxSize().padding(Ds.s4),
-                        contentScale = ContentScale.Fit
-                      )
-                    } else {
-                      Text("…", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
-                    }
-                    if (isSelected) {
-                      Box(
-                        Modifier
-                          .align(Alignment.TopEnd)
-                          .padding(Ds.s4)
-                          .size(22.dp)
-                          .clip(CircleShape)
-                          .background(theme.primary)
-                          .border(1.dp, Color.White, CircleShape),
-                        contentAlignment = Alignment.Center
-                      ) {
-                        Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(14.dp))
-                      }
-                    }
+                    Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Color.White, modifier = Modifier.size(14.dp))
                   }
-                  Spacer(Modifier.height(Ds.s4))
-                  Text(
-                    "Page $p",
-                    fontSize = Ds.HINT_SP.sp,
-                    color = if (isSelected) theme.text else theme.textSecondary,
-                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                  )
                 }
               }
-              // Pad a short last row so the cells keep their width.
-              if (rowPages.size < 3) {
-                repeat(3 - rowPages.size) { Spacer(Modifier.weight(1f)) }
-              }
+              Spacer(Modifier.height(Ds.s4))
+              Text(
+                LocaleHelper.t(ctx, "label_page_number").replace("{n}", "$p"),
+                fontSize = Ds.HINT_SP.sp,
+                color = if (isSelected) theme.text else theme.textSecondary,
+                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+              )
             }
           }
         }
         if (selectedPages.isEmpty()) {
           Spacer(Modifier.height(Ds.s8))
           Text(
-            "No pages selected — tap thumbnails to choose which pages to extract.",
+            LocaleHelper.t(ctx, "label_no_pages_selected"),
             fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed
           )
         }
@@ -2065,10 +2388,10 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       theme = theme,
       enabled = !isProcessing && pdfUri != null && !pdfLoadFailed && rangeValid && effectivePages.isNotEmpty(),
       disabledReason = when {
-        pdfUri == null -> "Pick a PDF first"
-        pdfLoadFailed -> UNOPENABLE_PDF_MESSAGE
-        !rangeValid -> "Check the page range first"
-        effectivePages.isEmpty() -> "Select pages first"
+        pdfUri == null -> LocaleHelper.t(ctx, "reason_pick_pdf_first")
+        pdfLoadFailed -> LocaleHelper.t(ctx, "label_pdf_unopenable")
+        !rangeValid -> LocaleHelper.t(ctx, "toast_range_check")
+        effectivePages.isEmpty() -> LocaleHelper.t(ctx, "reason_select_pages_first")
         else -> null
       },
       onSlideComplete = { vibrate(); extract() }
@@ -2119,7 +2442,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       doneFiles = files.map { DoneFileInfo(it, "application/pdf", formatSizeText(it.length())) }
       showDone = true
     },
-    onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() },
+    onCancelled = { Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_cancelled_images"), Toast.LENGTH_SHORT).show() },
     onSavedToFolder = { uri -> savedLocationText = displayNameOf(ctx, uri) }
   )
 
@@ -2208,15 +2531,19 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   fun split() {
     val u = pdfUri ?: return
     if (splitMode == "Selected" && selectedPages.isEmpty()) {
-      Toast.makeText(ctx, "Select at least 1 page to keep", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_select_page_split"), Toast.LENGTH_SHORT).show()
       return
     }
     if (splitMode == "Range" && !rangeValid) {
-      Toast.makeText(ctx, "Check the page range first", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_range_check"), Toast.LENGTH_SHORT).show()
       return
     }
     if (splitMode == "Every N" && totalPages <= 1) {
-      Toast.makeText(ctx, "This PDF has only $totalPages page — nothing to split into parts", Toast.LENGTH_LONG).show()
+      Toast.makeText(
+        ctx,
+        LocaleHelper.t(ctx, "toast_split_one_page").replace("{n}", "$totalPages"),
+        Toast.LENGTH_LONG
+      ).show()
       return
     }
     isProcessing = true
@@ -2249,7 +2576,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       when {
         files.size > 1 -> folderSave(files.map { it to "application/pdf" })
         files.size == 1 -> singleSave(files[0])
-        else -> Toast.makeText(ctx, "Failed to split PDF", Toast.LENGTH_SHORT).show()
+        else -> Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_split_failed"), Toast.LENGTH_SHORT).show()
       }
     }
   }
@@ -2257,8 +2584,11 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   if (showDone && doneFiles != null) {
     MultiDoneScreen(
       files = doneFiles!!,
-      title = "PDF split",
-      summaryLines = listOf("${doneFiles!!.size} parts created.", "All parts saved to the folder you chose."),
+      title = LocaleHelper.t(ctx, "done_split_title"),
+      summaryLines = listOf(
+        LocaleHelper.t(ctx, "done_split_summary").replace("{n}", "${doneFiles!!.size}"),
+        LocaleHelper.t(ctx, "done_split_saved")
+      ),
       theme = theme,
       onBackHome = onBack,
       onOpen = { ShareHelper.openFile(ctx, it, "application/pdf") },
@@ -2282,7 +2612,9 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   ToolScreenContainer("Split PDF", theme, onBack) {
     Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
       ChamiSecondaryButton(
-        text = if (pdfLoadFailed) "PDF can't be opened — pick another" else if (pdfUri != null) "PDF ($totalPages pages)" else "Select PDF",
+        text = if (pdfLoadFailed) LocaleHelper.t(ctx, "btn_pdf_unopenable")
+          else if (pdfUri != null) LocaleHelper.t(ctx, "btn_pdf_selected_split").replace("{n}", "$totalPages")
+          else LocaleHelper.t(ctx, "btn_select_pdf"),
         onClick = { vibrate(); picker.launch("application/pdf") },
         modifier = Modifier.fillMaxWidth()
       )
@@ -2290,16 +2622,23 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       // instead of showing "0 pages" with a disabled slide.
       if (pdfLoadFailed) {
         Spacer(Modifier.height(Ds.s8))
-        Text(UNOPENABLE_PDF_MESSAGE, fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
+        Text(LocaleHelper.t(ctx, "label_pdf_unopenable"), fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
       }
 
       if (totalPages > 0) {
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Split mode", color = theme.text)
+        SectionText(LocaleHelper.t(ctx, "label_split_mode"), color = theme.text)
         Spacer(Modifier.height(Ds.s8))
         Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+          // The mode string is the internal key (splitMode drives the
+          // split logic), so only the DISPLAY text is translated.
           listOf("Selected", "Range", "Every N").forEach { m ->
-            ChamiChip(m, splitMode == m, { vibrate(); splitMode = m })
+            val modeLabel = when (m) {
+              "Selected" -> LocaleHelper.t(ctx, "split_mode_selected")
+              "Range" -> LocaleHelper.t(ctx, "split_mode_range")
+              else -> LocaleHelper.t(ctx, "split_mode_every_n")
+            }
+            ChamiChip(modeLabel, splitMode == m, { vibrate(); splitMode = m })
           }
         }
         if (splitMode == "Range") {
@@ -2307,34 +2646,37 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
           Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
             DebouncedTextField(
               value = rangeFrom, onValueChange = { rangeFrom = it.filter { ch -> ch.isDigit() } },
-              label = "From page", keyboardType = KeyboardType.Number, isError = !rangeValid,
+              label = LocaleHelper.t(ctx, "label_from_page"), keyboardType = KeyboardType.Number, isError = !rangeValid,
               modifier = Modifier.weight(1f)
             )
             DebouncedTextField(
               value = rangeTo, onValueChange = { rangeTo = it.filter { ch -> ch.isDigit() } },
-              label = "To page", keyboardType = KeyboardType.Number, isError = !rangeValid,
+              label = LocaleHelper.t(ctx, "label_to_page"), keyboardType = KeyboardType.Number, isError = !rangeValid,
               modifier = Modifier.weight(1f)
             )
           }
           if (!rangeValid) {
             Spacer(Modifier.height(Ds.s4))
-            Text("Enter pages from 1 to $totalPages, From before To.", fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
+            Text(LocaleHelper.t(ctx, "label_range_error").replace("{n}", "$totalPages"), fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
           }
         }
         if (splitMode == "Every N") {
           Spacer(Modifier.height(Ds.s12))
           DebouncedTextField(
             value = everyN, onValueChange = { everyN = it.filter { ch -> ch.isDigit() } },
-            label = "Pages per part", keyboardType = KeyboardType.Number,
+            label = LocaleHelper.t(ctx, "label_pages_per_part"), keyboardType = KeyboardType.Number,
             isError = nVal <= 0,
-            supportingText = if (nVal <= 0) "Enter at least 1 page per part." else null
+            supportingText = if (nVal <= 0) LocaleHelper.t(ctx, "label_pages_per_part_error") else null
           )
           if (parts.isNotEmpty()) {
             Spacer(Modifier.height(Ds.s12))
             Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
               parts.forEachIndexed { i, range ->
                 Text(
-                  "Part ${i + 1}: pages ${range.first}–${range.last}",
+                  LocaleHelper.t(ctx, "label_part_pages")
+                    .replace("{n}", "${i + 1}")
+                    .replace("{from}", "${range.first}")
+                    .replace("{to}", "${range.last}"),
                   fontSize = Ds.BODY_SP.sp, color = theme.text
                 )
               }
@@ -2344,15 +2686,17 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         Spacer(Modifier.height(Ds.s16))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
           Text(
-            "Pages (${selectedPages.size}/$totalPages)",
+            LocaleHelper.t(ctx, "label_pages_count")
+              .replace("{selected}", "${selectedPages.size}")
+              .replace("{total}", "$totalPages"),
             fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold, color = theme.text
           )
           Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
             TextButton(onClick = { vibrate(); selectedPages.clear(); for (i in 1..totalPages) selectedPages.add(i) }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Select all", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text(LocaleHelper.t(ctx, "btn_select_all"), color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
             TextButton(onClick = { vibrate(); selectedPages.clear() }, modifier = Modifier.height(Ds.minTouch)) {
-              Text("Clear", color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
+              Text(LocaleHelper.t(ctx, "btn_clear"), color = theme.primaryDark, fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.SemiBold)
             }
           }
         }
@@ -2360,61 +2704,64 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         // Page grid (FIX 2026-11-18, report #11): tap a page previews
         // it ONLY — selection is the corner tick, so browsing pages
         // never silently changes what gets split.
-        HintText("Tap a page to preview it — tap the tick to select it.")
+        HintText(LocaleHelper.t(ctx, "hint_split_tap_preview"))
         Spacer(Modifier.height(Ds.s8))
-        Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          (1..totalPages).chunked(5).forEach { rowPages ->
-            Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-              rowPages.forEach { p ->
-                val isSelected = selectedPages.contains(p)
-                val highlighted = inRange(p)
-                Box(
-                  Modifier
-                    .size(Ds.minTouch)
-                    .clip(RoundedCornerShape(Ds.s8))
-                    .background(if (isSelected) theme.primary else theme.card)
-                    .border(
-                      2.dp,
-                      when {
-                        highlighted && splitMode != "Selected" -> ChamiColors.darkGreen
-                        previewPageIndex == p -> theme.primaryDark
-                        else -> theme.cardBorder
-                      },
-                      RoundedCornerShape(Ds.s8)
-                    )
-                    .clickable {
-                      vibrate()
-                      previewPageIndex = p
-                      loadPreviewForPage(p)
-                    },
-                  contentAlignment = Alignment.Center
-                ) {
-                  Text(
-                    "$p",
-                    fontWeight = FontWeight.Bold,
-                    color = if (isSelected) theme.textOnPrimary else theme.text,
-                    fontSize = Ds.BODY_SP.sp
+        // PHASE 2 (L6): lazy grid, not a chunked Column — a 500-page PDF
+        // composes only the visible cells. Stable keys are the page numbers.
+        LazyVerticalGrid(
+          columns = GridCells.Fixed(5),
+          modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+          horizontalArrangement = Arrangement.spacedBy(Ds.s8),
+          verticalArrangement = Arrangement.spacedBy(Ds.s8)
+        ) {
+          gridItems((1..totalPages).toList(), key = { it }) { p ->
+            val isSelected = selectedPages.contains(p)
+            val highlighted = inRange(p)
+            Box(
+              Modifier
+                .size(Ds.minTouch)
+                .clip(RoundedCornerShape(Ds.s8))
+                .background(if (isSelected) theme.primary else theme.card)
+                .border(
+                  2.dp,
+                  when {
+                    highlighted && splitMode != "Selected" -> ChamiColors.darkGreen
+                    previewPageIndex == p -> theme.primaryDark
+                    else -> theme.cardBorder
+                  },
+                  RoundedCornerShape(Ds.s8)
+                )
+                .clickable {
+                  vibrate()
+                  previewPageIndex = p
+                  loadPreviewForPage(p)
+                },
+              contentAlignment = Alignment.Center
+            ) {
+              Text(
+                "$p",
+                fontWeight = FontWeight.Bold,
+                color = if (isSelected) theme.textOnPrimary else theme.text,
+                fontSize = Ds.BODY_SP.sp
+              )
+              // Corner tick: the ONLY way to select/deselect.
+              Box(
+                Modifier
+                  .align(Alignment.TopEnd)
+                  .size(24.dp)
+                  .clip(CircleShape)
+                  .background(if (isSelected) theme.textOnPrimary else theme.cardBorder)
+                  .clickable {
+                    vibrate()
+                    if (isSelected) selectedPages.remove(p) else selectedPages.add(p)
+                  },
+                contentAlignment = Alignment.Center
+              ) {
+                if (isSelected) {
+                  Icon(
+                    Icons.Filled.Check, contentDescription = "Select page $p",
+                    tint = theme.primary, modifier = Modifier.size(16.dp)
                   )
-                  // Corner tick: the ONLY way to select/deselect.
-                  Box(
-                    Modifier
-                      .align(Alignment.TopEnd)
-                      .size(24.dp)
-                      .clip(CircleShape)
-                      .background(if (isSelected) theme.textOnPrimary else theme.cardBorder)
-                      .clickable {
-                        vibrate()
-                        if (isSelected) selectedPages.remove(p) else selectedPages.add(p)
-                      },
-                    contentAlignment = Alignment.Center
-                  ) {
-                    if (isSelected) {
-                      Icon(
-                        Icons.Filled.Check, contentDescription = "Select page $p",
-                        tint = theme.primary, modifier = Modifier.size(16.dp)
-                      )
-                    }
-                  }
                 }
               }
             }
@@ -2423,7 +2770,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
 
         if (pagePreviewBitmap != null) {
           Spacer(Modifier.height(Ds.s16))
-          SectionText("Previewing page $previewPageIndex", color = theme.text)
+          SectionText(LocaleHelper.t(ctx, "label_previewing_page").replace("{n}", "$previewPageIndex"), color = theme.text)
           Spacer(Modifier.height(Ds.s8))
           Column(
             modifier = Modifier
@@ -2442,7 +2789,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
           }
         }
         Spacer(Modifier.height(Ds.s12))
-        HintText("Split pages are rendered as images — text in the new file is not selectable.")
+        HintText(LocaleHelper.t(ctx, "hint_split_rasterised"))
       }
 
       Spacer(Modifier.height(Ds.s16))
@@ -2459,12 +2806,12 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       enabled = !isProcessing && pdfUri != null && !pdfLoadFailed && totalPages > 0 && rangeValid &&
         (splitMode != "Selected" || selectedPages.isNotEmpty()),
       disabledReason = when {
-        pdfUri == null -> "Pick a PDF first"
-        pdfLoadFailed -> UNOPENABLE_PDF_MESSAGE
-        totalPages == 0 -> "Loading PDF…"
-        !rangeValid -> "Check the page range first"
-        splitMode == "Selected" && selectedPages.isEmpty() -> "Select pages first"
-        splitMode == "Every N" && totalPages <= 1 -> "This PDF has only 1 page — nothing to split"
+        pdfUri == null -> LocaleHelper.t(ctx, "reason_pick_pdf_first")
+        pdfLoadFailed -> LocaleHelper.t(ctx, "label_pdf_unopenable")
+        totalPages == 0 -> LocaleHelper.t(ctx, "reason_loading_pdf")
+        !rangeValid -> LocaleHelper.t(ctx, "toast_range_check")
+        splitMode == "Selected" && selectedPages.isEmpty() -> LocaleHelper.t(ctx, "reason_select_pages_first")
+        splitMode == "Every N" && totalPages <= 1 -> LocaleHelper.t(ctx, "reason_split_one_page")
         else -> null
       },
       onSlideComplete = { vibrate(); split() }

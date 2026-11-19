@@ -709,7 +709,11 @@ fun CropEditorDialog(
                   )
                 }
                 .size(Ds.minTouch)
-                .pointerInput(corner, bitmap) {
+                // PHASE 2 (M21): keyed on the display size as well, so a
+                // rotation restarts the handler with fresh geometry
+                // instead of dragging against stale coordinates. (Still
+                // NOT keyed on quad — that would cancel the drag.)
+                .pointerInput(corner, bitmap, dispW, dispH) {
                   detectDragGestures(
                     onDragStart = { activeHandle = corner },
                     onDragEnd = { activeHandle = null },
@@ -741,10 +745,13 @@ fun CropEditorDialog(
                   )
                 }
                 .size(Ds.minTouch)
-                // NOTE: keys are (edge, bitmap) only — NOT quad. Quad
-                // changes on every drag move; keying on it would restart
-                // pointerInput and cancel the drag mid-gesture.
-                .pointerInput(edge, bitmap) {
+                // NOTE: keys are (edge, bitmap, dispW, dispH) — NOT quad.
+                // Quad changes on every drag move; keying on it would
+                // restart pointerInput and cancel the drag mid-gesture.
+                // PHASE 2 (M21): dispW/dispH are in the keys so a rotation
+                // restarts the handler with fresh geometry instead of
+                // dragging against stale coordinates.
+                .pointerInput(edge, bitmap, dispW, dispH) {
                   detectDragGestures(
                     onDragStart = { activeHandle = edge + 4 },
                     onDragEnd = { activeHandle = null },
@@ -1156,7 +1163,11 @@ fun PageList(
     onPagesChange = onPagesChange,
     onAddPages = { },
     onCrop = { cropIndex = it },
-    onDelete = { idx -> onPagesChange(pages.filterIndexed { i, _ -> i != idx }) },
+    onDelete = { idx ->
+      // PHASE 2 (H2): recycle the removed page's bitmap — nothing shows it after this.
+      pages.getOrNull(idx)?.bitmap?.let { bmp -> if (!bmp.isRecycled) bmp.recycle() }
+      onPagesChange(pages.filterIndexed { i, _ -> i != idx })
+    },
     onFilter = { },
     onAdjust = { }
   )

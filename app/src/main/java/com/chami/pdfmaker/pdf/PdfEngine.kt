@@ -28,50 +28,64 @@ object PdfEngine {
     } catch(e:Exception){ null }
   }
 
-  // IMAGES TO PDF - the flagship. Page = A4 595x842 points. Image fits, white background, centred.
-  fun imagesToPdf(ctx:Context, uris:List<Uri>, outFile:File): Boolean {
-    if(uris.isEmpty()) return false
-    return try {
-      val doc = PdfDocument()
-      var pageNo = 1
-      uris.forEach{ uri ->
-        val bmp = loadBitmap(ctx, uri) ?: return@forEach
-        val pageInfo = PdfDocument.PageInfo.Builder(595,842,pageNo++).create()
-        val page = doc.startPage(pageInfo)
-        val c = page.canvas
-        c.drawColor(Color.WHITE)
-        // Fit inside margins 36pt
-        val scale = minOf(523f/bmp.width, 770f/bmp.height)
-        val w = bmp.width*scale; val h = bmp.height*scale
-        val dst = RectF((595-w)/2, (842-h)/2, (595+w)/2, (842+h)/2)
-        c.drawBitmap(bmp, null, dst, null)
-        doc.finishPage(page); bmp.recycle()
-      }
-      FileOutputStream(outFile).use{ doc.writeTo(it) }; doc.close(); true
-    } catch(e:Exception){ e.printStackTrace(); false }
-  }
+  // NOTE (L9, Phase 2): the legacy imagesToPdf / passportPhoto /
+  // passportPhotoSheet8 functions were deleted — a grep confirms zero
+  // callers in app/src/main, and the tests that covered imagesToPdf
+  // now cover buildImagesPdf instead. buildImagesPdf below is the ONE
+  // images-to-PDF implementation.
 
-  // PDF TO IMAGES - renders each page to JPG, quality 85, max width 1500
+
+  // PDF TO IMAGES - renders each page to JPG, quality 85, max width 1500.
+  // H7: renderer / fd / page / bitmap are closed/recycled in finally
+  // blocks, so a mid-loop failure can never leak them.
   fun pdfToImages(ctx:Context, pdfUri:Uri, outDir:File, onPage:(Int,File)->Unit): Int {
     var count=0
+    var pfd: ParcelFileDescriptor? = null
+    var renderer: PdfRenderer? = null
     try {
-      val pfd = ctx.contentResolver.openFileDescriptor(pdfUri,"r") ?: return 0
-      val renderer = PdfRenderer(pfd)
+      pfd = ctx.contentResolver.openFileDescriptor(pdfUri,"r") ?: return 0
+      renderer = PdfRenderer(pfd)
       for(i in 0 until renderer.pageCount){
-        val page = renderer.openPage(i)
-        val bmp = Bitmap.createBitmap(page.width, page.height, Bitmap.Config.ARGB_8888)
-        bmp.eraseColor(Color.WHITE); page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-        val f = File(outDir,"page_${i+1}.jpg")
-        FileOutputStream(f).use{ bmp.compress(Bitmap.CompressFormat.JPEG,85,it) }
-        bmp.recycle(); page.close(); onPage(i+1,f); count++
+        var page: PdfRenderer.Page? = null
+        var bmp: Bitmap? = null
+        try {
+          page = renderer.openPage(i)
+          bmp = Bitmap.createBitmap(page.width, page.height, Bitmap.Config.ARGB_8888)
+          bmp.eraseColor(Color.WHITE); page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+          val f = File(outDir,"page_${i+1}.jpg")
+          FileOutputStream(f).use{ bmp.compress(Bitmap.CompressFormat.JPEG,85,it) }
+          onPage(i+1,f); count++
+        } finally {
+          bmp?.recycle()
+          try { page?.close() } catch (_: Exception) {}
+        }
       }
-      renderer.close(); pfd.close()
     } catch(e:Exception){ e.printStackTrace() }
+      catch(e:OutOfMemoryError){ e.printStackTrace() }
+    finally {
+      try { renderer?.close() } catch (_: Exception) {}
+      try { pfd?.close() } catch (_: Exception) {}
+    }
     return count
   }
 
+  // NOTE (M7): an encrypted PDF cannot be opened by PdfRenderer, so
+  // pageCount returns 0 for it — that means "unreadable here", not
+  // "empty". Callers that need to tell the two apart must check
+  // PdfProtector.isEncrypted(ctx, uri) first (e.g. Reader search).
   fun pageCount(ctx:Context, pdfUri:Uri): Int {
-    return try { val pfd=ctx.contentResolver.openFileDescriptor(pdfUri,"r") ?: return 0; val r=PdfRenderer(pfd); val n=r.pageCount; r.close(); pfd.close(); n } catch(e:Exception){ 0 }
+    var pfd: ParcelFileDescriptor? = null
+    var renderer: PdfRenderer? = null
+    return try {
+      pfd = ctx.contentResolver.openFileDescriptor(pdfUri,"r") ?: return 0
+      renderer = PdfRenderer(pfd)
+      renderer.pageCount
+    } catch(e:Exception){ 0 }
+      catch(e:OutOfMemoryError){ 0 }
+    finally {
+      try { renderer?.close() } catch (_: Exception) {}
+      try { pfd?.close() } catch (_: Exception) {}
+    }
   }
 
   // SPLIT - keep only pages in keepSet (1-based). MERGE - pass multiple PDFs, all pages in order.
@@ -82,29 +96,47 @@ object PdfEngine {
   // copied as objects with this codebase's libraries. Do not describe
   // Merge / Split output as keeping text.
   fun copyPages(ctx:Context, sources:List<Pair<Uri,Set<Int>?>>, outFile:File): Boolean {
-    return try {
-      val doc = PdfDocument(); var pageNo=1
+    val doc = PdfDocument(); var pageNo=1
+    try {
       sources.forEach{ (uri, keep) ->
-        val pfd = ctx.contentResolver.openFileDescriptor(uri,"r") ?: return@forEach
-        val renderer = PdfRenderer(pfd)
-        for(i in 0 until renderer.pageCount){
-          if(keep!=null && !keep.contains(i+1)) continue
-          val page = renderer.openPage(i)
-          // Render at 2x for sharp text, then draw into A4 page
-          val bmp = Bitmap.createBitmap(page.width*2, page.height*2, Bitmap.Config.ARGB_8888)
-          bmp.eraseColor(Color.WHITE); page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-          val info = PdfDocument.PageInfo.Builder(595,842,pageNo++).create()
-          val np = doc.startPage(info); np.canvas.drawColor(Color.WHITE)
-          np.canvas.drawBitmap(bmp,null,RectF(36f,36f,559f,806f),null); doc.finishPage(np)
-          bmp.recycle(); page.close()
+        var pfd: ParcelFileDescriptor? = null
+        var renderer: PdfRenderer? = null
+        try {
+          pfd = ctx.contentResolver.openFileDescriptor(uri,"r") ?: return@forEach
+          renderer = PdfRenderer(pfd)
+          for(i in 0 until renderer.pageCount){
+            if(keep!=null && !keep.contains(i+1)) continue
+            var page: PdfRenderer.Page? = null
+            var bmp: Bitmap? = null
+            try {
+              page = renderer.openPage(i)
+              // Render at 2x for sharp text, then draw into A4 page
+              bmp = Bitmap.createBitmap(page.width*2, page.height*2, Bitmap.Config.ARGB_8888)
+              bmp.eraseColor(Color.WHITE); page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+              val info = PdfDocument.PageInfo.Builder(595,842,pageNo++).create()
+              val np = doc.startPage(info); np.canvas.drawColor(Color.WHITE)
+              np.canvas.drawBitmap(bmp,null,RectF(36f,36f,559f,806f),null); doc.finishPage(np)
+            } finally {
+              bmp?.recycle()
+              try { page?.close() } catch (_: Exception) {}
+            }
+          }
+        } finally {
+          try { renderer?.close() } catch (_: Exception) {}
+          try { pfd?.close() } catch (_: Exception) {}
         }
-        renderer.close(); pfd.close()
       }
-      FileOutputStream(outFile).use{ doc.writeTo(it) }; doc.close(); true
+      FileOutputStream(outFile).use{ doc.writeTo(it) }; true
     } catch(e:Exception){ e.printStackTrace(); false }
+      catch(e:OutOfMemoryError){ false }
+    finally {
+      try { doc.close() } catch (_: Exception) {}
+    }
   }
 
-  // COMPRESS TO EXACT KB - binary search quality 95 -> 20, then downscale if still too big.
+  // COMPRESS TO EXACT KB - binary search quality 95 -> 20, then loop
+  // the 0.8x downscale (max 8 iterations, down to a 64px short side)
+  // until the target is met; the smallest bytes seen are kept.
   // Keep-smaller (#15, report item 15): if the JPEG output is NOT
   // smaller than the original, the original is kept — but NEVER by
   // copying non-JPEG bytes into this .jpg output. A JPEG original is
@@ -114,20 +146,39 @@ object PdfEngine {
   // the output should use PdfCompress.keepSmallerImage, which keeps
   // such an original in a correctly-named .png/.webp file.
   fun compressImageToKb(ctx:Context, uri:Uri, targetKb:Int, outFile:File): Boolean {
+    // `bmp` always points at the current working bitmap so the finally
+    // below recycles exactly that one, once, on every exit path.
+    var bmp: Bitmap? = null
     return try {
-      var bmp = loadBitmap(ctx, uri, 2000) ?: return false
+      bmp = loadBitmap(ctx, uri, 2000) ?: return false
+      var cur: Bitmap = bmp!!
       var quality=95; var bytes:ByteArray
       while(true){
-        val baos=ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG,quality,baos); bytes=baos.toByteArray()
+        val baos=ByteArrayOutputStream(); cur.compress(Bitmap.CompressFormat.JPEG,quality,baos); bytes=baos.toByteArray()
         if(bytes.size <= targetKb*1024 || quality<=20) break
         quality-=10
       }
-      if(bytes.size > targetKb*1024){
-        // Downscale 0.8x and retry once - this is what actually hits 100KB for photos
-        val w=(bmp.width*0.8).toInt(); val h=(bmp.height*0.8).toInt()
-        val small=Bitmap.createScaledBitmap(bmp,w,h,true); bmp.recycle(); bmp=small
-        val baos=ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG,70,baos); bytes=baos.toByteArray()
+      var bestBytes = bytes
+      // M15: loop the downscale instead of a single 0.8x retry, so a
+      // very large image can actually reach its KB target.
+      var downscales = 0
+      while(bestBytes.size > targetKb*1024 && downscales < 8 &&
+            minOf(cur.width, cur.height) > 64) {
+        try {
+          val w=(cur.width*0.8).toInt().coerceAtLeast(1)
+          val h=(cur.height*0.8).toInt().coerceAtLeast(1)
+          val small=Bitmap.createScaledBitmap(cur,w,h,true)
+          cur.recycle(); cur=small; bmp=small
+          val baos=ByteArrayOutputStream(); cur.compress(Bitmap.CompressFormat.JPEG,70,baos)
+          val attempt=baos.toByteArray()
+          if(attempt.size < bestBytes.size) bestBytes=attempt
+          downscales++
+        } catch(e:OutOfMemoryError){
+          // Keep the best result so far instead of crashing.
+          break
+        }
       }
+      bytes = bestBytes
       // Safety: if the JPEG is not smaller than the original, keep the
       // smaller one — only when the formats agree (#15). Copying a PNG
       // original over a .jpg output would corrupt the file's format.
@@ -137,11 +188,15 @@ object PdfEngine {
         ctx.contentResolver.openInputStream(uri)?.use { input ->
           FileOutputStream(outFile).use { o -> input.copyTo(o) }
         }
-        bmp.recycle(); return true
+        return true
       }
       FileOutputStream(outFile).use{ it.write(bytes) }
-      bmp.recycle(); true
+      true
     } catch(e:Exception){ false }
+      catch(e:OutOfMemoryError){ false }
+    finally {
+      bmp?.recycle()
+    }
   }
 
   // IMAGE RESIZE + CONVERT: width/height in px, format JPG/PNG/WEBP.
@@ -149,13 +204,20 @@ object PdfEngine {
   // aspect ratio FIRST, then scaled to the exact target size — never
   // stretched. A landscape photo resized to 1080x1350 loses its sides,
   // it does not come out tall and distorted.
+  // H4: the target size is capped (1..4096 per side, max 16,000,000
+  // pixels) and OutOfMemoryError is caught — a typo like 10000x10000
+  // returns false instead of crashing the app. The screen enforces
+  // the same caps in dimsValid.
   fun resizeConvert(ctx:Context, uri:Uri, newW:Int, newH:Int, format:Bitmap.CompressFormat, outFile:File): Boolean {
+    if (newW !in 1..4096 || newH !in 1..4096) return false
+    if (newW.toLong() * newH.toLong() > 16_000_000L) return false
+    var bmp: Bitmap? = null
+    var cropped: Bitmap? = null
+    var resized: Bitmap? = null
     return try {
-      if (newW <= 0 || newH <= 0) return false
-      val bmp=loadBitmap(ctx,uri,3000) ?: return false
+      bmp = loadBitmap(ctx,uri,3000) ?: return false
       val targetAspect = newW.toFloat() / newH.toFloat()
       val srcAspect = bmp.width.toFloat() / bmp.height.toFloat()
-      val cropped: Bitmap
       if (srcAspect > targetAspect) {
         // Source is wider than the target: crop the sides.
         val cropW = (bmp.height * targetAspect).toInt().coerceIn(1, bmp.width)
@@ -167,47 +229,16 @@ object PdfEngine {
         val y = ((bmp.height - cropH) / 2).coerceAtLeast(0)
         cropped = Bitmap.createBitmap(bmp, 0, y, bmp.width, cropH)
       }
-      val resized=Bitmap.createScaledBitmap(cropped,newW,newH,true)
+      resized = Bitmap.createScaledBitmap(cropped!!,newW,newH,true)
       FileOutputStream(outFile).use{ resized.compress(format,90,it) }
-      bmp.recycle(); if (cropped !== bmp) cropped.recycle(); resized.recycle(); true } catch(e:Exception){ false }
-  }
-
-  // PASSPORT PHOTO 1-8: crop centre square, resize to 413x531 (35x45mm @300dpi), white bg
-  fun passportPhoto(ctx:Context, uri:Uri, outFile:File): Boolean {
-    return try { val bmp=loadBitmap(ctx,uri,2000) ?: return false
-      val side=minOf(bmp.width,bmp.height)
-      val cropped=Bitmap.createBitmap(bmp,(bmp.width-side)/2,(bmp.height-side)/2,side,side)
-      val out=Bitmap.createBitmap(413,531,Bitmap.Config.ARGB_8888)
-      val c=Canvas(out); c.drawColor(Color.WHITE); c.drawBitmap(cropped,null,Rect(0,0,413,531),null)
-      FileOutputStream(outFile).use{ out.compress(Bitmap.CompressFormat.JPEG,95,it) }
-      bmp.recycle(); cropped.recycle(); out.recycle(); true } catch(e:Exception){ false }
-  }
-
-  // 8-up sheet on A4
-  fun passportPhotoSheet8(ctx:Context, singlePhotoFile:File, outFile:File): Boolean {
-    return try {
-      val bmp = BitmapFactory.decodeFile(singlePhotoFile.absolutePath) ?: return false
-      val doc = PdfDocument()
-      val pageInfo = PdfDocument.PageInfo.Builder(595,842,1).create()
-      val page = doc.startPage(pageInfo)
-      val c = page.canvas
-      c.drawColor(Color.WHITE)
-      val pw = 200f; val ph = 155f
-      val startX = 60f; val startY = 80f
-      val gapX = 75f; val gapY = 25f
-      for (row in 0 until 4) {
-        for (col in 0 until 2) {
-          val left = startX + col * (pw + gapX)
-          val top = startY + row * (ph + gapY)
-          c.drawBitmap(bmp, null, RectF(left, top, left + pw, top + ph), null)
-        }
-      }
-      doc.finishPage(page)
-      FileOutputStream(outFile).use { doc.writeTo(it) }
-      doc.close()
-      bmp.recycle()
       true
-    } catch(e:Exception) { false }
+    } catch(e:Exception){ false }
+      catch(e:OutOfMemoryError){ false }
+    finally {
+      resized?.recycle()
+      if (cropped !== null && cropped !== bmp) cropped.recycle()
+      bmp?.recycle()
+    }
   }
 
   // ------------------------------------------------------------------
@@ -227,7 +258,9 @@ object PdfEngine {
   // Page size:
   //   "A4" = 595x842pt, "Letter" = 612x792pt, "Original" = the image's
   //     TRUE size in points (width x height px at 72dpi) — NOT capped
-  //     to 595x842. Unknown values fall back to A4.
+  //     to 595x842, but capped at 14400pt per side (M1: the
+  //     PdfDocument limit), scaling down preserving aspect when the
+  //     image is larger. Unknown values fall back to A4.
   // Margins (marginsMm, all sides) apply only to A4 / Letter; they are
   // ignored for "Original" (the page IS the image). 1mm = 72/25.4 pt.
   // Watermark: size scales with the page (not a fixed 36/48pt), opacity
@@ -299,8 +332,14 @@ object PdfEngine {
         try {
           val (pw, ph) = when (options.pageSize.trim()) {
             "Letter" -> Pair(612, 792)
-            // "Original": TRUE image size in points (px at 72dpi).
-            "Original" -> Pair(bmp.width.coerceAtLeast(1), bmp.height.coerceAtLeast(1))
+            // "Original": TRUE image size in points (px at 72dpi),
+            // capped at 14400pt per side (M1, the PdfDocument limit):
+            // a larger image is scaled down preserving aspect, so the
+            // Builder never throws and the whole conversion never fails.
+            "Original" -> {
+              val capScale = minOf(14400f / bmp.width, 14400f / bmp.height, 1f)
+              Pair((bmp.width * capScale).toInt().coerceAtLeast(1), (bmp.height * capScale).toInt().coerceAtLeast(1))
+            }
             else -> Pair(595, 842) // "A4" and any unknown value
           }
           val pageInfo = PdfDocument.PageInfo.Builder(pw, ph, index + 1).create()

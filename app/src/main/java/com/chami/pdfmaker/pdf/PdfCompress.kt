@@ -250,8 +250,15 @@ object PdfCompress {
       // Never output bigger than the original: keep the original.
       if (origBytes > 0 && outFile.length() >= origBytes) {
         outFile.delete()
-        ctx.contentResolver.openInputStream(pdfUri)?.use { input ->
+        // M4: if the original can no longer be opened, that is a
+        // failure — never report success for a file that does not exist.
+        val kept = ctx.contentResolver.openInputStream(pdfUri)?.use { input ->
           FileOutputStream(outFile).use { output -> input.copyTo(output) }
+          true
+        } ?: false
+        if (!kept || !outFile.exists() || outFile.length() == 0L) {
+          try { outFile.delete() } catch (_: Exception) {}
+          return PdfCompressResult(false, 0L, false, pageCount, textPreserved = false)
         }
         return PdfCompressResult(true, outFile.length() / 1024L, true, pageCount, textPreserved = false)
       }

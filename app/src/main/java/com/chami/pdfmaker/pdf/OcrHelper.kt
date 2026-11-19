@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.TextRecognizerOptionsInterface
 import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -36,49 +37,66 @@ fun recognizerOptionsFor(language: String): TextRecognizerOptionsInterface =
     TextRecognizerOptions.DEFAULT_OPTIONS
   }
 
-// OCR a Bitmap with the recogniser for `language`. Returns "" on any
-// failure (same contract as before — callers treat blank as no text).
-suspend fun ocrBitmap(bmp: Bitmap, language: String = "English"): String =
+// M8: ONE lazily-created client per script for the process lifetime.
+// A 50-page Reader search used to create 50 clients in sequence (one
+// per call, each closed right after); now the Latin and Devanagari
+// clients are created once and reused, and are never closed after a
+// single call — closing a shared client would break the next call.
+// Cancellation: invokeOnCancellation is registered on every call (see
+// processImage). ML Kit's Task exposes no public cancel(), so a
+// cancelled call's in-flight recognition runs to completion but its
+// result is dropped (the listeners check cont.isActive) and no new
+// work is started for it.
+private val recognizerClients = mutableMapOf<String, TextRecognizer>()
+
+private fun clientFor(language: String): TextRecognizer {
+  val key = if (isDevanagariLanguage(language)) "devanagari" else "latin"
+  return synchronized(recognizerClients) {
+    recognizerClients.getOrPut(key) { TextRecognition.getClient(recognizerOptionsFor(language)) }
+  }
+}
+
+private suspend fun processImage(client: TextRecognizer, image: InputImage): String =
   suspendCancellableCoroutine { cont ->
-    val client = TextRecognition.getClient(recognizerOptionsFor(language))
+    cont.invokeOnCancellation {
+      // See the M8 note above: there is no Task.cancel() to call, so
+      // the hook's job is to make sure the late result is never
+      // delivered — the listeners below resume only while active.
+    }
     try {
-      val image = InputImage.fromBitmap(bmp, 0)
       client.process(image)
         .addOnSuccessListener { result ->
-          try { client.close() } catch (_: Exception) {}
           if (cont.isActive) cont.resume(result.text)
         }
         .addOnFailureListener {
-          try { client.close() } catch (_: Exception) {}
           if (cont.isActive) cont.resume("")
         }
     } catch (e: Exception) {
-      try { client.close() } catch (_: Exception) {}
       if (cont.isActive) cont.resume("")
     }
   }
 
+// OCR a Bitmap with the recogniser for `language`. Returns "" on any
+// failure (same contract as before — callers treat blank as no text).
+suspend fun ocrBitmap(bmp: Bitmap, language: String = "English"): String {
+  val image = try {
+    InputImage.fromBitmap(bmp, 0)
+  } catch (_: Exception) {
+    return ""
+  }
+  return processImage(clientFor(language), image)
+}
+
 // OCR an image Uri. Language-aware overload — this is the one the OCR
 // screen must call with the user's picked language.
-suspend fun ocrImage(ctx: Context, uri: Uri, language: String): String =
-  suspendCancellableCoroutine { cont ->
-    val client = TextRecognition.getClient(recognizerOptionsFor(language))
-    try {
-      val image = InputImage.fromFilePath(ctx, uri)
-      client.process(image)
-        .addOnSuccessListener { result ->
-          try { client.close() } catch (_: Exception) {}
-          if (cont.isActive) cont.resume(result.text)
-        }
-        .addOnFailureListener {
-          try { client.close() } catch (_: Exception) {}
-          if (cont.isActive) cont.resume("")
-        }
-    } catch (e: Exception) {
-      try { client.close() } catch (_: Exception) {}
-      if (cont.isActive) cont.resume("")
-    }
+suspend fun ocrImage(ctx: Context, uri: Uri, language: String): String {
+  val image = try {
+    InputImage.fromFilePath(ctx, uri)
+  } catch (_: Exception) {
+    return ""
   }
+  return processImage(clientFor(language), image)
+}
 
 // Backwards-compatible overload: Latin recogniser (English default),
 // as before. Existing callers (Reader search) keep compiling.

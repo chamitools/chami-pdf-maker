@@ -498,15 +498,15 @@ fun HistoryScreen(
   var sortMode by rememberSaveable { mutableStateOf("Newest") }
   var sortMenuOpen by remember { mutableStateOf(false) }
   var selected by rememberSaveable(
-    saver = listSaver<Set<String>, String>(
-      save = { it.toList() },
-      restore = { it.toSet() }
+    saver = listSaver<MutableState<Set<String>>, String>(
+      save = { it.value.toList() },
+      restore = { mutableStateOf(it.toSet()) }
     )
   ) { mutableStateOf<Set<String>>(emptySet()) }
   var favourites by rememberSaveable(
-    saver = listSaver<Set<String>, String>(
-      save = { it.toList() },
-      restore = { it.toSet() }
+    saver = listSaver<MutableState<Set<String>>, String>(
+      save = { it.value.toList() },
+      restore = { mutableStateOf(it.toSet()) }
     )
   ) {
     mutableStateOf(favPrefs.getStringSet("favs", emptySet())?.toSet() ?: emptySet())

@@ -522,7 +522,7 @@ object LocaleHelper {
       "slide_compress" to "स्लाइड करके कंप्रेस करें", "slide_convert_all" to "स्लाइड करके सभी बदलें",
       "slide_resize" to "स्लाइड करके रिसाइज़ करें", "slide_extract_text" to "स्लाइड करके टेक्स्ट निकालें",
       "slide_unlock" to "स्लाइड करके PDF अनलॉक करें", "slide_protect" to "स्लाइड करके PDF सुरक्षित करें",
-      "group_images_reading" to "इमेज और रीडिंग", "group_fix_pdf" to "PDF ठीक करें"
+      "group_images_reading" to "इमेज और रीडिंग", "group_fix_pdf" to "PDF ठीक करें",
       "toast_save_partial" to "{total} में से {saved} फ़ाइलें सहेजी गईं — {failed} चुने गए फ़ोल्डर में सहेजी नहीं जा सकीं",
       "toast_save_failed_folder" to "चुने गए फ़ोल्डर में सहेजा नहीं जा सका — फ़ाइलें Chami फ़ोल्डर में रखी गई हैं",
       "toast_save_failed_file" to "चुने गए फ़ोल्डर में सहेजा नहीं जा सका",
@@ -951,7 +951,7 @@ object LocaleHelper {
       "slide_compress" to "Desliza para comprimir", "slide_convert_all" to "Desliza para convertir todo",
       "slide_resize" to "Desliza para redimensionar", "slide_extract_text" to "Desliza para extraer texto",
       "slide_unlock" to "Desliza para desbloquear PDF", "slide_protect" to "Desliza para proteger PDF",
-      "group_images_reading" to "Imágenes y lectura", "group_fix_pdf" to "Arreglar PDF"
+      "group_images_reading" to "Imágenes y lectura", "group_fix_pdf" to "Arreglar PDF",
       "toast_save_partial" to "Se guardaron {saved} de {total} archivos — {failed} no se pudieron guardar en la carpeta elegida",
       "toast_save_failed_folder" to "No se pudo guardar en la carpeta elegida — los archivos se guardaron en la carpeta Chami",
       "toast_save_failed_file" to "No se pudo guardar en la carpeta elegida",
@@ -1380,7 +1380,7 @@ object LocaleHelper {
       "slide_compress" to "Glisser pour compresser", "slide_convert_all" to "Glisser pour tout convertir",
       "slide_resize" to "Glisser pour redimensionner", "slide_extract_text" to "Glisser pour extraire le texte",
       "slide_unlock" to "Glisser pour déverrouiller le PDF", "slide_protect" to "Glisser pour protéger le PDF",
-      "group_images_reading" to "Images et lecture", "group_fix_pdf" to "Réparer un PDF"
+      "group_images_reading" to "Images et lecture", "group_fix_pdf" to "Réparer un PDF",
       "toast_save_partial" to "{saved} fichiers sur {total} enregistrés — {failed} n'ont pas pu être enregistrés dans le dossier choisi",
       "toast_save_failed_folder" to "Impossible d'enregistrer dans le dossier choisi — fichiers conservés dans le dossier Chami",
       "toast_save_failed_file" to "Impossible d'enregistrer dans le dossier choisi",
@@ -1809,7 +1809,7 @@ object LocaleHelper {
       "slide_compress" to "Wischen zum Komprimieren", "slide_convert_all" to "Wischen zum Konvertieren aller",
       "slide_resize" to "Wischen zum Skalieren", "slide_extract_text" to "Wischen zum Extrahieren von Text",
       "slide_unlock" to "Wischen zum Entsperren des PDFs", "slide_protect" to "Wischen zum Schützen des PDFs",
-      "group_images_reading" to "Bilder & Lesen", "group_fix_pdf" to "PDF reparieren"
+      "group_images_reading" to "Bilder & Lesen", "group_fix_pdf" to "PDF reparieren",
       "btn_add" to "Hinzufügen",
       "btn_apply" to "Anwenden",
       "btn_cancel" to "Abbrechen",
@@ -2238,7 +2238,7 @@ object LocaleHelper {
       "slide_compress" to "Deslize para compactar", "slide_convert_all" to "Deslize para converter tudo",
       "slide_resize" to "Deslize para redimensionar", "slide_extract_text" to "Deslize para extrair texto",
       "slide_unlock" to "Deslize para desbloquear o PDF", "slide_protect" to "Deslize para proteger o PDF",
-      "group_images_reading" to "Imagens e leitura", "group_fix_pdf" to "Corrigir PDF"
+      "group_images_reading" to "Imagens e leitura", "group_fix_pdf" to "Corrigir PDF",
       "toast_save_partial" to "Salvos {saved} de {total} arquivos — {failed} não puderam ser salvos na pasta escolhida",
       "toast_save_failed_folder" to "Não foi possível salvar na pasta escolhida — arquivos mantidos na pasta Chami",
       "toast_save_failed_file" to "Não foi possível salvar na pasta escolhida",
@@ -2667,7 +2667,7 @@ object LocaleHelper {
       "slide_compress" to "مرّر للضغط", "slide_convert_all" to "مرّر لتحويل الكل",
       "slide_resize" to "مرّر لتغيير الحجم", "slide_extract_text" to "مرّر لاستخراج النص",
       "slide_unlock" to "مرّر لإلغاء قفل PDF", "slide_protect" to "مرّر لحماية PDF",
-      "group_images_reading" to "الصور والقراءة", "group_fix_pdf" to "إصلاح PDF"
+      "group_images_reading" to "الصور والقراءة", "group_fix_pdf" to "إصلاح PDF",
       "btn_add" to "إضافة",
       "btn_apply" to "تطبيق",
       "btn_cancel" to "إلغاء",
@@ -3096,7 +3096,7 @@ object LocaleHelper {
       "slide_compress" to "滑动压缩", "slide_convert_all" to "滑动全部转换",
       "slide_resize" to "滑动调整大小", "slide_extract_text" to "滑动提取文字",
       "slide_unlock" to "滑动解锁 PDF", "slide_protect" to "滑动保护 PDF",
-      "group_images_reading" to "图片与阅读", "group_fix_pdf" to "修复 PDF"
+      "group_images_reading" to "图片与阅读", "group_fix_pdf" to "修复 PDF",
       "toast_save_partial" to "已保存 {saved}/{total} 个文件——{failed} 个无法保存到所选文件夹",
       "toast_save_failed_folder" to "无法保存到所选文件夹——文件已保存在 Chami 文件夹",
       "toast_save_failed_file" to "无法保存到所选文件夹",
@@ -3525,7 +3525,7 @@ object LocaleHelper {
       "slide_compress" to "Проведите, чтобы сжать", "slide_convert_all" to "Проведите, чтобы конвертировать всё",
       "slide_resize" to "Проведите, чтобы изменить размер", "slide_extract_text" to "Проведите, чтобы извлечь текст",
       "slide_unlock" to "Проведите, чтобы разблокировать PDF", "slide_protect" to "Проведите, чтобы защитить PDF",
-      "group_images_reading" to "Изображения и чтение", "group_fix_pdf" to "Исправить PDF"
+      "group_images_reading" to "Изображения и чтение", "group_fix_pdf" to "Исправить PDF",
       "btn_add" to "Добавить",
       "btn_apply" to "Применить",
       "btn_cancel" to "Отмена",
@@ -3954,7 +3954,7 @@ object LocaleHelper {
       "slide_compress" to "スライドして圧縮", "slide_convert_all" to "スライドしてすべて変換",
       "slide_resize" to "スライドしてリサイズ", "slide_extract_text" to "スライドしてテキスト抽出",
       "slide_unlock" to "スライドしてPDFのロック解除", "slide_protect" to "スライドしてPDFを保護",
-      "group_images_reading" to "画像と閲覧", "group_fix_pdf" to "PDFを修正"
+      "group_images_reading" to "画像と閲覧", "group_fix_pdf" to "PDFを修正",
       "toast_save_partial" to "{saved}/{total}件保存しました — {failed}件は選択したフォルダに保存できませんでした",
       "toast_save_failed_folder" to "選択したフォルダに保存できませんでした — ファイルはChamiフォルダに保存されています",
       "toast_save_failed_file" to "選択したフォルダに保存できませんでした",

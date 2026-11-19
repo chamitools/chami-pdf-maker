@@ -19,16 +19,24 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import android.webkit.WebView
 import android.widget.Toast
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -50,6 +58,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -287,19 +296,21 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
       }
     }
   }
+  // Phase 6: thumbnail drawn from the cache when ready; while it
+  // loads the tile is a grey skeleton (not a blank tile), matching
+  // the Phase 4/5 skeleton pattern. Radius is Ds.tileRadius (L22).
+  val thumbImage = remember(bmp) { bmp?.asImageBitmap() }
   Box(
     Modifier
       .size(width = 48.dp, height = 64.dp)
-      .clip(RoundedCornerShape(8.dp))
-      .background(theme.bg)
-      .border(1.dp, theme.cardBorder, RoundedCornerShape(8.dp)),
+      .clip(RoundedCornerShape(Ds.tileRadius))
+      .background(if (thumbImage != null) theme.bg else ChamiColors.skeletonBg)
+      .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius)),
     contentAlignment = Alignment.Center
   ) {
-    val b = bmp
     // PERFORMANCE (UI overhaul): wrap once per bitmap — rows recompose
     // on scroll/selection and re-wrapping every thumbnail each time
     // dropped frames.
-    val thumbImage = remember(b) { b?.asImageBitmap() }
     if (thumbImage != null) {
       Image(
         bitmap = thumbImage,
@@ -313,10 +324,30 @@ private fun HistoryThumb(file: File, theme: ChamiTheme) {
         if (isPdf) Icons.Filled.Description else Icons.Filled.Image,
         contentDescription = null,
         tint = theme.textSecondary,
-        modifier = Modifier.size(24.dp)
+        modifier = Modifier.size(Ds.iconSize)
       )
     }
   }
+}
+
+/** Phase 6: pulsing skeleton row while History loads — same 900ms
+ *  pulse as MergeRowSkeleton, 96dp matches the file row (16dp
+ *  padding + 64dp thumbnail). GPU alpha only, no layout work. */
+@Composable
+private fun HistoryRowSkeleton() {
+  val pulse by rememberInfiniteTransition(label = "historySkeleton").animateFloat(
+    initialValue = 0.35f, targetValue = 0.7f,
+    animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+    label = "historySkeletonAlpha"
+  )
+  Box(
+    Modifier
+      .fillMaxWidth()
+      .height(96.dp)
+      .clip(RoundedCornerShape(Ds.tileRadius))
+      .background(ChamiColors.skeletonBg)
+      .graphicsLayer { alpha = pulse }
+  )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -334,6 +365,9 @@ fun HistoryScreen(
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
+  // Phase 6: motion gate for the staggered row enter animation and
+  // press-scale — off when the system "remove animations" setting is on.
+  val animOn = animationsEnabled(ctx)
   // Phase 6 Font Size: "font_scale" in chami_prefs (0.85 / 1.0 / 1.15).
   // Main History text sizes are multiplied by it (read fresh each
   // composition so a change in Settings applies on the next visit).
@@ -508,21 +542,30 @@ fun HistoryScreen(
 
     Spacer(Modifier.height(Ds.s12))
 
-    // Storage used — real folder size, stated plainly.
+    // Storage used — real folder size, stated plainly, in the shared
+    // Phase 5 card style (12dp radius, card background, 1dp border).
     // UI OVERHAUL 2026-11-18: the old progress bar is REMOVED — it
     // compared folder size against folder size + free space, so it
     // always read ~0% and looked broken to a reviewer. Honest text
     // only, no fake bar.
-    Row(
-      Modifier.fillMaxWidth(),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-      Text(
-        "${formatKb(storageUsed)} used in Chami folder",
-        fontSize = (Ds.HINT_SP * fontScale).sp,
-        color = theme.textSecondary
-      )
+    ToolCard(theme = theme, padding = Ds.s12) {
+      Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Icon(
+          Icons.Filled.Folder,
+          contentDescription = null,
+          tint = theme.primary,
+          modifier = Modifier.size(Ds.iconSize)
+        )
+        Spacer(Modifier.width(Ds.s12))
+        Text(
+          "${formatKb(storageUsed)} used in Chami folder",
+          fontSize = (Ds.HINT_SP * fontScale).sp,
+          color = theme.textSecondary
+        )
+      }
     }
 
     Spacer(Modifier.height(Ds.s12))
@@ -608,14 +651,14 @@ fun HistoryScreen(
 
     // Multi-select action bar.
     if (multiSelect) {
-      Spacer(Modifier.height(8.dp))
+      Spacer(Modifier.height(Ds.s8))
       Row(
         Modifier
           .fillMaxWidth()
-          .clip(RoundedCornerShape(10.dp))
+          .clip(RoundedCornerShape(Ds.tileRadius))
           .background(theme.primary.copy(alpha = 0.12f))
-          .padding(8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+          .padding(Ds.s8),
+        horizontalArrangement = Arrangement.spacedBy(Ds.s8),
         verticalAlignment = Alignment.CenterVertically
       ) {
         Text(
@@ -642,8 +685,8 @@ fun HistoryScreen(
           // old small-padding buttons were ~36dp tall.
           modifier = Modifier.defaultMinSize(minHeight = Ds.minTouch),
           colors = ButtonDefaults.buttonColors(containerColor = theme.primary),
-          shape = RoundedCornerShape(8.dp),
-          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+          shape = RoundedCornerShape(Ds.buttonRadius),
+          contentPadding = PaddingValues(horizontal = Ds.s12, vertical = Ds.s4)
         ) {
           Text("SHARE", fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
@@ -655,8 +698,8 @@ fun HistoryScreen(
           // UI OVERHAUL 2026-11-18: 48dp minimum touch target (see SHARE above).
           modifier = Modifier.defaultMinSize(minHeight = Ds.minTouch),
           colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-          shape = RoundedCornerShape(8.dp),
-          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+          shape = RoundedCornerShape(Ds.buttonRadius),
+          contentPadding = PaddingValues(horizontal = Ds.s12, vertical = Ds.s4)
         ) {
           Text("DELETE", fontFamily = PixelFont, color = Color.White, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
@@ -666,19 +709,23 @@ fun HistoryScreen(
       }
     }
 
-    Spacer(Modifier.height(10.dp))
+    Spacer(Modifier.height(Ds.s12))
 
     if (!loaded) {
-      // Loading: blank background, NOT the empty state (flicker fix).
-      Box(Modifier.fillMaxSize().background(theme.bg))
+      // Loading: skeleton rows shaped like file rows, NOT the empty
+      // state (flicker fix) and NOT a blank background.
+      Column(verticalArrangement = Arrangement.spacedBy(Ds.s12)) {
+        repeat(4) { HistoryRowSkeleton() }
+      }
     } else if (visible.isEmpty()) {
       Box(
         Modifier
           .fillMaxSize()
-          .clip(RoundedCornerShape(16.dp))
+          .toolEnterFade(0, animOn)
+          .clip(RoundedCornerShape(Ds.dialogRadius))
           .background(theme.card)
-          .border(1.dp, theme.cardBorder, RoundedCornerShape(16.dp))
-          .padding(24.dp),
+          .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.dialogRadius))
+          .padding(Ds.s24),
         contentAlignment = Alignment.Center
       ) {
         Column(
@@ -696,10 +743,10 @@ fun HistoryScreen(
               Icons.Filled.Folder,
               contentDescription = null,
               tint = theme.primary,
-              modifier = Modifier.size(32.dp)
+              modifier = Modifier.size(Ds.s32)
             )
           }
-          Spacer(Modifier.height(14.dp))
+          Spacer(Modifier.height(Ds.s12))
           Text(
             "No Documents Found",
             fontFamily = PixelFont,
@@ -707,7 +754,7 @@ fun HistoryScreen(
             fontSize = (Ds.BODY_SP * fontScale).sp,
             color = theme.text
           )
-          Spacer(Modifier.height(6.dp))
+          Spacer(Modifier.height(Ds.s4))
           Text(
             if (query.isNotBlank() || filter != "All") "No files match this search or filter."
             else "Created PDFs and converted files will appear here.",
@@ -724,23 +771,19 @@ fun HistoryScreen(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(Ds.s12)
       ) {
-        items(entries, key = { entry ->
+        itemsIndexed(entries, key = { _, entry ->
           when (entry) {
             is HistoryEntry.Header -> "header:${entry.title}"
             is HistoryEntry.FileRow -> entry.file.absolutePath
           }
-        }) { entry ->
+        }) { index, entry ->
           when (entry) {
             is HistoryEntry.Header -> {
-              Text(
-                entry.title,
-                fontFamily = PixelFont,
-                fontWeight = FontWeight.Bold,
-                fontSize = (Ds.BODY_SP * fontScale).sp,
-                lineHeight = (Ds.BODY_SP * 1.4 * fontScale).sp,
-                color = theme.primary,
-                modifier = Modifier.padding(top = Ds.s4)
-              )
+              // Phase 6: date-group header in the shared Phase 5 style
+              // (green accent bar), with the staggered enter fade.
+              Box(Modifier.toolEnterFade(minOf(index, 9), animOn)) {
+                ToolSectionHeader(entry.title, theme.primary, topPadding = Ds.s4)
+              }
             }
             is HistoryEntry.FileRow -> {
               val file = entry.file
@@ -752,6 +795,10 @@ fun HistoryScreen(
               val compressResult = if (historyToolName(toolMap, file) == "Compress") {
                 readCompressResult(ctx, file.name)
               } else null
+              // Phase 6: press-scale on the row (shared interaction
+              // source with combinedClickable) + staggered fade-up,
+              // capped at 9 so long lists never delay late rows.
+              val rowInteraction = remember { MutableInteractionSource() }
               Column(
                 Modifier
                   .fillMaxWidth()
@@ -763,7 +810,11 @@ fun HistoryScreen(
                     if (isSel) theme.primary else theme.cardBorder,
                     RoundedCornerShape(Ds.tileRadius)
                   )
+                  .toolEnterFade(minOf(index, 9), animOn)
+                  .pressScale(animOn, rowInteraction)
                   .combinedClickable(
+                    interactionSource = rowInteraction,
+                    indication = LocalIndication.current,
                     onClick = {
                       vibrate()
                       if (multiSelect) {
@@ -809,7 +860,7 @@ fun HistoryScreen(
                       maxLines = 1,
                       overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(Modifier.height(3.dp))
+                    Spacer(Modifier.height(Ds.s4))
                     Text(
                       buildString {
                         if (pages != null) append("$pages pages • ")
@@ -821,7 +872,7 @@ fun HistoryScreen(
                       color = theme.textSecondary
                     )
                     if (compressResult != null) {
-                      Spacer(Modifier.height(3.dp))
+                      Spacer(Modifier.height(Ds.s4))
                       Text(
                         "${formatKbFromKb(compressResult.first)} → ${formatKbFromKb(compressResult.second)}",
                         fontSize = (Ds.META_SP * fontScale).sp,
@@ -1023,6 +1074,9 @@ fun SettingsScreen(
 ) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
+  // Phase 6: motion gate for press-scale and the staggered card enter
+  // fade — off when the system "remove animations" setting is on.
+  val animOn = animationsEnabled(ctx)
   // THEME picker removed entirely (Phase 6 lock): the theme is forced to
   // Executive Emerald in MainActivity. onThemeChanged is kept only so the
   // existing call site still compiles; it is never used.
@@ -1136,15 +1190,9 @@ fun SettingsScreen(
 
   @Composable
   fun SectionHeading(text: String) {
-    Text(
-      text,
-      fontFamily = PixelFont,
-      fontWeight = FontWeight.Bold,
-      fontSize = (Ds.SECTION_SP * fontScale).sp,
-      lineHeight = (Ds.SECTION_SP * 1.4 * fontScale).sp,
-      color = theme.primaryDark,
-      modifier = Modifier.padding(top = Ds.s24, bottom = Ds.s12)
-    )
+    // Phase 6: shared Phase 5 section header — 4dp green accent bar
+    // + bold section text, same as the tool screens.
+    ToolSectionHeader(text, theme.primaryDark, topPadding = Ds.s24)
   }
 
   @Composable
@@ -1156,12 +1204,19 @@ fun SettingsScreen(
     onSwitchChange: ((Boolean) -> Unit)? = null,
     onClick: () -> Unit
   ) {
+    // Phase 6: press-scale on the row (shared interaction source with
+    // clickable) — same 250ms shared easing as the tool screens.
+    val interactionSource = remember { MutableInteractionSource() }
     Row(
       Modifier
         .fillMaxWidth()
         .defaultMinSize(minHeight = Ds.listRowMinHeight)
         .clip(RoundedCornerShape(Ds.tileRadius))
-        .clickable { vibrate(); onClick() }
+        .pressScale(animOn, interactionSource)
+        .clickable(
+          interactionSource = interactionSource,
+          indication = LocalIndication.current
+        ) { vibrate(); onClick() }
         .padding(horizontal = Ds.s16, vertical = Ds.s12),
       verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1202,16 +1257,19 @@ fun SettingsScreen(
           Icons.Filled.ChevronRight,
           contentDescription = null,
           tint = theme.textSecondary,
-          modifier = Modifier.size(24.dp)
+          modifier = Modifier.size(Ds.iconSize)
         )
       }
     }
   }
 
   @Composable
-  fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+  fun SettingsCard(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
+  ) {
     Column(
-      Modifier
+      modifier
         .fillMaxWidth()
         .clip(RoundedCornerShape(Ds.tileRadius))
         .background(theme.card)
@@ -1255,7 +1313,7 @@ fun SettingsScreen(
 
     // ---- General ----
     SectionHeading("General")
-    SettingsCard {
+    SettingsCard(modifier = Modifier.toolEnterFade(0, animOn)) {
       SettingsRow(
         title = LocaleHelper.t(ctx, "language"),
         value = LocaleHelper.LANGUAGES.firstOrNull { it.first == LocaleHelper.currentCode(ctx) }?.second,
@@ -1294,7 +1352,7 @@ fun SettingsScreen(
 
     // ---- Security ----
     SectionHeading("Security")
-    SettingsCard {
+    SettingsCard(modifier = Modifier.toolEnterFade(1, animOn)) {
       SettingsRow(
         title = LocaleHelper.t(ctx, "app_lock"),
         showSwitch = true,
@@ -1330,7 +1388,7 @@ fun SettingsScreen(
 
     // ---- About ----
     SectionHeading("About")
-    SettingsCard {
+    SettingsCard(modifier = Modifier.toolEnterFade(2, animOn)) {
       SettingsRow(
         title = LocaleHelper.t(ctx, "contact_support"),
         value = "chami.support@gmail.com",
@@ -1371,7 +1429,7 @@ fun SettingsScreen(
               Modifier
                 .fillMaxWidth()
                 .defaultMinSize(minHeight = Ds.minTouch)
-                .clip(RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(Ds.s8))
                 .clickable {
                   vibrate()
                   showLanguageDialog = false

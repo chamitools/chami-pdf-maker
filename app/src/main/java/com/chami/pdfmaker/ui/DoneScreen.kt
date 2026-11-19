@@ -10,6 +10,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -141,6 +142,9 @@ fun DoneScreen(
 ) {
   val ctx = LocalContext.current
   val haptic = LocalHapticFeedback.current
+  // Phase 6: motion gate — the gentle content fade-in below is off
+  // when the system "remove animations" setting is on.
+  val animOn = animationsEnabled(ctx)
   var started by remember { mutableStateOf(false) }
 
   // PHASE 2 (H1): system Back on a single-file Done screen goes Home
@@ -245,9 +249,14 @@ fun DoneScreen(
   }
   val shareFile: (File) -> Unit = onShare ?: { f -> ShareHelper.shareFile(ctx, f, mimeForFile(f)) }
 
+  // Phase 6: the Done content fades in gently (250ms shared easing,
+  // same toolEnterFade as the Phase 5 tool screens); instant when
+  // animations are off. The tick (600ms) and confetti (1800ms) keep
+  // their spec timings and behaviour exactly.
   Column(
     modifier = Modifier
       .fillMaxSize()
+      .toolEnterFade(0, animOn)
       .background(theme.bg)
       .statusBarsPadding()
       .navigationBarsPadding()
@@ -336,11 +345,13 @@ fun DoneScreen(
 
     // Created file card — immediately visible, no scrolling needed.
     // Name, size, page count and the folder it was saved to.
+    // Phase 6: soft elevation (Ds.tileElevation) like the Phase 5 cards.
     Card(
       modifier = Modifier.fillMaxWidth(),
       shape = RoundedCornerShape(Ds.tileRadius),
       colors = CardDefaults.cardColors(containerColor = theme.card),
-      border = androidx.compose.foundation.BorderStroke(1.dp, theme.cardBorder)
+      border = androidx.compose.foundation.BorderStroke(1.dp, theme.cardBorder),
+      elevation = CardDefaults.cardElevation(defaultElevation = Ds.tileElevation)
     ) {
       Row(
         modifier = Modifier
@@ -358,7 +369,7 @@ fun DoneScreen(
             Icons.Filled.Description,
             contentDescription = null,
             tint = ChamiColors.deepGreen,
-            modifier = Modifier.size(24.dp)
+            modifier = Modifier.size(Ds.iconSize)
           )
         }
         Column(
@@ -400,17 +411,26 @@ fun DoneScreen(
     // Actions, in spec order: Open / Share / Done (max 3).
     // FIX 2026-11-18 (#4): a PDF opens in the inbuilt Reader when the
     // caller supplies onOpenPdfInReader; otherwise Open behaves as before.
+    // Phase 6: press-scale on every button (Phase 3 pattern — the same
+    // interactionSource drives the button and the scale, input never
+    // blocked); primary uses theme.primary, the one primary green
+    // (was brightGreen, which no other primary button uses).
+    val openPress = remember { MutableInteractionSource() }
+    val sharePress = remember { MutableInteractionSource() }
+    val donePress = remember { MutableInteractionSource() }
     Button(
       onClick = {
         if (isPdf && onOpenPdfInReader != null) onOpenPdfInReader(file) else onOpen(file)
       },
       modifier = Modifier
         .fillMaxWidth()
+        .pressScale(animOn, openPress)
         .height(Ds.primaryButtonHeight),
-      colors = ButtonDefaults.buttonColors(containerColor = ChamiColors.brightGreen),
+      interactionSource = openPress,
+      colors = ButtonDefaults.buttonColors(containerColor = theme.primary),
       shape = RoundedCornerShape(Ds.buttonRadius)
     ) {
-      Icon(Icons.Filled.OpenInNew, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
+      Icon(Icons.Filled.OpenInNew, contentDescription = null, tint = Color.White, modifier = Modifier.size(Ds.iconSize))
       Spacer(Modifier.size(Ds.s8))
       Text(LocaleHelper.t(ctx, "done_open"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
     }
@@ -419,12 +439,14 @@ fun DoneScreen(
       onClick = { shareFile(file) },
       modifier = Modifier
         .fillMaxWidth()
+        .pressScale(animOn, sharePress)
         .height(Ds.secondaryButtonHeight),
+      interactionSource = sharePress,
       colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = ChamiColors.darkGreen),
       border = androidx.compose.foundation.BorderStroke(1.5.dp, ChamiColors.darkGreen),
       shape = RoundedCornerShape(Ds.buttonRadius)
     ) {
-      Icon(Icons.Filled.Share, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(24.dp))
+      Icon(Icons.Filled.Share, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(Ds.iconSize))
       Spacer(Modifier.size(Ds.s8))
       Text(LocaleHelper.t(ctx, "done_share"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
     }
@@ -433,7 +455,9 @@ fun DoneScreen(
       onClick = onBackHome,
       modifier = Modifier
         .fillMaxWidth()
+        .pressScale(animOn, donePress)
         .height(Ds.secondaryButtonHeight),
+      interactionSource = donePress,
       // UI OVERHAUL 2026-11-18: the old transparent button read as a
       // dead label next to the two solid buttons — same secondary
       // outline style as Share, so all three actions look tappable.
@@ -441,7 +465,7 @@ fun DoneScreen(
       border = androidx.compose.foundation.BorderStroke(1.5.dp, ChamiColors.darkGreen),
       shape = RoundedCornerShape(Ds.buttonRadius)
     ) {
-      Icon(Icons.Filled.Home, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(24.dp))
+      Icon(Icons.Filled.Home, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(Ds.iconSize))
       Spacer(Modifier.size(Ds.s8))
       Text(LocaleHelper.t(ctx, "done"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
     }

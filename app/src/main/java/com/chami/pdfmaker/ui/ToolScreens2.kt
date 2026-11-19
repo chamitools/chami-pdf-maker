@@ -251,6 +251,28 @@ private fun MergeRowSkeleton() {
   )
 }
 
+/** Phase 6: pulsing skeleton box while a preview / result loads
+ *  (Resize/Convert preview, OCR result) — same 900ms pulse as
+ *  MergeRowSkeleton / PageSkeletonLoader, GPU alpha only. The
+ *  height matches the content that will replace it, so the layout
+ *  does not jump when the load finishes. */
+@Composable
+private fun Phase6SkeletonBox(height: Dp) {
+  val pulse by rememberInfiniteTransition(label = "phase6Skeleton").animateFloat(
+    initialValue = 0.35f, targetValue = 0.7f,
+    animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+    label = "phase6SkeletonAlpha"
+  )
+  Box(
+    Modifier
+      .fillMaxWidth()
+      .height(height)
+      .clip(RoundedCornerShape(Ds.tileRadius))
+      .background(ChamiColors.skeletonBg)
+      .graphicsLayer { alpha = pulse }
+  )
+}
+
 /** Phase 5: staggered fade-up for list rows, mirroring the Home
  *  tiles — fade + 16dp rise, Ds.STAGGER_MS apart, shared easing.
  *  Instant (no motion) when animations are off. */
@@ -1191,6 +1213,8 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
   val isBatch = title == "Format Convert"
+  // Phase 6: motion gate for the staggered batch rows.
+  val animOn = animationsEnabled(ctx)
   var imageUri by rememberSaveableUri()
   var imageUris by rememberSaveableUriList()
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
@@ -1492,40 +1516,56 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         )
         if (imageUris.isNotEmpty()) {
           Spacer(Modifier.height(Ds.s12))
-          Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
-            imageUris.forEachIndexed { i, uri ->
-              val srcFmt = sourceFormatOf(ctx, uri)
-              // L17: an unknown format is never treated as "already" the
-              // target — it is converted, not skipped.
-              val already = srcFmt == formatChoice
-              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                  "${i + 1}. ${displayNameOf(ctx, uri) ?: "image"} (${srcFmt ?: LocaleHelper.t(ctx, "label_unknown_format")})",
-                  fontSize = Ds.BODY_SP.sp, color = theme.text,
-                  modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis
-                )
-                if (already) {
+          // Phase 6: the picked files live in the shared card, one
+          // staggered fade-up row each, instead of bare rows.
+          ToolCard(theme) {
+            Column(verticalArrangement = Arrangement.spacedBy(Ds.s8)) {
+              imageUris.forEachIndexed { i, uri ->
+                val srcFmt = sourceFormatOf(ctx, uri)
+                // L17: an unknown format is never treated as "already" the
+                // target — it is converted, not skipped.
+                val already = srcFmt == formatChoice
+                Row(
+                  Modifier.fillMaxWidth().toolEnterFade(i, animOn),
+                  verticalAlignment = Alignment.CenterVertically
+                ) {
                   Text(
-                    "Already $formatChoice",
-                    fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.SemiBold
+                    "${i + 1}. ${displayNameOf(ctx, uri) ?: "image"} (${srcFmt ?: LocaleHelper.t(ctx, "label_unknown_format")})",
+                    fontSize = Ds.BODY_SP.sp, color = theme.text,
+                    modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis
+                  )
+                  if (already) {
+                    Text(
+                      "Already $formatChoice",
+                      fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.SemiBold
+                    )
+                  }
+                  ChamiIconButton(
+                    icon = Icons.Filled.Close, description = "Remove",
+                    onClick = { vibrate(); imageUris = imageUris.filterIndexed { idx, _ -> idx != i } }
                   )
                 }
-                ChamiIconButton(
-                  icon = Icons.Filled.Close, description = "Remove",
-                  onClick = { vibrate(); imageUris = imageUris.filterIndexed { idx, _ -> idx != i } }
-                )
               }
             }
           }
           if (isProcessing || batchResults.isNotEmpty()) {
-            Spacer(Modifier.height(Ds.s8))
-            Text(progressText.ifBlank { "Converted ${batchResults.size} files" }, fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold)
-            Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
-              batchResults.forEach { line ->
-                Text(line, fontSize = Ds.HINT_SP.sp, color = theme.text)
+            Spacer(Modifier.height(Ds.s12))
+            // Phase 6: batch progress / results in the shared card.
+            ToolCard(theme) {
+              Text(progressText.ifBlank { "Converted ${batchResults.size} files" }, fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold)
+              if (batchResults.isNotEmpty()) {
+                Spacer(Modifier.height(Ds.s8))
+                Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
+                  batchResults.forEach { line ->
+                    Text(line, fontSize = Ds.HINT_SP.sp, color = theme.text)
+                  }
+                }
               }
             }
           }
+        } else {
+          Spacer(Modifier.height(Ds.s16))
+          ToolEmptyState(Icons.Filled.Image, LocaleHelper.t(ctx, "reason_select_images_first"), theme)
         }
       } else {
         ChamiSecondaryButton(
@@ -1533,24 +1573,20 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
           onClick = { vibrate(); picker.launch("image/*") },
           modifier = Modifier.fillMaxWidth()
         )
+        if (imageUri == null) {
+          Spacer(Modifier.height(Ds.s16))
+          ToolEmptyState(Icons.Filled.Image, LocaleHelper.t(ctx, "reason_select_image_first"), theme)
+        }
       }
 
       if (previewBitmap != null) {
-        Spacer(Modifier.height(Ds.s16))
-        SectionText("Preview", color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
-        Column(
-          modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Ds.s8))
-            .background(theme.card)
-            .padding(Ds.s12),
-          horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        // Phase 6: shared section header + card, like the Phase 5 screens.
+        ToolSectionHeader("Preview", theme.text)
+        ToolCard(theme, padding = Ds.s12, horizontalAlignment = Alignment.CenterHorizontally) {
           Image(
             bitmap = previewBitmap!!.asImageBitmap(),
             contentDescription = "Preview",
-            modifier = Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(Ds.s8)),
+            modifier = Modifier.fillMaxWidth().height(320.dp).clip(RoundedCornerShape(Ds.tileRadius)),
             contentScale = ContentScale.Fit
           )
           Spacer(Modifier.height(Ds.s8))
@@ -1559,11 +1595,15 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
           }
           Text("Target: ${widthStr}x${heightStr} px ($formatChoice)", fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold)
         }
+      } else if (imageUri != null || imageUris.isNotEmpty()) {
+        // Phase 6: skeleton while the picked image decodes, so the
+        // screen never sits blank under the select button.
+        ToolSectionHeader("Preview", theme.text)
+        Phase6SkeletonBox(320.dp)
       }
 
-      Spacer(Modifier.height(Ds.s16))
-      SectionText("Presets", color = theme.text)
-      Spacer(Modifier.height(Ds.s8))
+      // Phase 6: shared section header, like the Phase 5 screens.
+      ToolSectionHeader("Presets", theme.text)
       // Compact 2-row grid (8dp gaps) — the old single Row was ~600dp
       // wide on a ~360dp screen, so presets ran off-screen. Same
       // presets, same behaviour. (Same screen as Image Resizer.)
@@ -1587,63 +1627,67 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         }
       }
 
-      Spacer(Modifier.height(Ds.s8))
-      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-        Text("Lock aspect ratio", fontSize = Ds.BODY_SP.sp, color = theme.text)
-        Switch(checked = lockRatio, onCheckedChange = { lockRatio = it })
-      }
-      Spacer(Modifier.height(Ds.s8))
-      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        DebouncedTextField(
-          value = widthStr,
-          onValueChange = {
-            widthStr = it.filter { ch -> ch.isDigit() }
-            widthStr.toIntOrNull()?.let { w -> applyRatioFromWidth(w) }
-          },
-          label = "Width (px)", keyboardType = KeyboardType.Number,
-          isError = !dimsValid, modifier = Modifier.weight(1f)
-        )
-        DebouncedTextField(
-          value = heightStr,
-          onValueChange = {
-            heightStr = it.filter { ch -> ch.isDigit() }
-            heightStr.toIntOrNull()?.let { h -> applyRatioFromHeight(h) }
-          },
-          label = "Height (px)", keyboardType = KeyboardType.Number,
-          isError = !dimsValid, modifier = Modifier.weight(1f)
-        )
-      }
-      if (!dimsValid) {
-        Spacer(Modifier.height(Ds.s4))
-        Text(LocaleHelper.t(ctx, "toast_dims_range"), fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
-      }
-      Spacer(Modifier.height(Ds.s8))
-      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        listOf("25%" to 0.25f, "50%" to 0.5f, "75%" to 0.75f, "Original" to 1f).forEach { (label, pct) ->
-          ChamiChip(label, false, {
-            vibrate()
-            origDimensions?.let { (ow, oh) ->
-              widthStr = (ow * pct).toInt().coerceAtLeast(1).toString()
-              heightStr = (oh * pct).toInt().coerceAtLeast(1).toString()
-            }
-          }, modifier = Modifier.weight(1f))
+      Spacer(Modifier.height(Ds.s12))
+      // Phase 6: size controls in the shared card — lock row, the two
+      // dimension fields (H4 range error stays inline under them),
+      // scale chips and the upscale warning together.
+      ToolCard(theme) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+          Text("Lock aspect ratio", fontSize = Ds.BODY_SP.sp, color = theme.text)
+          Switch(checked = lockRatio, onCheckedChange = { lockRatio = it })
         }
-      }
-      if (upscaleWarning) {
         Spacer(Modifier.height(Ds.s12))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Icon(Icons.Filled.Warning, contentDescription = null, tint = ChamiColors.warningAmber, modifier = Modifier.size(24.dp))
-          Spacer(Modifier.width(Ds.s8))
-          Text(
-            "Upscaling more than 2x will look blurry — the output is stretched, not sharper.",
-            fontSize = Ds.HINT_SP.sp, color = ChamiColors.warningAmber
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+          DebouncedTextField(
+            value = widthStr,
+            onValueChange = {
+              widthStr = it.filter { ch -> ch.isDigit() }
+              widthStr.toIntOrNull()?.let { w -> applyRatioFromWidth(w) }
+            },
+            label = "Width (px)", keyboardType = KeyboardType.Number,
+            isError = !dimsValid, modifier = Modifier.weight(1f)
           )
+          DebouncedTextField(
+            value = heightStr,
+            onValueChange = {
+              heightStr = it.filter { ch -> ch.isDigit() }
+              heightStr.toIntOrNull()?.let { h -> applyRatioFromHeight(h) }
+            },
+            label = "Height (px)", keyboardType = KeyboardType.Number,
+            isError = !dimsValid, modifier = Modifier.weight(1f)
+          )
+        }
+        if (!dimsValid) {
+          Spacer(Modifier.height(Ds.s4))
+          Text(LocaleHelper.t(ctx, "toast_dims_range"), fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
+        }
+        Spacer(Modifier.height(Ds.s12))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+          listOf("25%" to 0.25f, "50%" to 0.5f, "75%" to 0.75f, "Original" to 1f).forEach { (label, pct) ->
+            ChamiChip(label, false, {
+              vibrate()
+              origDimensions?.let { (ow, oh) ->
+                widthStr = (ow * pct).toInt().coerceAtLeast(1).toString()
+                heightStr = (oh * pct).toInt().coerceAtLeast(1).toString()
+              }
+            }, modifier = Modifier.weight(1f))
+          }
+        }
+        if (upscaleWarning) {
+          Spacer(Modifier.height(Ds.s12))
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Warning, contentDescription = null, tint = ChamiColors.warningAmber, modifier = Modifier.size(Ds.iconSize))
+            Spacer(Modifier.width(Ds.s8))
+            Text(
+              "Upscaling more than 2x will look blurry — the output is stretched, not sharper.",
+              fontSize = Ds.HINT_SP.sp, color = ChamiColors.warningAmber
+            )
+          }
         }
       }
 
-      Spacer(Modifier.height(Ds.s16))
-      SectionText("Format", color = theme.text)
-      Spacer(Modifier.height(Ds.s8))
+      // Phase 6: shared section header, like the Phase 5 screens.
+      ToolSectionHeader("Format", theme.text)
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
         listOf("JPG", "PNG", "WEBP").forEach { fmt ->
           ChamiChip(fmt, formatChoice == fmt, { vibrate(); formatChoice = fmt }, modifier = Modifier.weight(1f))
@@ -1654,27 +1698,34 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         HintText(LocaleHelper.t(ctx, "resize_unknown_format").replace("{format}", formatChoice))
       }
       if (formatChoice != "PNG") {
-        Spacer(Modifier.height(Ds.s16))
-        Text("Quality: $quality%", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
-        Slider(
-          value = quality.toFloat(),
-          onValueChange = { quality = it.toInt() },
-          valueRange = 10f..100f,
-          colors = SliderDefaults.colors(thumbColor = theme.primary, activeTrackColor = theme.primary)
-        )
+        Spacer(Modifier.height(Ds.s12))
+        // Phase 6: quality slider in the shared card.
+        ToolCard(theme) {
+          Text("Quality: $quality%", fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
+          Slider(
+            value = quality.toFloat(),
+            onValueChange = { quality = it.toInt() },
+            valueRange = 10f..100f,
+            colors = SliderDefaults.colors(thumbColor = theme.primary, activeTrackColor = theme.primary)
+          )
+        }
       } else {
         Spacer(Modifier.height(Ds.s8))
         HintText("PNG is lossless — no quality slider.")
       }
 
       if (!isBatch) {
-        Spacer(Modifier.height(Ds.s16))
-        DebouncedTextField(
-          value = targetKbStr,
-          onValueChange = { targetKbStr = it.filter { ch -> ch.isDigit() } },
-          label = "Resize to exact KB (JPG only, optional)", keyboardType = KeyboardType.Number
-        )
-        HintText("When set, quality is adjusted after resizing to land within ±5% of the target.")
+        Spacer(Modifier.height(Ds.s12))
+        // Phase 6: exact-KB target in the shared card.
+        ToolCard(theme) {
+          DebouncedTextField(
+            value = targetKbStr,
+            onValueChange = { targetKbStr = it.filter { ch -> ch.isDigit() } },
+            label = "Resize to exact KB (JPG only, optional)", keyboardType = KeyboardType.Number
+          )
+          Spacer(Modifier.height(Ds.s8))
+          HintText("When set, quality is adjusted after resizing to land within ±5% of the target.")
+        }
       }
 
       Spacer(Modifier.height(Ds.s16))
@@ -1729,6 +1780,8 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
+  // Phase 6: motion gate for the result card's enter fade.
+  val animOn = animationsEnabled(ctx)
   var imageUri by rememberSaveableUri()
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
   var isProcessing by remember { mutableStateOf(false) }
@@ -1858,20 +1911,30 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
       Spacer(Modifier.height(Ds.s16))
       HintText("Reads any text on the image — Latin-script languages (English, Spanish, French, German…) and Devanagari (Hindi, Marathi, Nepali). Other scripts aren't recognised on-device.")
 
-      if (previewBitmap != null) {
+      // Phase 6: clear empty state until a photo is picked.
+      if (imageUri == null) {
         Spacer(Modifier.height(Ds.s16))
-        SectionText("Preview", color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
-        Image(
-          bitmap = previewBitmap!!.asImageBitmap(),
-          contentDescription = "OCR Preview",
-          modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 380.dp)
-            .clip(RoundedCornerShape(Ds.s8))
-            .background(theme.card),
-          contentScale = ContentScale.Fit
-        )
+        ToolEmptyState(Icons.Filled.Image, LocaleHelper.t(ctx, "reason_select_photo_first"), theme)
+      }
+
+      if (previewBitmap != null) {
+        // Phase 6: shared section header + card, like the Phase 5 screens.
+        ToolSectionHeader("Preview", theme.text)
+        ToolCard(theme, padding = Ds.s12) {
+          Image(
+            bitmap = previewBitmap!!.asImageBitmap(),
+            contentDescription = "OCR Preview",
+            modifier = Modifier
+              .fillMaxWidth()
+              .heightIn(max = 384.dp)
+              .clip(RoundedCornerShape(Ds.tileRadius)),
+            contentScale = ContentScale.Fit
+          )
+        }
+      } else if (imageUri != null) {
+        // Phase 6: skeleton while the picked photo decodes.
+        ToolSectionHeader("Preview", theme.text)
+        Phase6SkeletonBox(240.dp)
       }
 
       Spacer(Modifier.height(Ds.s16))
@@ -1879,18 +1942,15 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
         LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
         Spacer(Modifier.height(Ds.s8))
         Text("Running on-device OCR...", fontSize = Ds.HINT_SP.sp, color = theme.text)
+        // Phase 6: skeleton reserves the result area while OCR runs.
+        Spacer(Modifier.height(Ds.s12))
+        Phase6SkeletonBox(200.dp)
       }
 
       if (noTextFound) {
-        Column(
-          Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Ds.s8))
-            .background(theme.card)
-            .padding(Ds.s16),
-          horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-          Icon(Icons.Filled.Search, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(24.dp))
+        // Phase 6: shared card + enter fade, instead of the bare 8dp box.
+        ToolCard(theme, modifier = Modifier.toolEnterFade(0, animOn), horizontalAlignment = Alignment.CenterHorizontally) {
+          Icon(Icons.Filled.Search, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(Ds.iconSize))
           Spacer(Modifier.height(Ds.s8))
           Text("No text found", fontSize = Ds.SECTION_SP.sp, fontWeight = FontWeight.Bold, color = theme.text)
           Spacer(Modifier.height(Ds.s4))
@@ -1902,13 +1962,8 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
 
       if (hasResult) {
         val wordCount = extractedText.split(Regex("\\s+")).count { it.isNotBlank() }
-        Column(
-          Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Ds.s8))
-            .background(theme.card)
-            .padding(Ds.s16)
-        ) {
+        // Phase 6: shared card + enter fade, instead of the bare 8dp box.
+        ToolCard(theme, modifier = Modifier.toolEnterFade(0, animOn)) {
           Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Recognised text", fontWeight = FontWeight.Bold, color = theme.text, fontSize = Ds.BODY_SP.sp)
             Text("$wordCount words", fontSize = Ds.HINT_SP.sp, color = theme.textSecondary)
@@ -1918,7 +1973,7 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
             value = extractedText,
             onValueChange = { extractedText = it },
             modifier = Modifier.fillMaxWidth().height(200.dp),
-            shape = RoundedCornerShape(Ds.s8)
+            shape = RoundedCornerShape(Ds.tileRadius)
           )
           Spacer(Modifier.height(Ds.s12))
           ChamiSecondaryButton(
@@ -2283,17 +2338,21 @@ fun PdfReaderScreen(
           singleLine = true,
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
           modifier = Modifier.fillMaxWidth(),
+          shape = RoundedCornerShape(Ds.tileRadius),
           isError = goToInput.toIntOrNull()?.let { it !in 1..totalPages } == true
         )
       },
       confirmButton = {
-        TextButton(onClick = {
-          goToInput.toIntOrNull()?.let { jumpToPage(it) }
-          showGoToPage = false
-        }) { Text("Go", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
+        TextButton(
+          onClick = {
+            goToInput.toIntOrNull()?.let { jumpToPage(it) }
+            showGoToPage = false
+          },
+          modifier = Modifier.height(Ds.minTouch)
+        ) { Text("Go", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
       },
       dismissButton = {
-        TextButton(onClick = { showGoToPage = false }) { Text("Cancel", color = theme.text) }
+        TextButton(onClick = { showGoToPage = false }, modifier = Modifier.height(Ds.minTouch)) { Text("Cancel", color = theme.text) }
       }
     )
   }
@@ -2311,7 +2370,7 @@ fun PdfReaderScreen(
           Column {
             bookmarks.sorted().forEach { b ->
               Row(
-                Modifier.fillMaxWidth().clickable { showBookmarksDialog = false; jumpToPage(b) }.padding(vertical = Ds.s8),
+                Modifier.fillMaxWidth().heightIn(min = Ds.minTouch).clickable { showBookmarksDialog = false; jumpToPage(b) }.padding(vertical = Ds.s8),
                 verticalAlignment = Alignment.CenterVertically
               ) {
                 Text("Page $b", fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text, modifier = Modifier.weight(1f))
@@ -2325,7 +2384,7 @@ fun PdfReaderScreen(
         }
       },
       confirmButton = {
-        TextButton(onClick = { showBookmarksDialog = false }) { Text("Close", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
+        TextButton(onClick = { showBookmarksDialog = false }, modifier = Modifier.height(Ds.minTouch)) { Text("Close", color = theme.primary, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
       }
     )
   }
@@ -2333,19 +2392,21 @@ fun PdfReaderScreen(
   ToolScreenContainer("PDF Reader", theme, onBack) {
     if (pdfUri == null) {
       Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(Icons.Filled.PictureAsPdf, contentDescription = null, tint = theme.textSecondary, modifier = Modifier.size(48.dp))
-        Spacer(Modifier.height(Ds.s20))
+        // Phase 6: shared empty state, then the open button.
+        ToolEmptyState(Icons.Filled.PictureAsPdf, LocaleHelper.t(ctx, "btn_select_pdf"), theme)
+        Spacer(Modifier.height(Ds.s16))
         ChamiPrimaryButton(text = "Open PDF file", onClick = { vibrate(); picker.launch("application/pdf") }, modifier = Modifier.fillMaxWidth())
       }
     } else {
       Column(Modifier.fillMaxSize()) {
-        // Slim top bar (Google Drive style): page indicator + the
-        // three-dot menu only. Nothing else clutters the reading view.
-        Row(
-          Modifier.fillMaxWidth(),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+        // Phase 6: slim top bar (Google Drive style) in the shared
+        // card — page indicator + the three-dot menu only.
+        ToolCard(theme, padding = Ds.s8) {
+          Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+          ) {
           TextButton(
             onClick = { goToInput = "${currentPage + 1}"; showGoToPage = true },
             modifier = Modifier.height(Ds.minTouch)
@@ -2407,7 +2468,8 @@ fun PdfReaderScreen(
               )
             }
           }
-        }
+          } // top-bar Row
+        } // ToolCard
 
         // Search bar — only when opened from the ⋮ menu.
         if (showSearchBar) {
@@ -2423,7 +2485,7 @@ fun PdfReaderScreen(
               label = { Text("Search text in PDF", fontSize = Ds.HINT_SP.sp) },
               singleLine = true,
               modifier = Modifier.weight(1f).height(Ds.primaryButtonHeight),
-              shape = RoundedCornerShape(Ds.s8)
+              shape = RoundedCornerShape(Ds.tileRadius)
             )
             ChamiIconButton(
               icon = Icons.Filled.Search, description = "Search",
@@ -2611,7 +2673,7 @@ private fun ReaderPageView(
     Box(
       Modifier
         .fillMaxWidth()
-        .clip(RoundedCornerShape(Ds.s8))
+        .clip(RoundedCornerShape(Ds.tileRadius))
         .background(Color(0xFF121212)),
       contentAlignment = Alignment.Center
     ) {

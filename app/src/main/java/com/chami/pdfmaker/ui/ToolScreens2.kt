@@ -2155,8 +2155,12 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
 // front), bookmarks PERSISTED per file in SharedPreferences, page
 // indicator "3 / 24" with tap-to-go-to-page, pinch zoom 1x-5x that
 // re-renders sharper at the zoomed scale, overflow menu to open the
-// file in Split / Merge / Compress. Keeps its custom header area but
-// uses Ds typography/spacing throughout.
+// file in Split / Merge / Compress. PHONE FIX 2026-11-19 (issue 3):
+// while zoomed the reader shows ONLY the current page, filling the
+// viewport (Google Drive style) — the old code zoomed every page in
+// the list at once. PHONE FIX 2026-11-19 (issue 4): a swipe past the
+// zoomed page's edge changes page at the same zoom — the user is never
+// forced to zoom out to turn the page.
 @Composable
 fun PdfReaderScreen(
   theme: ChamiTheme,
@@ -2177,6 +2181,10 @@ fun PdfReaderScreen(
   var isNightMode by rememberSaveable { mutableStateOf(false) }
   var pageInput by rememberSaveable { mutableStateOf("1") }
   var zoom by rememberSaveable { mutableStateOf(1f) }
+  // PHONE FIX 2026-11-19 (issue 3): while zoomed the reader is a
+  // single-page view of the current page only (Google Drive style) —
+  // the old code applied the shared zoom to every page in the list.
+  val zoomed = zoom > 1f
   // FIX 2026-11-18 (report #23): byte-budgeted cache (see
   // PageBitmapCache below) instead of a 12-page count cap.
   val pageBitmapCache = remember { PageBitmapCache() }
@@ -2245,7 +2253,11 @@ fun PdfReaderScreen(
       currentPage = page1Based - 1
       pageInput = "$page1Based"
       scope.launch {
-        try { listState.scrollToItem(page1Based - 1) } catch (_: Exception) {}
+        // PHONE FIX 2026-11-19 (issue 3): while zoomed the list holds
+        // only the current page (index 0) — scrolling to page-1 would
+        // be out of range, so just snap the single item to the top;
+        // the focused item switches by currentPage alone.
+        try { listState.scrollToItem(if (zoomed) 0 else page1Based - 1) } catch (_: Exception) {}
       }
     }
   }
@@ -2392,15 +2404,18 @@ fun PdfReaderScreen(
   // Final-audit: restore the scroll position to the saved page after
   // rotation / process death, once the document has loaded.
   LaunchedEffect(totalPages) {
-    if (totalPages > 0 && currentPage in 1 until totalPages) {
+    if (totalPages > 0 && !zoomed && currentPage in 1 until totalPages) {
       try { listState.scrollToItem(currentPage) } catch (_: Exception) {}
     }
   }
 
   // The current page follows the first visible page in the scroll.
+  // PHONE FIX 2026-11-19 (issue 3): NOT while zoomed — the zoomed
+  // list holds a single item, so firstVisibleItemIndex is always 0
+  // and the old code would have reset currentPage to page 1.
   val firstVisiblePage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
   LaunchedEffect(firstVisiblePage) {
-    if (totalPages > 0) {
+    if (totalPages > 0 && !zoomed) {
       currentPage = firstVisiblePage.coerceIn(0, totalPages - 1)
       pageInput = "${currentPage + 1}"
     }
@@ -2413,6 +2428,18 @@ fun PdfReaderScreen(
   LaunchedEffect(zoom) {
     delay(300)
     scale = (2.0f * zoom).coerceIn(2.0f, 3.0f)
+  }
+
+  // PHONE FIX 2026-11-19 (issue 3): entering zoomed mode snaps the
+  // focused page to the top of the viewport; leaving it restores the
+  // continuous list at the same page. The delay lets the full list
+  // recompose first — scrolling to the page before that throws (the
+  // zoomed list has only one item) and the position would be lost.
+  LaunchedEffect(zoomed) {
+    try {
+      if (zoomed) listState.scrollToItem(0)
+      else if (totalPages > 0) { delay(100); listState.scrollToItem(currentPage) }
+    } catch (_: Exception) {}
   }
 
   androidx.compose.runtime.DisposableEffect(Unit) {
@@ -2673,17 +2700,48 @@ fun PdfReaderScreen(
           ) {
             // UI OVERHAUL 2026-11-18: keyed items so scroll position
             // and per-page state survive recomposition.
-            items(totalPages, key = { it }) { idx ->
-              ReaderPageView(
-                theme = theme,
-                uri = pdfUri!!,
-                pageIndex = idx,
-                scale = scale,
-                zoom = zoom,
-                onZoomChange = { zoom = it },
-                isNightMode = isNightMode,
-                cache = pageBitmapCache
-              )
+            // PHONE FIX 2026-11-19 (issue 3): while zoomed, show ONLY
+            // the current page (Google Drive style) — the old code
+            // rendered every page with the same shared zoom, so all
+            // pages zoomed together and none filled the screen. The
+            // focused item is keyed by page, so changing page while
+            // zoomed swaps the item and its pan resets.
+            if (zoomed) {
+              items(1, key = { currentPage }) {
+                ReaderPageView(
+                  theme = theme,
+                  uri = pdfUri!!,
+                  pageIndex = currentPage,
+                  scale = scale,
+                  zoom = zoom,
+                  onZoomChange = { zoom = it },
+                  isNightMode = isNightMode,
+                  cache = pageBitmapCache,
+                  isFocused = true,
+                  onRequestPageChange = { target ->
+                    if (target in 0 until totalPages) {
+                      currentPage = target
+                      pageInput = "${target + 1}"
+                      scope.launch { try { listState.scrollToItem(0) } catch (_: Exception) {} }
+                    }
+                  }
+                )
+              }
+            } else {
+              items(totalPages, key = { it }) { idx ->
+                ReaderPageView(
+                  theme = theme,
+                  uri = pdfUri!!,
+                  pageIndex = idx,
+                  scale = scale,
+                  zoom = zoom,
+                  onZoomChange = { zoom = it },
+                  isNightMode = isNightMode,
+                  cache = pageBitmapCache,
+                  isFocused = false,
+                  onRequestPageChange = { target -> jumpToPage(target + 1) }
+                )
+              }
             }
           }
         }
@@ -2735,6 +2793,14 @@ private class PageBitmapCache(private val maxBytes: Long = 150L * 1024L * 1024L)
 // centred on the fingers); one finger while zoomed = pan the page;
 // one finger at 100% = not consumed, so the list scrolls normally.
 // Double-tap still toggles zoom, Fit in the ⋮ menu still resets it.
+// PHONE FIX 2026-11-19 (issue 3): while zoomed the parent shows only
+// this page and the page is NOT clipped to its fit-width box, so the
+// zoomed page can overflow its layout rect and fill the viewport
+// instead of showing a crop inside the same small rectangle.
+// PHONE FIX 2026-11-19 (issue 4): a one-finger drag that cannot pan
+// the page any further (already at the edge) is NOT consumed — past
+// 72dp it becomes a page change at the same zoom via
+// onRequestPageChange, so the user is never forced to zoom out.
 @Composable
 private fun ReaderPageView(
   theme: ChamiTheme,
@@ -2744,7 +2810,9 @@ private fun ReaderPageView(
   zoom: Float,
   onZoomChange: (Float) -> Unit,
   isNightMode: Boolean,
-  cache: PageBitmapCache
+  cache: PageBitmapCache,
+  isFocused: Boolean = false,
+  onRequestPageChange: ((Int) -> Unit)? = null
 ) {
   val ctx = LocalContext.current
   var bmp by remember(uri, pageIndex) { mutableStateOf<Bitmap?>(cache.get(pageIndex)) }
@@ -2755,6 +2823,15 @@ private fun ReaderPageView(
   // so pinch math (and the double-tap toggle) used the zoom from first
   // composition. Read the live zoom through rememberUpdatedState.
   val currentZoom by rememberUpdatedState(zoom)
+  // PHONE FIX 2026-11-19 (issue 4): the edge-swipe page change must
+  // read the live callback / page index, not the values captured when
+  // pointerInput(Unit) first ran (same stale-capture trap as Fix 10).
+  val currentPageChange by rememberUpdatedState(onRequestPageChange)
+  val currentPageIndex by rememberUpdatedState(pageIndex)
+  // PHONE FIX 2026-11-19 (issue 4): how far one gesture must drag
+  // past the page edge before it becomes a page change, not a wobble.
+  val edgeSwipeThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
+  val currentEdgeThreshold by rememberUpdatedState(edgeSwipeThresholdPx)
   LaunchedEffect(uri, pageIndex, scale) {
     cache.get(pageIndex)?.let { bmp = it; return@LaunchedEffect }
     val rendered = withContext(Dispatchers.IO) { PdfReader.renderPageBitmap(ctx, uri, pageIndex, scale) }
@@ -2764,11 +2841,20 @@ private fun ReaderPageView(
     }
   }
   LaunchedEffect(zoom) { if (zoom == 1f) pan = Offset.Zero }
+  // PHONE FIX 2026-11-19 (issue 4): a new page starts unpanned — the
+  // zoomed pan of the previous page must not carry over to it.
+  LaunchedEffect(pageIndex) { pan = Offset.Zero }
   Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
     Box(
       Modifier
         .fillMaxWidth()
-        .clip(RoundedCornerShape(Ds.tileRadius))
+        // PHONE FIX 2026-11-19 (issue 3): while zoomed the page must
+        // be allowed to overflow its fit-width layout box and fill
+        // the viewport — the old clip() cut the scaled image back to
+        // the unzoomed rectangle, so zoom only ever showed a crop
+        // inside the same small box, with neighbours still visible.
+        // Unzoomed, the rounded clip stays.
+        .then(if (isFocused) Modifier else Modifier.clip(RoundedCornerShape(Ds.tileRadius)))
         .background(Color(0xFF121212)),
       contentAlignment = Alignment.Center
     ) {
@@ -2818,6 +2904,10 @@ private fun ReaderPageView(
             .pointerInput(Unit) {
               awaitEachGesture {
                 awaitFirstDown(requireUnconsumed = false)
+                // PHONE FIX 2026-11-19 (issue 4): per-gesture edge
+                // overscroll — reset every time a new gesture starts.
+                var edgeOverscroll = Offset.Zero
+                var edgePageChangeSent = false
                 do {
                   val event = awaitPointerEvent()
                   val pressed = event.changes.count { it.pressed }
@@ -2847,6 +2937,9 @@ private fun ReaderPageView(
                         pan = next
                         onZoomChange(z)
                       }
+                      // A pinch restarts any edge-swipe accumulation.
+                      edgeOverscroll = Offset.Zero
+                      edgePageChangeSent = false
                       event.changes.forEach { it.consume() }
                     } else if (pressed == 1 && currentZoom > 1f) {
                       val panChange = event.calculatePan()
@@ -2860,8 +2953,50 @@ private fun ReaderPageView(
                             next.y.coerceIn(-maxY, maxY)
                           )
                         }
+                        val moved = next - pan
                         pan = next
-                        event.changes.forEach { it.consume() }
+                        if (moved != Offset.Zero) {
+                          // The page actually panned: consume the drag
+                          // and forget any earlier edge overscroll — a
+                          // fresh swipe past the edge starts clean, so
+                          // panning to the edge and then continuing the
+                          // SAME swipe still turns the page below.
+                          edgeOverscroll = Offset.Zero
+                          event.changes.forEach { it.consume() }
+                        } else {
+                          // PHONE FIX 2026-11-19 (issue 4): the page is
+                          // already at its edge, so this drag cannot pan
+                          // it any further. The old code consumed it
+                          // anyway, so the LazyColumn never saw the swipe
+                          // and the user was stuck on the page until they
+                          // zoomed fully out. Do NOT consume it: pile it
+                          // up, and once one straight swipe past the edge
+                          // passes 72dp, turn it into a page change at
+                          // the SAME zoom (never force a zoom-out). The
+                          // list also gets the unconsumed drag, so at the
+                          // document's first/last page it just
+                          // overscrolls instead of changing page.
+                          edgeOverscroll += panChange
+                          val threshold = currentEdgeThreshold
+                          if (!edgePageChangeSent &&
+                            (kotlin.math.abs(edgeOverscroll.x) >= threshold ||
+                              kotlin.math.abs(edgeOverscroll.y) >= threshold)
+                          ) {
+                            val verticalFirst = kotlin.math.abs(edgeOverscroll.y) >= kotlin.math.abs(edgeOverscroll.x)
+                            val delta = if (verticalFirst) {
+                              // Drag up past the bottom edge -> next
+                              // page; drag down past the top -> previous.
+                              if (edgeOverscroll.y < 0f) 1 else -1
+                            } else {
+                              // Drag left past the right edge -> next
+                              // page; drag right past the left -> previous.
+                              if (edgeOverscroll.x < 0f) 1 else -1
+                            }
+                            edgePageChangeSent = true
+                            edgeOverscroll = Offset.Zero
+                            currentPageChange?.invoke(currentPageIndex + delta)
+                          }
+                        }
                       }
                     }
                     // One finger at 100%: nothing consumed — the list scrolls.

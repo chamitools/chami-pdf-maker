@@ -508,6 +508,38 @@ fun CropEditorDialog(
         fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, color = Color.White.copy(alpha = 0.7f)
       )
       Spacer(Modifier.height(Ds.s8))
+      // FIX (phone-fix, issue 1): Rotate used to sit at the very bottom,
+      // below the ratio chips — too low to reach comfortably — and there
+      // was no Reset here at all. Reset / Rotate 90° now sit here,
+      // directly above the crop area, in the normal Column flow (no
+      // overlap with the crop frame). Both are 48dp (Ds.minTouch).
+      // Reset restores the full-frame crop and clears the ratio lock;
+      // Rotate calls the same onRotate as before. Same Apply button
+      // stays at the bottom.
+      Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+        OutlinedButton(
+          onClick = {
+            activeRatio = null
+            cropRect = Rect(0f, 0f, 1f, 1f)
+            quad = quadFromRect(cropRect)
+          },
+          modifier = Modifier.weight(1f).height(Ds.minTouch),
+          shape = RoundedCornerShape(Ds.buttonRadius),
+          border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.7f)),
+          colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+        ) {
+          Text(LocaleHelper.t(ctx, "btn_reset"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        }
+        Button(
+          onClick = onRotate,
+          modifier = Modifier.weight(1f).height(Ds.minTouch),
+          colors = ButtonDefaults.buttonColors(containerColor = theme.primary),
+          shape = RoundedCornerShape(Ds.buttonRadius)
+        ) {
+          Text(LocaleHelper.t(ctx, "btn_rotate_90"), fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
+        }
+      }
+      Spacer(Modifier.height(Ds.s8))
 
       // Large centred image area (fills the remaining height).
       BoxWithConstraints(
@@ -811,6 +843,17 @@ fun CropEditorDialog(
         // circular 2x zoomed view of the area around the finger,
         // positioned above the finger (clamped inside the image area).
         // Sits OUTSIDE the zoomed Box so the pinch scale does not move it.
+        // FIX (phone-fix, issue 2 — black circle while dragging): the
+        // loupe is 120dp at 2x, so it shows a source window only 60dp
+        // wide. Centring that window on a corner/edge handle put half
+        // of it OUTSIDE the image, where the Box's solid Color.Black
+        // background showed through as a black disc. The sampled point
+        // is now clamped so the whole source window stays inside the
+        // image (the loupe then shows the area NEAR the handle when the
+        // handle is at an edge, and the magnified image always covers
+        // the full circle), and the loupe is not shown at all when the
+        // image is too small for the window to fit — never a black
+        // disc. The loupe's position above the finger is unchanged.
         activeHandle?.let { handle ->
           val focus = if (handle < 4) frameCorners()[handle] else edgeMid(handle - 4)
           val fx = focus.x * dispW
@@ -823,6 +866,10 @@ fun CropEditorDialog(
           val half = loupePx / 2f
           val loupeX = (fx - half).coerceIn(0f, (dispW - loupePx).coerceAtLeast(0f))
           val loupeY = (fy - loupePx - with(density) { Ds.s24.toPx() }).coerceIn(0f, (dispH - loupePx).coerceAtLeast(0f))
+          val srcHalf = loupePx / 4f
+          if (dispW < loupePx / 2f || dispH < loupePx / 2f) return@let
+          val fxC = fx.coerceIn(srcHalf, dispW - srcHalf)
+          val fyC = fy.coerceIn(srcHalf, dispH - srcHalf)
           Box(
             Modifier
               .offset { IntOffset((offXPx + loupeX).roundToInt(), (offYPx + loupeY).roundToInt()) }
@@ -841,8 +888,8 @@ fun CropEditorDialog(
                 )
                 .offset {
                   IntOffset(
-                    (half - fx * 2f).roundToInt(),
-                    (half - fy * 2f).roundToInt()
+                    (half - fxC * 2f).roundToInt(),
+                    (half - fyC * 2f).roundToInt()
                   )
                 },
               contentScale = ContentScale.FillBounds
@@ -908,6 +955,8 @@ fun CropEditorDialog(
       }
       Spacer(Modifier.height(Ds.s8))
 
+      // Suggest edges on its own now (full width): Rotate moved up,
+      // above the crop area — see the Reset / Rotate row above.
       Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
         // Suggest edges (guide only): a luminance bounding box, NOT
         // true edge detection. It only sets the corners for the user
@@ -924,14 +973,6 @@ fun CropEditorDialog(
           colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
         ) {
           Text(LocaleHelper.t(ctx, "editor_suggest_edges"), fontFamily = PixelFont, fontSize = Ds.NAV_SP.sp, fontWeight = FontWeight.Bold, color = Color.White)
-        }
-        Button(
-          onClick = onRotate,
-          modifier = Modifier.weight(1f).height(Ds.minTouch),
-          colors = ButtonDefaults.buttonColors(containerColor = theme.primary),
-          shape = RoundedCornerShape(Ds.buttonRadius)
-        ) {
-          Text(LocaleHelper.t(ctx, "btn_rotate_90"), fontFamily = PixelFont, color = theme.textOnPrimary, fontSize = Ds.HINT_SP.sp, fontWeight = FontWeight.Bold)
         }
       }
       Spacer(Modifier.height(Ds.s8))

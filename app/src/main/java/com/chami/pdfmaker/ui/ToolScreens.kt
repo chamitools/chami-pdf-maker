@@ -1253,6 +1253,17 @@ fun RectCropDialog(
           })
         }
       }
+      Spacer(Modifier.height(Ds.s8))
+      // FIX (phone-fix, issue 1): Reset / Rotate 90° used to sit at the
+      // very bottom, below the crop area — too low to reach comfortably.
+      // They now sit here, directly under the ratio chips and above the
+      // crop area, in the normal Column flow (no overlap with the crop
+      // frame). ChamiSecondaryButton is 48dp (Ds.secondaryButtonHeight),
+      // so both targets stay 48dp. Same buttons, same onClicks — moved only.
+      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+        ChamiSecondaryButton(text = LocaleHelper.t(ctx, "btn_reset"), onClick = { rect = ratioRect(ratios.first { it.first == ratioLabel }.second) }, modifier = Modifier.weight(1f))
+        ChamiSecondaryButton(text = LocaleHelper.t(ctx, "btn_rotate_90"), onClick = onRotate, modifier = Modifier.weight(1f))
+      }
       Spacer(Modifier.height(Ds.s16))
       BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
         val density = LocalDensity.current
@@ -1546,6 +1557,18 @@ fun RectCropDialog(
           // shows the image at 2x with the handle point centred; the
           // image is offset by (offX, offY) inside this box, so the
           // handle's box coordinates map to image coordinates first.
+          // FIX (phone-fix, issue 2 — black circle while dragging):
+          // the loupe is 120dp at 2x, so it shows a source window only
+          // 60dp wide. Centring that window on a corner/edge handle
+          // put half of it OUTSIDE the image, where the Box's solid
+          // Color.Black background showed through as a black disc.
+          // The sampled point is now clamped so the whole source
+          // window stays inside the image (the loupe then shows the
+          // area NEAR the handle when the handle is at an edge, and
+          // the magnified image always covers the full circle), and
+          // the loupe is not shown at all when the image is too small
+          // for the window to fit — never a black disc. The loupe's
+          // position above the finger is unchanged.
           activeHandle?.let { handleId ->
             val frac = handles.firstOrNull { it.first == handleId }?.second ?: return@let
             val hx = toPxX(frac.x)
@@ -1554,6 +1577,10 @@ fun RectCropDialog(
             val half = loupePx / 2f
             val loupeX = (hx - half).coerceIn(0f, (boxW - loupePx).coerceAtLeast(0f))
             val loupeY = (hy - loupePx - with(density) { Ds.s24.toPx() }).coerceIn(0f, (boxH - loupePx).coerceAtLeast(0f))
+            val srcHalf = loupePx / 4f
+            if (dispW < loupePx / 2f || dispH < loupePx / 2f) return@let
+            val fx = (hx - offX).coerceIn(srcHalf, dispW - srcHalf)
+            val fy = (hy - offY).coerceIn(srcHalf, dispH - srcHalf)
             Box(
               Modifier
                 .offset { IntOffset(loupeX.roundToInt(), loupeY.roundToInt()) }
@@ -1572,8 +1599,8 @@ fun RectCropDialog(
                   )
                   .offset {
                     IntOffset(
-                      (half - (hx - offX) * 2f).roundToInt(),
-                      (half - (hy - offY) * 2f).roundToInt()
+                      (half - fx * 2f).roundToInt(),
+                      (half - fy * 2f).roundToInt()
                     )
                   },
                 contentScale = ContentScale.FillBounds
@@ -1582,11 +1609,7 @@ fun RectCropDialog(
           }
         }
       }
-      Spacer(Modifier.height(Ds.s16))
-      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-        ChamiSecondaryButton(text = LocaleHelper.t(ctx, "btn_reset"), onClick = { rect = ratioRect(ratios.first { it.first == ratioLabel }.second) }, modifier = Modifier.weight(1f))
-        ChamiSecondaryButton(text = LocaleHelper.t(ctx, "btn_rotate_90"), onClick = onRotate, modifier = Modifier.weight(1f))
-      }
+      // (Reset / Rotate 90° moved up, under the ratio chips — see above.)
     }
   }
 }

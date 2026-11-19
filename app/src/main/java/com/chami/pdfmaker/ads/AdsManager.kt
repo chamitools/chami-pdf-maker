@@ -12,14 +12,14 @@ import android.content.Context
  * referenced here, so nothing in this object can show an ad.
  *
  * load() and showBeforeSave() are kept with their original signatures
- * so every existing call site (MainActivity, ToolScreens,
- * PdfEditorScreen, WordTextEditorScreen) still compiles unchanged —
- * they are now harmless no-ops and showBeforeSave() always runs
- * onDone() immediately, so a save is never delayed.
+ * so any future call site still compiles unchanged — they are now
+ * harmless no-ops and showBeforeSave() always runs onDone()
+ * immediately, so a save is never delayed. There are currently no
+ * call sites in this build: no screen calls AdsManager.
  *
  * When the user says ads are wanted back, restore the interstitial
  * (every 3rd save + 60s min, never blocks save) and the Home banner
- * from the pre-Phase-6 version in /tmp/chami-v12-phase6-backup/.
+ * from the pre-Phase-6 version.
  */
 object AdsManager {
 

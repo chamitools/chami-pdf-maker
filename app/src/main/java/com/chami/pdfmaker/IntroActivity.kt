@@ -11,6 +11,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.chami.pdfmaker.theme.ThemeManager
 import com.chami.pdfmaker.ui.ChamiLogo
@@ -28,6 +33,7 @@ class IntroActivity : ComponentActivity() {
     )
     val tm = ThemeManager(this)
     setContent {
+      val ctx = LocalContext.current
       val theme = tm.current()
       var fill by remember { mutableStateOf(0f) }
       // FIX 2026-11-18 (report #48): tap-to-skip. `finished` guards
@@ -57,6 +63,12 @@ class IntroActivity : ComponentActivity() {
         Modifier
           .fillMaxSize()
           .background(theme.bg)
+          // L7 (Phase 2): the tap-to-skip area announces itself to
+          // TalkBack as a skip button; without this it was silent.
+          .semantics {
+            contentDescription = LocaleHelper.t(ctx, "intro_skip")
+            role = Role.Button
+          }
           .clickable { goToMain() }
           .padding(Ds.s16),
         contentAlignment = Alignment.Center

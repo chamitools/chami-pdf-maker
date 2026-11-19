@@ -17,6 +17,7 @@ import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -134,6 +136,31 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
     }
   }
 
+  // L15: file size without streaming the whole file — the resolver's
+  // OpenableColumns.SIZE for content Uris, File.length() for file Uris.
+  // Returns -1 when the size cannot be determined.
+  fun uriSizeBytes(ctx: Context, uri: Uri): Long {
+    return try {
+      when (uri.scheme) {
+        "content" -> {
+          var size = -1L
+          ctx.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+              val idx = c.getColumnIndex(OpenableColumns.SIZE)
+              if (idx >= 0) {
+                val s = c.getLong(idx)
+                if (s >= 0) size = s
+              }
+            }
+          }
+          size
+        }
+        "file" -> uri.path?.let { File(it).length() } ?: -1L
+        else -> -1L
+      }
+    } catch (_: Exception) { -1L }
+  }
+
   fun refreshPreviews(uris: List<Uri>) {
     previewJob?.cancel()
     previewJob = scope.launch(Dispatchers.IO) {
@@ -142,11 +169,18 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         val bmp = PdfReader.renderPageBitmap(ctx, u, 0, 1.5f)
         Pair(count, bmp)
       }
-      val sizes = uris.map { PdfCompress.originalSizeBytes(ctx, it).coerceAtLeast(0) }
+      val sizes = uris.map { uriSizeBytes(ctx, it).coerceAtLeast(0) }
       withContext(Dispatchers.Main) {
         if (pdfUris == uris) {
+          // M22: recycle the bitmaps being replaced, never just drop them.
+          val old = pdfPreviews
           pdfPreviews = previews
           pdfSizes = sizes
+          old.forEach { (_, b) -> try { b?.recycle() } catch (_: Exception) {} }
+        } else {
+          // Stale render (list changed while rendering): nobody will
+          // ever display these — recycle them instead of leaking them.
+          previews.forEach { (_, b) -> try { b?.recycle() } catch (_: Exception) {} }
         }
       }
     }
@@ -199,7 +233,7 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
 
   fun merge() {
     if (pdfUris.size < 2) {
-      Toast.makeText(ctx, "Select at least 2 PDFs to merge", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_merge_need_two"), Toast.LENGTH_SHORT).show()
       return
     }
     isProcessing = true
@@ -217,7 +251,7 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       isProcessing = false
       mergeProgressText = ""
       if (ok) singleSave(out)
-      else Toast.makeText(ctx, "Failed to merge PDFs", Toast.LENGTH_SHORT).show()
+      else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_merge_failed"), Toast.LENGTH_SHORT).show()
     }
   }
 
@@ -365,7 +399,7 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       theme = theme,
       enabled = !isProcessing && pdfUris.size >= 2 && pdfPreviews.size == pdfUris.size && pdfPreviews.all { it.first > 0 },
       disabledReason = when {
-        pdfUris.size < 2 -> "Select at least 2 PDFs to merge"
+        pdfUris.size < 2 -> LocaleHelper.t(ctx, "toast_merge_need_two")
         pdfPreviews.any { it.first == 0 } -> UNOPENABLE_PDF_MESSAGE
         else -> null
       },
@@ -429,7 +463,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
       doneFiles = files.map { DoneFileInfo(it, if (selectedTab == 0) (lastImageMimes[it.name] ?: "image/jpeg") else "application/pdf", formatSizeText(it.length())) }
       showDone = true
     },
-    onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() },
+    onCancelled = { Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_cancelled_files"), Toast.LENGTH_SHORT).show() },
     onSavedToFolder = { uri -> savedLocationText = displayNameOf(ctx, uri) }
   )
   val singleSave = rememberSingleFileSaver(
@@ -473,11 +507,16 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
     }
   }
 
-  // Smallest-possible estimate for the first image: JPEG at quality 20
-  // of a 1200px preview, scaled up by pixel count. Shown BEFORE sliding.
+  // M24: smallest-possible estimate, debounced. The custom-KB field
+  // already debounces its own value (DebouncedTextField, 300ms); this
+  // effect waits a further 400ms after the last targetKb change, so
+  // typing never starts a decode/compress. Restarting the effect
+  // cancels the previous wait AND the previous in-flight estimate, so
+  // no heavy work runs per keystroke.
   LaunchedEffect(imageUris, targetKb) {
     val first = imageUris.firstOrNull()
     if (first == null) { minPossibleKb = null; return@LaunchedEffect }
+    delay(400)
     minPossibleKb = withContext(Dispatchers.IO) {
       try {
         val bmp = PdfEngine.loadBitmap(ctx, first, 1200) ?: return@withContext null
@@ -540,12 +579,21 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
 
   // If the compressed file is not smaller, keep the smaller one: copy
   // the original over the output so the saved file is never bigger.
+  // M4/L16: if the original cannot be opened at all (null stream),
+  // FAIL — never report success for a missing file, and never leave
+  // the larger output standing as the result.
   fun keepSmaller(originalUri: Uri, out: File): Boolean {
     return try {
       val origBytes = PdfCompress.originalSizeBytes(ctx, originalUri)
       if (origBytes > 0 && out.exists() && out.length() > origBytes) {
-        ctx.contentResolver.openInputStream(originalUri)?.use { input ->
-          FileOutputStream(out).use { o -> input.copyTo(o) }
+        val stream = ctx.contentResolver.openInputStream(originalUri) ?: return false
+        try {
+          stream.use { input ->
+            FileOutputStream(out).use { o -> input.copyTo(o) }
+          }
+        } catch (_: Exception) {
+          try { out.delete() } catch (_: Exception) {}
+          return false
         }
         true // output was not smaller; original kept
       } else false
@@ -602,7 +650,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         lastImageMimes = outs.associate { it.first.name to it.second }
         folderSave(outs)
       } else {
-        Toast.makeText(ctx, "Compression failed", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_compress_failed"), Toast.LENGTH_SHORT).show()
       }
     }
   }
@@ -634,7 +682,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         }
         singleSave(out)
       } else {
-        Toast.makeText(ctx, "PDF compression failed", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_compress_pdf_failed"), Toast.LENGTH_SHORT).show()
       }
     }
   }
@@ -848,7 +896,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         theme = theme,
         enabled = !isImageProcessing && imageUris.isNotEmpty() && !targetUnreachable,
         disabledReason = when {
-          imageUris.isEmpty() -> "Select images first"
+          imageUris.isEmpty() -> LocaleHelper.t(ctx, "reason_select_images_first")
           targetUnreachable -> "This target size cannot be reached"
           else -> null
         },
@@ -860,9 +908,9 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         theme = theme,
         enabled = !isPdfProcessing && pdfUri != null && !pdfLoadFailed && pdfTotalPages > 0,
         disabledReason = when {
-          pdfUri == null -> "Pick a PDF first"
+          pdfUri == null -> LocaleHelper.t(ctx, "reason_pick_pdf_first")
           pdfLoadFailed -> UNOPENABLE_PDF_MESSAGE
-          pdfTotalPages == 0 -> "Loading PDF…"
+          pdfTotalPages == 0 -> LocaleHelper.t(ctx, "reason_loading_pdf")
           else -> null
         },
         onSlideComplete = { vibrate(); compressPdf() }
@@ -873,23 +921,47 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
 
 // Re-encodes an image file at the given JPEG/WebP quality (the engine's
 // resizeConvert always writes quality 90, so the slider needs this).
+// M18: the re-encode is written to a temp file first and only replaces
+// the original on success — a failed re-encode never destroys a good
+// output. The decoded bitmap is recycled on every path, including
+// failure paths.
 private fun reencodeAtQuality(ctx: Context, file: File, format: Bitmap.CompressFormat, quality: Int): Boolean {
-  return try {
-    val bmp = BitmapFactory.decodeFile(file.absolutePath) ?: return false
+  val bmp: Bitmap = try {
+    BitmapFactory.decodeFile(file.absolutePath) ?: return false
+  } catch (_: OutOfMemoryError) { return false } catch (_: Exception) { return false }
+  val tmp = File(file.absolutePath + ".tmp")
+  try {
     var ok = false
-    FileOutputStream(file).use { ok = bmp.compress(format, quality.coerceIn(10, 100), it) }
-    bmp.recycle()
-    ok
-  } catch (_: Exception) { false }
+    try {
+      FileOutputStream(tmp).use { ok = bmp.compress(format, quality.coerceIn(10, 100), it) }
+    } catch (_: Exception) { return false }
+    if (!ok) return false
+    return try {
+      if (tmp.renameTo(file)) true
+      else {
+        tmp.copyTo(file, overwrite = true)
+        true
+      }
+    } catch (_: Exception) { false }
+  } finally {
+    try { bmp.recycle() } catch (_: Exception) {}
+    try { if (tmp.exists()) tmp.delete() } catch (_: Exception) {}
+  }
 }
 
-private fun sourceFormatOf(ctx: Context, uri: Uri): String {
+// L17: the source format of an image Uri, or null when it cannot be
+// determined (no MIME type, no known extension). Callers must NOT
+// treat an unknown format as JPG — an unknown file is never skipped
+// as "already JPG" and is never labelled JPG in the UI.
+private fun sourceFormatOf(ctx: Context, uri: Uri): String? {
   val mime = try { ctx.contentResolver.getType(uri) } catch (_: Exception) { null }
   val name = displayNameOf(ctx, uri) ?: ""
   return when {
     mime?.contains("png", ignoreCase = true) == true || name.endsWith(".png", ignoreCase = true) -> "PNG"
     mime?.contains("webp", ignoreCase = true) == true || name.endsWith(".webp", ignoreCase = true) -> "WEBP"
-    else -> "JPG"
+    mime?.contains("jpeg", ignoreCase = true) == true || mime?.contains("jpg", ignoreCase = true) == true ||
+      name.endsWith(".jpg", ignoreCase = true) || name.endsWith(".jpeg", ignoreCase = true) -> "JPG"
+    else -> null
   }
 }
 
@@ -915,6 +987,9 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
   var heightStr by rememberSaveable { mutableStateOf("800") }
   var lockRatio by rememberSaveable { mutableStateOf(true) }
   var formatChoice by rememberSaveable { mutableStateOf("JPG") }
+  // L17: true when the picked image's format could not be detected —
+  // the file is never labelled JPG and never skipped as "already JPG".
+  var sourceFormatUnknown by remember { mutableStateOf(false) }
   var quality by rememberSaveable { mutableStateOf(90) }
   var targetKbStr by rememberSaveable { mutableStateOf("") }
   var isProcessing by remember { mutableStateOf(false) }
@@ -932,7 +1007,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       doneFiles = files.map { DoneFileInfo(it, mime, formatSizeText(it.length())) }
       showDone = true
     },
-    onCancelled = { Toast.makeText(ctx, "Save cancelled — files kept in Chami folder", Toast.LENGTH_SHORT).show() },
+    onCancelled = { Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_cancelled_files"), Toast.LENGTH_SHORT).show() },
     onSavedToFolder = { uri -> savedLocationText = displayNameOf(ctx, uri) }
   )
   // FIX 2026-11-18 (Fix 4): the save picker MIME must match the image
@@ -971,7 +1046,11 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
     previewBitmap = null
     batchResults = emptyList()
     if (selected != null) {
-      formatChoice = sourceFormatOf(ctx, selected)
+      // L17: an undetectable format leaves the target format alone —
+      // it is never silently relabelled JPG.
+      val fmt = sourceFormatOf(ctx, selected)
+      sourceFormatUnknown = fmt == null
+      if (fmt != null) formatChoice = fmt
       scope.launch(Dispatchers.IO) {
         val bmp = PdfEngine.loadBitmap(ctx, selected, 1200)
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1030,7 +1109,12 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
 
   val widthInt = widthStr.toIntOrNull()
   val heightInt = heightStr.toIntOrNull()
-  val dimsValid = widthInt != null && heightInt != null && widthInt > 0 && heightInt > 0
+  // H4: cap dimensions like the engine does (PdfEngine.resizeConvert):
+  // 1..4096 px per side, 16,000,000 px total. A typo such as 10000x10000
+  // is rejected here with a translated error instead of OOM-crashing.
+  val dimsValid = widthInt != null && heightInt != null &&
+    widthInt in 1..4096 && heightInt in 1..4096 &&
+    widthInt.toLong() * heightInt.toLong() <= 16_000_000L
   val upscaleFactor: Float? = origDimensions?.let { (ow, oh) ->
     if (widthInt != null && heightInt != null && ow > 0 && oh > 0) {
       maxOf(widthInt.toFloat() / ow, heightInt.toFloat() / oh)
@@ -1041,7 +1125,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
   fun convertSingle() {
     val u = imageUri ?: return
     if (!dimsValid) {
-      Toast.makeText(ctx, "Enter a width and height above 0", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_dims_range"), Toast.LENGTH_SHORT).show()
       return
     }
     val w = widthInt!!
@@ -1058,11 +1142,14 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
     scope.launch {
       val origKb = (PdfCompress.originalSizeBytes(ctx, u) / 1024L).coerceAtLeast(0)
       val tmp = PdfEngine.outFile(ctx, "Resized_${w}x${h}_${System.currentTimeMillis()}.$ext")
-      val ok = withContext(Dispatchers.IO) { PdfEngine.resizeConvert(ctx, u, w, h, format, tmp) }
+      var ok = withContext(Dispatchers.IO) { PdfEngine.resizeConvert(ctx, u, w, h, format, tmp) }
       var finalFile = tmp
       var kbNote: String? = null
       if (ok && formatChoice != "PNG" && quality != 90) {
-        withContext(Dispatchers.IO) { reencodeAtQuality(ctx, tmp, format, quality) }
+        // L17: a failed re-encode fails the conversion — the
+        // quality-90 file must not silently stand as the result.
+        val reencoded = withContext(Dispatchers.IO) { reencodeAtQuality(ctx, tmp, format, quality) }
+        if (!reencoded) ok = false
       }
       if (ok && kbTarget != null && kbTarget > 0) {
         if (formatChoice == "JPG") {
@@ -1080,7 +1167,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
           }
         } else {
           withContext(Dispatchers.Main) {
-            Toast.makeText(ctx, "Exact KB target works with JPG — saved at chosen size instead", Toast.LENGTH_LONG).show()
+            Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_exact_kb_jpg_only"), Toast.LENGTH_LONG).show()
           }
         }
       }
@@ -1095,7 +1182,10 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         )
         singleSave(finalFile)
       } else {
-        Toast.makeText(ctx, "Failed to resize", Toast.LENGTH_SHORT).show()
+        // L17: a failed resize/re-encode leaves no orphan output behind.
+        try { tmp.delete() } catch (_: Exception) {}
+        if (finalFile != tmp) { try { finalFile.delete() } catch (_: Exception) {} }
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_resize_failed"), Toast.LENGTH_SHORT).show()
       }
     }
   }
@@ -1103,7 +1193,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
   fun convertBatch() {
     if (imageUris.isEmpty()) return
     if (!dimsValid) {
-      Toast.makeText(ctx, "Enter a width and height above 0", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_dims_range"), Toast.LENGTH_SHORT).show()
       return
     }
     val w = widthInt!!
@@ -1133,12 +1223,20 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         val out = PdfEngine.outFile(ctx, "Converted_${idx + 1}_${System.currentTimeMillis()}.$ext")
         val ok = withContext(Dispatchers.IO) { PdfEngine.resizeConvert(ctx, u, w, h, format, out) }
         if (ok && out.exists()) {
+          // L17: a failed re-encode fails this file — the quality-90
+          // file must not silently stand as the result.
+          var fileOk = true
           if (formatChoice != "PNG" && quality != 90) {
-            withContext(Dispatchers.IO) { reencodeAtQuality(ctx, out, format, quality) }
+            fileOk = withContext(Dispatchers.IO) { reencodeAtQuality(ctx, out, format, quality) }
           }
-          outs.add(out)
-          done++
-          lines.add("$name: converted to $formatChoice (${formatSizeText(out.length())})")
+          if (fileOk) {
+            outs.add(out)
+            done++
+            lines.add("$name: converted to $formatChoice (${formatSizeText(out.length())})")
+          } else {
+            try { out.delete() } catch (_: Exception) {}
+            lines.add("$name: could not convert")
+          }
         } else {
           lines.add("$name: could not convert")
         }
@@ -1151,7 +1249,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         doneSummary = lines + listOf("$done converted, $skipped already $formatChoice and skipped.")
         folderSave(outs.map { it to if (formatChoice == "PNG") "image/png" else if (formatChoice == "WEBP") "image/webp" else "image/jpeg" })
       } else {
-        Toast.makeText(ctx, "Nothing to convert — all files are already $formatChoice", Toast.LENGTH_LONG).show()
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_nothing_to_convert").replace("{format}", formatChoice), Toast.LENGTH_LONG).show()
       }
     }
   }
@@ -1185,10 +1283,12 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
           Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
             imageUris.forEachIndexed { i, uri ->
               val srcFmt = sourceFormatOf(ctx, uri)
+              // L17: an unknown format is never treated as "already" the
+              // target — it is converted, not skipped.
               val already = srcFmt == formatChoice
               Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                  "${i + 1}. ${displayNameOf(ctx, uri) ?: "image"} ($srcFmt)",
+                  "${i + 1}. ${displayNameOf(ctx, uri) ?: "image"} (${srcFmt ?: LocaleHelper.t(ctx, "label_unknown_format")})",
                   fontSize = Ds.BODY_SP.sp, color = theme.text,
                   modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
@@ -1303,7 +1403,7 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
       }
       if (!dimsValid) {
         Spacer(Modifier.height(Ds.s4))
-        Text("Enter a width and height above 0.", fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
+        Text(LocaleHelper.t(ctx, "toast_dims_range"), fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
       }
       Spacer(Modifier.height(Ds.s8))
       Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
@@ -1336,6 +1436,10 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         listOf("JPG", "PNG", "WEBP").forEach { fmt ->
           ChamiChip(fmt, formatChoice == fmt, { vibrate(); formatChoice = fmt }, modifier = Modifier.weight(1f))
         }
+      }
+      if (sourceFormatUnknown) {
+        Spacer(Modifier.height(Ds.s8))
+        HintText(LocaleHelper.t(ctx, "resize_unknown_format").replace("{format}", formatChoice))
       }
       if (formatChoice != "PNG") {
         Spacer(Modifier.height(Ds.s16))
@@ -1375,8 +1479,8 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         theme = theme,
         enabled = !isProcessing && imageUris.isNotEmpty() && dimsValid,
         disabledReason = when {
-          imageUris.isEmpty() -> "Select images first"
-          !dimsValid -> "Enter a width and height above 0"
+          imageUris.isEmpty() -> LocaleHelper.t(ctx, "reason_select_images_first")
+          !dimsValid -> LocaleHelper.t(ctx, "toast_dims_range")
           else -> null
         },
         onSlideComplete = { vibrate(); convertBatch() }
@@ -1387,8 +1491,8 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onOp
         theme = theme,
         enabled = !isProcessing && imageUri != null && dimsValid,
         disabledReason = when {
-          imageUri == null -> "Select an image first"
-          !dimsValid -> "Enter a width and height above 0"
+          imageUri == null -> LocaleHelper.t(ctx, "reason_select_image_first")
+          !dimsValid -> LocaleHelper.t(ctx, "toast_dims_range")
           else -> null
         },
         onSlideComplete = { vibrate(); convertSingle() }
@@ -1419,6 +1523,10 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
   var extractedText by remember { mutableStateOf("") }
   var hasResult by remember { mutableStateOf(false) }
   var noTextFound by remember { mutableStateOf(false) }
+  // M23: export runs on Dispatchers.IO; this flag shows progress and
+  // blocks a second export while one is running.
+  var isExporting by remember { mutableStateOf(false) }
+  var exportProgressText by remember { mutableStateOf("") }
 
   var doneFile by remember { mutableStateOf<File?>(null) }
   var doneMime by remember { mutableStateOf("text/plain") }
@@ -1434,12 +1542,12 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
           HistoryStore.record(ctx, file.name, "ocr")
           doneMime = "text/plain"; showDone = true
         }
-        else Toast.makeText(ctx, "Could not save to chosen folder", Toast.LENGTH_SHORT).show()
+        else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_failed_file"), Toast.LENGTH_SHORT).show()
       }
     } else if (uri == null && file != null) {
       // FIX 2026-11-18 (report #33): same "kept in Chami folder"
       // toast the other tools show when the save picker is cancelled.
-      Toast.makeText(ctx, "Save cancelled — file kept in Chami folder", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_cancelled_file"), Toast.LENGTH_SHORT).show()
     }
   }
   val singleSavePdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
@@ -1452,12 +1560,12 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
           HistoryStore.record(ctx, file.name, "ocr")
           doneMime = "application/pdf"; showDone = true
         }
-        else Toast.makeText(ctx, "Could not save to chosen folder", Toast.LENGTH_SHORT).show()
+        else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_failed_file"), Toast.LENGTH_SHORT).show()
       }
     } else if (uri == null && file != null) {
       // FIX 2026-11-18 (report #33): same "kept in Chami folder"
       // toast the other tools show when the save picker is cancelled.
-      Toast.makeText(ctx, "Save cancelled — file kept in Chami folder", Toast.LENGTH_SHORT).show()
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_save_cancelled_file"), Toast.LENGTH_SHORT).show()
     }
   }
 
@@ -1607,19 +1715,36 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
               vibrate()
               val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
               cm.setPrimaryClip(ClipData.newPlainText("OCR Text", extractedText))
-              Toast.makeText(ctx, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+              Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_copied"), Toast.LENGTH_SHORT).show()
             },
             modifier = Modifier.fillMaxWidth()
           )
           Spacer(Modifier.height(Ds.s12))
           Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
+            // M23: exports run on Dispatchers.IO — file IO and PDF
+            // generation never block the main thread (long OCR text
+            // used to freeze the UI / risk an ANR from onClick).
             ChamiPrimaryButton(
               text = "Export TXT",
               onClick = {
                 vibrate()
-                val f = saveTextToFile(ctx, extractedText, "OCR_${System.currentTimeMillis()}.txt")
-                doneFile = f
-                singleSaveTxt.launch(f.name)
+                if (isExporting) return@ChamiPrimaryButton
+                isExporting = true
+                exportProgressText = LocaleHelper.t(ctx, "ocr_exporting_txt")
+                scope.launch {
+                  val f = withContext(Dispatchers.IO) {
+                    try { saveTextToFile(ctx, extractedText, "OCR_${System.currentTimeMillis()}.txt") }
+                    catch (_: Exception) { null }
+                  }
+                  isExporting = false
+                  exportProgressText = ""
+                  if (f != null) {
+                    doneFile = f
+                    singleSaveTxt.launch(f.name)
+                  } else {
+                    Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_ocr_export_failed"), Toast.LENGTH_SHORT).show()
+                  }
+                }
               },
               modifier = Modifier.weight(1f)
             )
@@ -1627,15 +1752,35 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
               text = "Export searchable PDF",
               onClick = {
                 vibrate()
-                val out = PdfEngine.outFile(ctx, "OCR_${System.currentTimeMillis()}.pdf")
-                val ok = textToPdf(ctx, "OCR Text", extractedText, outFile = out)
-                if (ok) {
-                  doneFile = out
-                  singleSavePdf.launch(out.name)
-                } else Toast.makeText(ctx, "Failed to make PDF", Toast.LENGTH_SHORT).show()
+                if (isExporting) return@ChamiPrimaryButton
+                isExporting = true
+                exportProgressText = LocaleHelper.t(ctx, "ocr_exporting_pdf")
+                val textSnapshot = extractedText
+                scope.launch {
+                  val out = PdfEngine.outFile(ctx, "OCR_${System.currentTimeMillis()}.pdf")
+                  val ok = withContext(Dispatchers.IO) {
+                    try { textToPdf(ctx, "OCR Text", textSnapshot, outFile = out) }
+                    catch (_: Exception) { false }
+                  }
+                  isExporting = false
+                  exportProgressText = ""
+                  if (ok) {
+                    doneFile = out
+                    singleSavePdf.launch(out.name)
+                  } else {
+                    try { out.delete() } catch (_: Exception) {}
+                    Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_create_pdf_failed"), Toast.LENGTH_SHORT).show()
+                  }
+                }
               },
               modifier = Modifier.weight(1f)
             )
+          }
+          if (isExporting) {
+            Spacer(Modifier.height(Ds.s8))
+            LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
+            Spacer(Modifier.height(Ds.s4))
+            Text(exportProgressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
           }
           Spacer(Modifier.height(Ds.s8))
           HintText("The PDF holds the recognised text as selectable text (no image layer in this build).")
@@ -1647,26 +1792,12 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
       label = LocaleHelper.t(ctx, "slide_extract_text"),
       theme = theme,
       enabled = !isProcessing && imageUri != null,
-      disabledReason = if (imageUri == null) "Select a photo first" else null,
+      disabledReason = if (imageUri == null) LocaleHelper.t(ctx, "reason_select_photo_first") else null,
       onSlideComplete = { vibrate(); runOcr() }
     )
   }
 }
 
-// Reader bookmark store: same SharedPreferences file/key scheme as
-// ReaderTextTools.saveBookmark/getBookmarks ("chami_bookmarks",
-// "bm_<sanitised file name>"), plus removal (no remove helper exists
-// there).
-private fun bookmarkPrefsKey(fileName: String): String =
-  "bm_" + fileName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-
-private fun removeBookmark(ctx: Context, fileName: String, page: Int) {
-  val prefs = ctx.getSharedPreferences("chami_bookmarks", Context.MODE_PRIVATE)
-  val key = bookmarkPrefsKey(fileName)
-  val set = prefs.getStringSet(key, emptySet())?.toMutableSet() ?: mutableSetOf()
-  set.remove(page.toString())
-  prefs.edit().putStringSet(key, set).apply()
-}
 
 // 10. PDF READER — lazy per-page search with progress + cancel (one
 // page is rendered and OCR'd at a time, never the whole document up
@@ -1692,7 +1823,7 @@ fun PdfReaderScreen(
   // Render scale: 2.0x at fit; raised (debounced) while zoomed so the
   // zoomed page re-renders sharper instead of upscaling a bitmap.
   var scale by remember { mutableStateOf(2.0f) }
-  var isNightMode by remember { mutableStateOf(false) }
+  var isNightMode by rememberSaveable { mutableStateOf(false) }
   var pageInput by remember { mutableStateOf("1") }
   var zoom by remember { mutableStateOf(1f) }
   // FIX 2026-11-18 (report #23): byte-budgeted cache (see
@@ -1703,15 +1834,23 @@ fun PdfReaderScreen(
   val listState = rememberLazyListState()
   var showSearchBar by remember { mutableStateOf(false) }
   var showBookmarksDialog by remember { mutableStateOf(false) }
-  var searchQuery by remember { mutableStateOf("") }
+  var searchQuery by rememberSaveable { mutableStateOf("") }
   var searchPages by remember { mutableStateOf<List<Int>>(emptyList()) }
   var searchIndex by remember { mutableStateOf(0) }
   var searching by remember { mutableStateOf(false) }
   var searchProgress by remember { mutableStateOf("") }
   var searchJob by remember { mutableStateOf<Job?>(null) }
-  val bookmarks = remember { mutableStateListOf<Int>() }
+  // M17: bookmarks survive rotation — rememberSaveable with a list
+  // saver (a plain remember list was lost on rotation, and the loader
+  // LaunchedEffect does not re-fire for the same Uri).
+  val bookmarks = rememberSaveable(
+    saver = listSaver(
+      save = { it.toList() },
+      restore = { saved -> mutableStateListOf<Int>().apply { addAll(saved.filterIsInstance<Int>()) } }
+    )
+  ) { mutableStateListOf<Int>() }
   var showGoToPage by remember { mutableStateOf(false) }
-  var goToInput by remember { mutableStateOf("") }
+  var goToInput by rememberSaveable { mutableStateOf("") }
   var showOverflow by remember { mutableStateOf(false) }
   // FIX 2026-11-18 (report #24): a PDF that cannot be opened.
   var pdfLoadFailed by remember { mutableStateOf(false) }
@@ -1721,9 +1860,9 @@ fun PdfReaderScreen(
   var pdfReloadKey by remember { mutableStateOf(0) }
   // FIX 2026-11-18 (report #25): recognised page text, cached in
   // memory so repeat searches never re-OCR a page.
+  // L19: capped at 100 pages (oldest evicted first) — the cache used
+  // to grow one entry per searched page, unbounded, for the session.
   val searchTextCache = remember { mutableStateMapOf<Int, String>() }
-
-  val fileName: String = pdfUri?.let { displayNameOf(ctx, it) } ?: initialFile?.name ?: "file"
 
   fun vibrate() {
     if (tm.hapticOn()) {
@@ -1758,17 +1897,19 @@ fun PdfReaderScreen(
   }
 
   fun loadBookmarks() {
+    val u = pdfUri ?: return
     bookmarks.clear()
-    bookmarks.addAll(getBookmarks(ctx, fileName))
+    bookmarks.addAll(getBookmarks(ctx, u))
   }
 
   fun toggleBookmark(page1Based: Int) {
+    val u = pdfUri ?: return
     if (bookmarks.contains(page1Based)) {
       bookmarks.remove(page1Based)
-      removeBookmark(ctx, fileName, page1Based)
+      removeBookmark(ctx, u, page1Based)
     } else {
       bookmarks.add(page1Based)
-      saveBookmark(ctx, fileName, page1Based)
+      saveBookmark(ctx, u, page1Based)
     }
   }
 
@@ -1797,6 +1938,18 @@ fun PdfReaderScreen(
       var renderer: android.graphics.pdf.PdfRenderer? = null
       var pfd: android.os.ParcelFileDescriptor? = null
       try {
+        // M7: an encrypted PDF has no searchable text — say so plainly
+        // instead of silently returning empty results.
+        val encrypted = withContext(Dispatchers.IO) {
+          try { PdfProtector.isEncrypted(ctx, u) } catch (_: Exception) { false }
+        }
+        if (encrypted) {
+          withContext(Dispatchers.Main) {
+            searching = false
+            Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_reader_encrypted"), Toast.LENGTH_LONG).show()
+          }
+          return@launch
+        }
         pfd = withContext(Dispatchers.IO) { ctx.contentResolver.openFileDescriptor(u, "r") }
         if (pfd == null) {
           withContext(Dispatchers.Main) { searching = false }
@@ -1821,12 +1974,26 @@ fun PdfReaderScreen(
               val t = ocrBitmapAnyLanguage(bmp)
               bmp.recycle()
               t
-            } catch (_: Exception) { "" }
+            } catch (_: OutOfMemoryError) { "" }
+            catch (_: Exception) { "" }
           }
-          if (cached == null) searchTextCache[i] = text
+          if (cached == null) {
+            // L19: cap the cache — evict the oldest entry first.
+            if (searchTextCache.size >= 100) {
+              searchTextCache.keys.firstOrNull()?.let { searchTextCache.remove(it) }
+            }
+            searchTextCache[i] = text
+          }
           if (text.isNotBlank()) anyTextFound = true
           if (text.contains(q, ignoreCase = true)) hits.add(i + 1)
         }
+      } catch (e: kotlinx.coroutines.CancellationException) {
+        // M16: a cancelled search shows no results and no "No matches"
+        // toast — clear the partial state and rethrow so the tail code
+        // below never runs.
+        searching = false
+        searchPages = emptyList()
+        throw e
       } catch (_: Exception) {
       } finally {
         try { renderer?.close() } catch (_: Exception) {}
@@ -1836,8 +2003,8 @@ fun PdfReaderScreen(
       searchPages = hits
       searchIndex = 0
       if (hits.isNotEmpty()) jumpToPage(hits[0])
-      else if (!anyTextFound) Toast.makeText(ctx, "Search isn't available yet — the text-recognition model may still be downloading. Connect to the internet and try again.", Toast.LENGTH_LONG).show()
-      else Toast.makeText(ctx, "No matches for \"$q\"", Toast.LENGTH_SHORT).show()
+      else if (!anyTextFound) Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_unavailable"), Toast.LENGTH_LONG).show()
+      else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_search_no_matches").replace("{q}", q), Toast.LENGTH_SHORT).show()
     }
   }
 
@@ -1938,7 +2105,7 @@ fun PdfReaderScreen(
                 Text("Page $b", fontSize = Ds.BODY_SP.sp, fontWeight = FontWeight.Bold, color = theme.text, modifier = Modifier.weight(1f))
                 ChamiIconButton(
                   icon = Icons.Filled.Close, description = "Delete bookmark",
-                  onClick = { vibrate(); bookmarks.remove(b); removeBookmark(ctx, fileName, b) }
+                  onClick = { vibrate(); bookmarks.remove(b); pdfUri?.let { removeBookmark(ctx, it, b) } }
                 )
               }
             }
@@ -2071,8 +2238,15 @@ fun PdfReaderScreen(
               verticalAlignment = Alignment.CenterVertically,
               horizontalArrangement = Arrangement.SpaceBetween
             ) {
+              // L20: truncate the page list — the first 10 pages plus a
+              // "+N more" count, not one giant wrapping Text.
+              val shownSearchPages = searchPages.take(10)
+              val moreSearchPages = searchPages.size - shownSearchPages.size
+              val foundText = LocaleHelper.t(ctx, "reader_found_on_pages")
+                .replace("{pages}", shownSearchPages.joinToString(", ")) +
+                if (moreSearchPages > 0) " " + LocaleHelper.t(ctx, "reader_found_more").replace("{n}", "$moreSearchPages") else ""
               Text(
-                "Found on pages: ${searchPages.joinToString(", ")}",
+                foundText,
                 fontSize = Ds.HINT_SP.sp, color = theme.primaryDark, fontWeight = FontWeight.Bold
               )
               TextButton(
@@ -2348,12 +2522,12 @@ private fun ReaderPageView(
 // "Protect PDF". Lock: password with a real vector eye, strength hint
 // under the field, mismatch error under confirm as typed, three
 // permission switches (printing / copying / editing, all ON by
-// default) that are actually applied via patchPdfPermissions.
+// default) that are actually applied via PdfProtector.patchPermissions.
 // Unlock distinguishes "wrong password" from "unsupported format".
 // Output is always a NEW file (NAME_protected / NAME_unlocked); the
-// original is never overwritten. NOTE: encryption here is the app's
-// own Standard V1/R2 (RC4) format via PdfProtector — modern readers
-// may warn about it; AES-256 is a separate engine upgrade.
+// original is never overwritten. NOTE: new protections use AES-128
+// Standard encryption (PdfProtector, V=4/R=4); files protected by
+// older versions with 40-bit RC4 still open and unlock.
 @Composable
 fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, onBack: () -> Unit) {
   val ctx = LocalContext.current
@@ -2369,8 +2543,8 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
   var pdfLoadFailed by remember { mutableStateOf(false) }
   var loadedPdfUri by remember { mutableStateOf<Uri?>(null) }
   var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
-  var password by remember { mutableStateOf("") }
-  var confirmPassword by remember { mutableStateOf("") }
+  var password by rememberSaveable { mutableStateOf("") }
+  var confirmPassword by rememberSaveable { mutableStateOf("") }
   var passwordVisible by remember { mutableStateOf(false) }
   var allowPrint by rememberSaveable { mutableStateOf(true) }
   var allowCopy by rememberSaveable { mutableStateOf(true) }
@@ -2378,7 +2552,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
 
   var unlockUri by rememberSaveableUri()
   var unlockName by remember { mutableStateOf("") }
-  var unlockPassword by remember { mutableStateOf("") }
+  var unlockPassword by rememberSaveable { mutableStateOf("") }
   var unlockPasswordVisible by remember { mutableStateOf(false) }
   var unlockError by remember { mutableStateOf<String?>(null) }
 
@@ -2457,17 +2631,17 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
       }
       var patched = true
       if (ok && (!allowPrint || !allowCopy || !allowEdit)) {
-        patched = patchPdfPermissions(out, password, allowPrint = allowPrint, allowCopy = allowCopy, allowEdit = allowEdit)
+        patched = PdfProtector.patchPermissions(out, password, allowPrint = allowPrint, allowCopy = allowCopy, allowEdit = allowEdit)
       }
       withContext(Dispatchers.Main) {
         isProcessing = false
         if (ok) {
           if (!patched) {
-            Toast.makeText(ctx, "Protected, but permissions could not be applied", Toast.LENGTH_LONG).show()
+            Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_protect_permissions_failed"), Toast.LENGTH_LONG).show()
           }
           singleSave(out)
         } else {
-          Toast.makeText(ctx, "Failed to encrypt PDF", Toast.LENGTH_SHORT).show()
+          Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_encrypt_failed"), Toast.LENGTH_SHORT).show()
         }
       }
     }
@@ -2476,7 +2650,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
   fun unlock() {
     val uri = unlockUri ?: return
     if (unlockPassword.isBlank()) {
-      unlockError = "Enter the PDF password."
+      unlockError = LocaleHelper.t(ctx, "unlock_enter_password")
       return
     }
     isProcessing = true
@@ -2484,31 +2658,36 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
     scope.launch {
       val tmp = File(ctx.cacheDir, "unlock_in_${System.currentTimeMillis()}.pdf")
       val out = PdfEngine.outFile(ctx, "${unlockName}_unlocked_${System.currentTimeMillis()}.pdf")
+      // H6: no whole-file read — the input is only copied to a temp
+      // file (streamed), then PdfProtector.unlockPdf works on a
+      // read-only memory-mapped buffer. The legacy unlockProtectedPdf
+      // fallback (3x full-file copies) is deleted.
       val result: String? = withContext(Dispatchers.IO) {
         try {
           ctx.contentResolver.openInputStream(uri)?.use { input ->
             FileOutputStream(tmp).use { o -> input.copyTo(o) }
           }
         } catch (_: Exception) { }
-        if (!tmp.exists()) return@withContext "Could not read that file."
-        val bytes = try { tmp.readBytes() } catch (_: Exception) { ByteArray(0) }
-        val text = String(bytes, Charsets.ISO_8859_1)
-        if (!text.contains("/Encrypt")) return@withContext "This file is not protected by a password."
+        if (!tmp.exists()) return@withContext LocaleHelper.t(ctx, "unlock_read_failed")
+        if (!PdfProtector.isEncryptedFile(tmp)) return@withContext LocaleHelper.t(ctx, "unlock_not_protected")
         if (!PdfProtector.verifyPassword(tmp, unlockPassword)) {
-          return@withContext "Wrong password — try again."
+          return@withContext LocaleHelper.t(ctx, "unlock_wrong_password")
         }
-        val ok = PdfProtector.unlockPdf(tmp, out, unlockPassword) ||
-          unlockProtectedPdf(tmp, unlockPassword, out)
+        val ok = try { PdfProtector.unlockPdf(tmp, out, unlockPassword) } catch (_: Exception) { false }
         if (!ok) {
-          return@withContext "This file uses an encryption type this app can't unlock. Only Standard encryption (as used by Chami) is supported on-device."
+          return@withContext LocaleHelper.t(ctx, "unlock_unsupported")
         }
         null // success
       }
+      // L14: the unlock temp file is deleted after success AND on
+      // failure; a failed unlock also leaves no partial output behind.
+      try { tmp.delete() } catch (_: Exception) {}
       isProcessing = false
       if (result == null) {
-        Toast.makeText(ctx, "Unlocked", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_unlocked"), Toast.LENGTH_SHORT).show()
         singleSave(out)
       } else {
+        try { out.delete() } catch (_: Exception) {}
         unlockError = result
       }
     }
@@ -2540,8 +2719,12 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
 
   ToolScreenContainer("Protect PDF", theme, onBack) {
     Column(
+      // C1: weight(1f), NOT fillMaxSize() — a fillMaxSize child takes
+      // the whole Column, pushing the SlideToAction below off-screen
+      // so the tool could not be used at all. Every other tool screen
+      // already uses weight(1f) here.
       Modifier
-        .fillMaxSize()
+        .weight(1f)
         .verticalScroll(rememberScrollState()),
       verticalArrangement = Arrangement.spacedBy(Ds.s16)
     ) {
@@ -2739,7 +2922,7 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
               Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Error, contentDescription = null, tint = ChamiColors.errorRed, modifier = Modifier.size(24.dp))
                 Spacer(Modifier.width(Ds.s8))
-                Text("Passwords do not match", fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
+                Text(LocaleHelper.t(ctx, "reason_passwords_mismatch"), fontSize = Ds.HINT_SP.sp, color = ChamiColors.errorRed)
               }
             }
             Spacer(Modifier.height(Ds.s16))
@@ -2758,14 +2941,15 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
               Switch(checked = allowEdit, onCheckedChange = { allowEdit = it })
             }
             Spacer(Modifier.height(Ds.s12))
-            // FIX 2026-11-18 (report #29): the encryption is legacy
-            // 40-bit — say so next to the protect action.
+            // H9: new protections are AES-128 (PdfProtector) — the old
+            // "40-bit" note described the retired RC4 format. Legacy
+            // RC4 files still open.
             Row(verticalAlignment = Alignment.CenterVertically) {
-              Icon(Icons.Filled.Warning, contentDescription = null, tint = ChamiColors.warningAmber, modifier = Modifier.size(24.dp))
+              Icon(Icons.Filled.Info, contentDescription = null, tint = theme.primary, modifier = Modifier.size(24.dp))
               Spacer(Modifier.width(Ds.s8))
               Text(
-                "Older encryption (40-bit) — some readers may warn or refuse this file",
-                fontSize = Ds.HINT_SP.sp, color = ChamiColors.warningAmber
+                LocaleHelper.t(ctx, "protect_encryption_aes_note"),
+                fontSize = Ds.HINT_SP.sp, color = theme.textSecondary
               )
             }
             Spacer(Modifier.height(Ds.s8))
@@ -2791,8 +2975,8 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
         theme = theme,
         enabled = !isProcessing && unlockUri != null && unlockPassword.isNotBlank(),
         disabledReason = when {
-          unlockUri == null -> "Choose a protected PDF first"
-          unlockPassword.isBlank() -> "Enter the PDF password"
+          unlockUri == null -> LocaleHelper.t(ctx, "reason_choose_protected_pdf_first")
+          unlockPassword.isBlank() -> LocaleHelper.t(ctx, "unlock_enter_password")
           else -> null
         },
         onSlideComplete = { vibrate(); unlock() }
@@ -2803,11 +2987,11 @@ fun ProtectPdfScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = n
         theme = theme,
         enabled = canEncrypt,
         disabledReason = when {
-          selectedUri == null -> "Pick a PDF first"
+          selectedUri == null -> LocaleHelper.t(ctx, "reason_pick_pdf_first")
           pdfLoadFailed -> UNOPENABLE_PDF_MESSAGE
-          pageCount == 0 -> "Loading PDF…"
-          password.length < 4 -> "Enter a password of at least 4 characters"
-          password != confirmPassword -> "Passwords do not match"
+          pageCount == 0 -> LocaleHelper.t(ctx, "reason_loading_pdf")
+          password.length < 4 -> LocaleHelper.t(ctx, "reason_password_min_length")
+          password != confirmPassword -> LocaleHelper.t(ctx, "reason_passwords_mismatch")
           else -> null
         },
         onSlideComplete = { vibrate(); protect() }

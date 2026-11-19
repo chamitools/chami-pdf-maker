@@ -77,7 +77,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.security.MessageDigest
 
 // ---------------------------------------------------------------------------
 // PHASE 6 — NO ADS in this build (user decision 2026-11-13): no interstitial
@@ -97,14 +96,10 @@ import java.security.MessageDigest
 //   below (true rectangular CUT via ImagePageEditor.cropToRect); the warp
 //   dialog is no longer reachable — the Straighten button that opened
 //   it was removed at the user's request (2026-11-14).
-// - PdfProtector already exposes unlockPdf / setPermissions /
-//   verifyPassword in this copy; Protect uses them instead of the old
-//   local RC4 unlock (kept only where still needed:
-//   patchPdfPermissions). PHASE 2 (H6-part + L10) tried deleting the
-//   local RC4/MD5 helpers, but their only callers live in
-//   ToolScreens2.kt, whose migration to PdfProtector.patchPermissions
-//   could not be completed in this phase — so the helpers were
-//   restored verbatim from HEAD 4a7453d (see the note above them).
+// - PdfProtector exposes unlockPdf / setPermissions / verifyPassword /
+//   patchPermissions; Protect and Unlock use them. The old local RC4/MD5
+//   helpers were deleted in the Phase 2 final pass (L10) once the last
+//   ToolScreens2.kt call site migrated to PdfProtector.patchPermissions.
 // - ReaderTextTools already exposes saveBookmark / getBookmarks
 //   (SharedPreferences "chami_bookmarks"); the Reader uses them, plus a
 //   local removeBookmark with the same key scheme.
@@ -163,186 +158,6 @@ fun rememberSaveableUri(initialValue: Uri? = null): MutableState<Uri?> =
 fun rememberSaveableUriList(initialValue: List<Uri> = emptyList()): MutableState<List<Uri>> =
   rememberSaveable(saver = UriListStateSaver) { mutableStateOf(initialValue) }
 
-// --- Local PDF helpers (Phase 6) ------------------------------------------
-// PdfProtector.unlockPdf / setPermissions DO exist in this project, so
-// Protect uses them. The RC4 helpers below stay only for
-// patchPdfPermissions (permission-bit patching on the app's own V1/R2
-// files) and the unlock fallback path.
-//
-// COORDINATOR NOTE (Phase 2 final pass): the H6-part/L10 dedupe deleted
-// these helpers, but their only callers live in ToolScreens2.kt, whose
-// migration to PdfProtector.patchPermissions / unlockPdf-only could not
-// be completed in this phase — so the helpers are restored verbatim
-// from HEAD 4a7453d until that migration lands. PdfProtector already
-// exposes patchPermissions / unlockPdf; the next pass should switch the
-// two ToolScreens2.kt call sites over and delete this block again.
-
-val PDF_PADDING = byteArrayOf(
-  0x28.toByte(), 0xBF.toByte(), 0x4E.toByte(), 0x5E.toByte(), 0x4E.toByte(), 0x75.toByte(), 0x8A.toByte(), 0x41.toByte(),
-  0x64.toByte(), 0x00.toByte(), 0x4E.toByte(), 0x56.toByte(), 0xFF.toByte(), 0xFA.toByte(), 0x01.toByte(), 0x08.toByte(),
-  0x2E.toByte(), 0x2E.toByte(), 0x00.toByte(), 0xB6.toByte(), 0xD0.toByte(), 0x68.toByte(), 0x3E.toByte(), 0x80.toByte(),
-  0x2F.toByte(), 0x0C.toByte(), 0xA9.toByte(), 0xFE.toByte(), 0x64.toByte(), 0x53.toByte(), 0x69.toByte(), 0x7A.toByte()
-)
-
-fun rc4Crypt(key: ByteArray, data: ByteArray): ByteArray {
-  val s = IntArray(256) { it }
-  var j = 0
-  for (i in 0 until 256) {
-    j = (j + s[i] + (key[i % key.size].toInt() and 0xFF)) and 0xFF
-    val t = s[i]; s[i] = s[j]; s[j] = t
-  }
-  val out = ByteArray(data.size)
-  var x = 0; var y = 0
-  for (i in data.indices) {
-    x = (x + 1) and 0xFF
-    y = (y + s[x]) and 0xFF
-    val t = s[x]; s[x] = s[y]; s[y] = t
-    val k = s[(s[x] + s[y]) and 0xFF]
-    out[i] = (data[i].toInt() xor k).toByte()
-  }
-  return out
-}
-
-fun pdfMd5(vararg parts: ByteArray): ByteArray {
-  val d = MessageDigest.getInstance("MD5")
-  parts.forEach { d.update(it) }
-  return d.digest()
-}
-
-fun pdfPadPassword(pw: String): ByteArray {
-  val raw = pw.toByteArray(Charsets.ISO_8859_1)
-  val out = ByteArray(32)
-  val n = minOf(raw.size, 32)
-  System.arraycopy(raw, 0, out, 0, n)
-  if (n < 32) System.arraycopy(PDF_PADDING, 0, out, n, 32 - n)
-  return out
-}
-
-fun pdfHexToBytes(hex: String): ByteArray {
-  val clean = hex.filter { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
-  val out = ByteArray(clean.length / 2)
-  for (i in out.indices) {
-    out[i] = ((Character.digit(clean[i * 2], 16) shl 4) + Character.digit(clean[i * 2 + 1], 16)).toByte()
-  }
-  return out
-}
-
-fun pdfBytesToHex(b: ByteArray): String {
-  val sb = StringBuilder()
-  b.forEach { sb.append(String.format("%02x", it.toInt() and 0xFF)) }
-  return sb.toString()
-}
-
-// Unlock a Standard-security V1/R2 (RC4) PDF — the format this app's own
-// PdfProtector writes. Returns false for files this cannot decrypt
-// (e.g. AES / R5+ / other encrypt handlers).
-fun unlockProtectedPdf(input: File, password: String, out: File): Boolean {
-  return try {
-    val bytes = input.readBytes()
-    val text = String(bytes, Charsets.ISO_8859_1)
-    val oHex = Regex("""/O\s*<([0-9a-fA-F]+)>""").find(text)?.groupValues?.get(1) ?: return false
-    val idHex = Regex("""/ID\s*\[\s*<([0-9a-fA-F]+)>""").find(text)?.groupValues?.get(1) ?: return false
-    val pVal = Regex("""/P\s*(-?[0-9]+)""").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: return false
-    val oBytes = pdfHexToBytes(oHex)
-    val idBytes = pdfHexToBytes(idHex)
-    val pBytes = byteArrayOf(
-      (pVal and 0xFF).toByte(), ((pVal shr 8) and 0xFF).toByte(),
-      ((pVal shr 16) and 0xFF).toByte(), ((pVal shr 24) and 0xFF).toByte()
-    )
-    val encKey = pdfMd5(pdfPadPassword(password), oBytes, pBytes, idBytes).copyOfRange(0, 5)
-    val uHex = Regex("""/U\s*<([0-9a-fA-F]+)>""").find(text)?.groupValues?.get(1) ?: return false
-    if (!pdfBytesToHex(rc4Crypt(encKey, PDF_PADDING)).equals(uHex, ignoreCase = true)) return false
-    val result = bytes.copyOf()
-    var searchFrom = 0
-    while (true) {
-      val objMatch = Regex("""(\d+)\s+0\s+obj\b""").find(text, searchFrom) ?: break
-      val objNum = objMatch.groupValues[1].toIntOrNull() ?: break
-      val endObjIdx = text.indexOf("endobj", objMatch.range.last)
-      if (endObjIdx == -1) break
-      val streamIdx = text.indexOf("stream", objMatch.range.last)
-      if (streamIdx != -1 && streamIdx < endObjIdx) {
-        var dataStart = streamIdx + "stream".length
-        if (text.getOrNull(dataStart) == '\r') dataStart++
-        if (text.getOrNull(dataStart) == '\n') dataStart++
-        val dictText = text.substring(objMatch.range.last, streamIdx)
-        val len = Regex("""/Length\s+(\d+)""").find(dictText)?.groupValues?.get(1)?.toIntOrNull()
-        if (len != null && dataStart + len <= result.size) {
-          val md = MessageDigest.getInstance("MD5")
-          md.update(encKey)
-          md.update(
-            byteArrayOf(
-              (objNum and 0xFF).toByte(), ((objNum shr 8) and 0xFF).toByte(),
-              ((objNum shr 16) and 0xFF).toByte(), 0.toByte(), 0.toByte()
-            )
-          )
-          val objKey = md.digest().copyOfRange(0, minOf(encKey.size + 5, 16))
-          val plain = rc4Crypt(objKey, result.copyOfRange(dataStart, dataStart + len))
-          plain.copyInto(result, dataStart)
-        }
-      }
-      searchFrom = endObjIdx + 6
-    }
-    var outText = String(result, Charsets.ISO_8859_1)
-    val encRef = Regex("""/Encrypt\s+\d+\s+0\s+R""").find(outText) ?: return false
-    outText = outText.replace(encRef.value, " ".repeat(encRef.value.length))
-    out.writeBytes(outText.toByteArray(Charsets.ISO_8859_1))
-    true
-  } catch (_: Exception) {
-    false
-  }
-}
-
-// Apply print/copy/edit permissions to a PDF this app just protected.
-// PdfProtector hardcodes /P -4 (everything allowed), so the permission
-// bits are patched in place: /P and /U are recomputed consistently, and
-// the /P swap is length-preserving (all replacements are 8 chars, same
-// as "/P -4 >>") so the xref offsets stay valid. P bits: print -4,
-// edit -8, copy -16 (from the -4 base). Returns false if the patch
-// could not be applied — the file is then left as the plain protected PDF.
-fun patchPdfPermissions(
-  file: File,
-  password: String,
-  allowPrint: Boolean,
-  allowCopy: Boolean,
-  allowEdit: Boolean = true
-): Boolean {
-  return try {
-    var pVal = -4
-    if (!allowPrint) pVal -= 4
-    if (!allowEdit) pVal -= 8
-    if (!allowCopy) pVal -= 16
-    if (pVal == -4) return true
-    val text = String(file.readBytes(), Charsets.ISO_8859_1)
-    val oHex = Regex("""/O\s*<([0-9a-fA-F]+)>""").find(text)?.groupValues?.get(1) ?: return false
-    val idHex = Regex("""/ID\s*\[\s*<([0-9a-fA-F]+)>""").find(text)?.groupValues?.get(1) ?: return false
-    val oBytes = pdfHexToBytes(oHex)
-    val idBytes = pdfHexToBytes(idHex)
-    val pBytes = byteArrayOf(
-      (pVal and 0xFF).toByte(), ((pVal shr 8) and 0xFF).toByte(),
-      ((pVal shr 16) and 0xFF).toByte(), ((pVal shr 24) and 0xFF).toByte()
-    )
-    val encKey = pdfMd5(pdfPadPassword(password), oBytes, pBytes, idBytes).copyOfRange(0, 5)
-    val newU = pdfBytesToHex(rc4Crypt(encKey, PDF_PADDING))
-    val uMatch = Regex("""/U\s*<[0-9a-fA-F]{64}>""").find(text) ?: return false
-    var outText = text.replace(uMatch.value, "/U <$newU>")
-    val pReplacement = when (pVal) {
-      -8 -> "/P -8 >>"
-      -12 -> "/P -12>>"
-      -16 -> "/P -16>>"
-      -20 -> "/P -20>>"
-      -24 -> "/P -24>>"
-      -28 -> "/P -28>>"
-      -32 -> "/P -32>>"
-      else -> return false
-    }
-    if (!outText.contains("/P -4 >>")) return false
-    outText = outText.replace("/P -4 >>", pReplacement)
-    file.writeBytes(outText.toByteArray(Charsets.ISO_8859_1))
-    true
-  } catch (_: Exception) {
-    false
-  }
-}
 
 // PDF compress quality slider (10-100) with the exact quality, via the
 // engine's compressPdfImages (scale 1.0, exact JPEG quality). NOTE: the
@@ -1260,7 +1075,10 @@ fun RectCropDialog(
           },
           modifier = Modifier.height(Ds.minTouch)
         ) {
-          Text(LocaleHelper.t(ctx, "btn_apply"), color = theme.primaryDark, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
+          // M30: theme.primaryDark (#14532D) on this black dialog was
+          // ~2:1 — unreadable. theme.accent (#22C55E) is 9.2:1 on black,
+          // passing WCAG AA, and stays distinct from the white Cancel.
+          Text(LocaleHelper.t(ctx, "btn_apply"), color = theme.accent, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold)
         }
       }
       Spacer(Modifier.height(Ds.s8))

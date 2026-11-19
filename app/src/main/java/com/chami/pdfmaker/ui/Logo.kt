@@ -14,11 +14,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.chami.pdfmaker.LocaleHelper
 import com.chami.pdfmaker.R
 import com.chami.pdfmaker.theme.ChamiTheme
 
@@ -27,6 +29,7 @@ val PixelFont = FontFamily.SansSerif
 
 @Composable
 fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
+  val ctx = LocalContext.current
   val animatedFill by animateFloatAsState(targetValue = fill, label = "progress")
 
   val statusText = when {
@@ -97,8 +100,10 @@ fun ChamiLogo(theme: ChamiTheme, fill: Float, modifier: Modifier = Modifier) {
       }
 
       Spacer(Modifier.height(6.dp))
+      // M29 (Phase 2): no scanner claim — Scan was removed and there
+      // is no camera. Subtitle is a LocaleHelper key ("logo_subtitle").
       Text(
-        "PROFESSIONAL PDF & SCANNER SUITE",
+        LocaleHelper.t(ctx, "logo_subtitle"),
         fontFamily = PixelFont,
         fontWeight = FontWeight.SemiBold,
         fontSize = Ds.HINT_SP.sp,

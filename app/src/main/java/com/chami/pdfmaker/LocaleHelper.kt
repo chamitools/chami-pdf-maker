@@ -186,7 +186,55 @@ object LocaleHelper {
       "reason_select_pages_first" to "Select pages first",
       "reason_split_one_page" to "This PDF has only 1 page — nothing to split",
       "share_failed" to "Could not share this file",
-      "open_failed" to "No app can open this file"
+      "open_failed" to "No app can open this file",
+      "pin_enter_prompt" to "Enter your 4-digit PIN",
+      "pin_wrong_try_again" to "Wrong PIN — try again",
+      "pin_wrong" to "Wrong PIN", "pin_unlock" to "UNLOCK",
+      "pin_forgot" to "Forgot PIN?",
+      "pin_forgot_body" to "Resetting a forgotten PIN requires reinstalling the app. There is no other way to remove App Lock.",
+      "close" to "CLOSE", "intro_skip" to "Skip intro",
+      "logo_subtitle" to "PROFESSIONAL PDF SUITE",
+      "calculating_sizes" to "Calculating…",
+      "done_open" to "Open", "done_share" to "Share",
+      "done_pdf_created" to "PDF created successfully",
+      "done_file_created" to "File created successfully",
+      "done_page" to "page", "done_pages" to "pages",
+      "done_chami_folder" to "Chami folder",
+      "toast_merge_need_two" to "Select at least 2 PDFs to merge",
+      "toast_merge_failed" to "Failed to merge PDFs",
+      "toast_save_cancelled_files" to "Save cancelled — files kept in Chami folder",
+      "toast_compress_failed" to "Compression failed",
+      "toast_compress_pdf_failed" to "PDF compression failed",
+      "toast_dims_range" to "Enter a width and height between 1 and 4096 px (max 16 million pixels total)",
+      "toast_exact_kb_jpg_only" to "Exact KB target works with JPG — saved at chosen size instead",
+      "toast_resize_failed" to "Failed to resize",
+      "toast_nothing_to_convert" to "Nothing to convert — all files are already {format}",
+      "label_unknown_format" to "Unknown format",
+      "resize_unknown_format" to "Could not detect this image's format — saving as {format}.",
+      "toast_copied" to "Copied to clipboard",
+      "toast_ocr_export_failed" to "Could not export the OCR text — try again",
+      "ocr_exporting_txt" to "Saving text file…",
+      "ocr_exporting_pdf" to "Making PDF…",
+      "toast_reader_encrypted" to "This PDF is encrypted — search can't read it. Unlock it first, then search.",
+      "toast_search_unavailable" to "Search isn't available yet — the text-recognition model may still be downloading. Connect to the internet and try again.",
+      "toast_search_no_matches" to "No matches for \"{q}\"",
+      "reader_found_on_pages" to "Found on pages: {pages}",
+      "reader_found_more" to "+{n} more",
+      "unlock_enter_password" to "Enter the PDF password.",
+      "unlock_read_failed" to "Could not read that file.",
+      "unlock_not_protected" to "This file is not protected by a password.",
+      "unlock_wrong_password" to "Wrong password — try again.",
+      "unlock_unsupported" to "This file uses an encryption type this app can't unlock. Only Standard encryption (as used by Chami) is supported on-device.",
+      "toast_unlocked" to "Unlocked",
+      "toast_protect_permissions_failed" to "Protected, but permissions could not be applied",
+      "toast_encrypt_failed" to "Failed to encrypt PDF",
+      "protect_encryption_aes_note" to "Protected with AES-128 encryption. Files protected by older versions (40-bit) still open.",
+      "reason_select_images_first" to "Select images first",
+      "reason_select_image_first" to "Select an image first",
+      "reason_select_photo_first" to "Select a photo first",
+      "reason_passwords_mismatch" to "Passwords do not match",
+      "reason_choose_protected_pdf_first" to "Choose a protected PDF first",
+      "reason_password_min_length" to "Enter a password of at least 4 characters"
     ),
     "hi" to mapOf(
       "home" to "होम", "history" to "इतिहास", "settings" to "सेटिंग्स",
@@ -201,7 +249,13 @@ object LocaleHelper {
       "contact_support" to "सहायता से संपर्क करें", "check_updates" to "अपडेट देखें",
       "storage" to "स्टोरेज", "app_lock" to "ऐप लॉक",
       "font_size" to "फ़ॉन्ट आकार", "clear_cache" to "कैश साफ़ करें",
-      "privacy_policy" to "गोपनीयता नीति"
+      "privacy_policy" to "गोपनीयता नीति",
+      "slide_convert" to "स्लाइड करके बदलें", "slide_extract" to "स्लाइड करके निकालें",
+      "slide_split" to "स्लाइड करके अलग करें", "slide_merge" to "स्लाइड करके मिलाएँ",
+      "slide_compress" to "स्लाइड करके कंप्रेस करें", "slide_convert_all" to "स्लाइड करके सभी बदलें",
+      "slide_resize" to "स्लाइड करके रिसाइज़ करें", "slide_extract_text" to "स्लाइड करके टेक्स्ट निकालें",
+      "slide_unlock" to "स्लाइड करके PDF अनलॉक करें", "slide_protect" to "स्लाइड करके PDF सुरक्षित करें",
+      "group_images_reading" to "इमेज और रीडिंग", "group_fix_pdf" to "PDF ठीक करें"
     ),
     "es" to mapOf(
       "home" to "Inicio", "history" to "Historial", "settings" to "Ajustes",
@@ -216,7 +270,13 @@ object LocaleHelper {
       "contact_support" to "Contactar soporte", "check_updates" to "Buscar actualizaciones",
       "storage" to "Almacenamiento", "app_lock" to "Bloqueo de app",
       "font_size" to "Tamaño de fuente", "clear_cache" to "Borrar caché",
-      "privacy_policy" to "Política de privacidad"
+      "privacy_policy" to "Política de privacidad",
+      "slide_convert" to "Desliza para convertir", "slide_extract" to "Desliza para extraer",
+      "slide_split" to "Desliza para dividir", "slide_merge" to "Desliza para unir",
+      "slide_compress" to "Desliza para comprimir", "slide_convert_all" to "Desliza para convertir todo",
+      "slide_resize" to "Desliza para redimensionar", "slide_extract_text" to "Desliza para extraer texto",
+      "slide_unlock" to "Desliza para desbloquear PDF", "slide_protect" to "Desliza para proteger PDF",
+      "group_images_reading" to "Imágenes y lectura", "group_fix_pdf" to "Arreglar PDF"
     ),
     "fr" to mapOf(
       "home" to "Accueil", "history" to "Historique", "settings" to "Réglages",
@@ -231,7 +291,13 @@ object LocaleHelper {
       "contact_support" to "Contacter l'assistance", "check_updates" to "Vérifier les mises à jour",
       "storage" to "Stockage", "app_lock" to "Verrouillage de l'app",
       "font_size" to "Taille de police", "clear_cache" to "Vider le cache",
-      "privacy_policy" to "Politique de confidentialité"
+      "privacy_policy" to "Politique de confidentialité",
+      "slide_convert" to "Glisser pour convertir", "slide_extract" to "Glisser pour extraire",
+      "slide_split" to "Glisser pour diviser", "slide_merge" to "Glisser pour fusionner",
+      "slide_compress" to "Glisser pour compresser", "slide_convert_all" to "Glisser pour tout convertir",
+      "slide_resize" to "Glisser pour redimensionner", "slide_extract_text" to "Glisser pour extraire le texte",
+      "slide_unlock" to "Glisser pour déverrouiller le PDF", "slide_protect" to "Glisser pour protéger le PDF",
+      "group_images_reading" to "Images et lecture", "group_fix_pdf" to "Réparer un PDF"
     ),
     "de" to mapOf(
       "home" to "Start", "history" to "Verlauf", "settings" to "Einstellungen",
@@ -246,7 +312,13 @@ object LocaleHelper {
       "contact_support" to "Support kontaktieren", "check_updates" to "Nach Updates suchen",
       "storage" to "Speicher", "app_lock" to "App-Sperre",
       "font_size" to "Schriftgröße", "clear_cache" to "Cache leeren",
-      "privacy_policy" to "Datenschutzerklärung"
+      "privacy_policy" to "Datenschutzerklärung",
+      "slide_convert" to "Wischen zum Konvertieren", "slide_extract" to "Wischen zum Extrahieren",
+      "slide_split" to "Wischen zum Teilen", "slide_merge" to "Wischen zum Zusammenführen",
+      "slide_compress" to "Wischen zum Komprimieren", "slide_convert_all" to "Wischen zum Konvertieren aller",
+      "slide_resize" to "Wischen zum Skalieren", "slide_extract_text" to "Wischen zum Extrahieren von Text",
+      "slide_unlock" to "Wischen zum Entsperren des PDFs", "slide_protect" to "Wischen zum Schützen des PDFs",
+      "group_images_reading" to "Bilder & Lesen", "group_fix_pdf" to "PDF reparieren"
     ),
     "pt" to mapOf(
       "home" to "Início", "history" to "Histórico", "settings" to "Configurações",
@@ -261,7 +333,13 @@ object LocaleHelper {
       "contact_support" to "Falar com o suporte", "check_updates" to "Verificar atualizações",
       "storage" to "Armazenamento", "app_lock" to "Bloqueio do app",
       "font_size" to "Tamanho da fonte", "clear_cache" to "Limpar cache",
-      "privacy_policy" to "Política de privacidade"
+      "privacy_policy" to "Política de privacidade",
+      "slide_convert" to "Deslize para converter", "slide_extract" to "Deslize para extrair",
+      "slide_split" to "Deslize para dividir", "slide_merge" to "Deslize para unir",
+      "slide_compress" to "Deslize para compactar", "slide_convert_all" to "Deslize para converter tudo",
+      "slide_resize" to "Deslize para redimensionar", "slide_extract_text" to "Deslize para extrair texto",
+      "slide_unlock" to "Deslize para desbloquear o PDF", "slide_protect" to "Deslize para proteger o PDF",
+      "group_images_reading" to "Imagens e leitura", "group_fix_pdf" to "Corrigir PDF"
     ),
     "ar" to mapOf(
       "home" to "الرئيسية", "history" to "السجل", "settings" to "الإعدادات",
@@ -276,7 +354,13 @@ object LocaleHelper {
       "contact_support" to "الاتصال بالدعم", "check_updates" to "التحقق من التحديثات",
       "storage" to "التخزين", "app_lock" to "قفل التطبيق",
       "font_size" to "حجم الخط", "clear_cache" to "مسح ذاكرة التخزين المؤقت",
-      "privacy_policy" to "سياسة الخصوصية"
+      "privacy_policy" to "سياسة الخصوصية",
+      "slide_convert" to "مرّر للتحويل", "slide_extract" to "مرّر للاستخراج",
+      "slide_split" to "مرّر للتقسيم", "slide_merge" to "مرّر للدمج",
+      "slide_compress" to "مرّر للضغط", "slide_convert_all" to "مرّر لتحويل الكل",
+      "slide_resize" to "مرّر لتغيير الحجم", "slide_extract_text" to "مرّر لاستخراج النص",
+      "slide_unlock" to "مرّر لإلغاء قفل PDF", "slide_protect" to "مرّر لحماية PDF",
+      "group_images_reading" to "الصور والقراءة", "group_fix_pdf" to "إصلاح PDF"
     ),
     "zh" to mapOf(
       "home" to "首页", "history" to "历史记录", "settings" to "设置",
@@ -291,7 +375,13 @@ object LocaleHelper {
       "contact_support" to "联系客服", "check_updates" to "检查更新",
       "storage" to "存储空间", "app_lock" to "应用锁",
       "font_size" to "字体大小", "clear_cache" to "清除缓存",
-      "privacy_policy" to "隐私政策"
+      "privacy_policy" to "隐私政策",
+      "slide_convert" to "滑动转换", "slide_extract" to "滑动提取",
+      "slide_split" to "滑动拆分", "slide_merge" to "滑动合并",
+      "slide_compress" to "滑动压缩", "slide_convert_all" to "滑动全部转换",
+      "slide_resize" to "滑动调整大小", "slide_extract_text" to "滑动提取文字",
+      "slide_unlock" to "滑动解锁 PDF", "slide_protect" to "滑动保护 PDF",
+      "group_images_reading" to "图片与阅读", "group_fix_pdf" to "修复 PDF"
     ),
     "ru" to mapOf(
       "home" to "Главная", "history" to "История", "settings" to "Настройки",
@@ -306,7 +396,13 @@ object LocaleHelper {
       "contact_support" to "Связаться с поддержкой", "check_updates" to "Проверить обновления",
       "storage" to "Хранилище", "app_lock" to "Блокировка приложения",
       "font_size" to "Размер шрифта", "clear_cache" to "Очистить кэш",
-      "privacy_policy" to "Политика конфиденциальности"
+      "privacy_policy" to "Политика конфиденциальности",
+      "slide_convert" to "Проведите, чтобы конвертировать", "slide_extract" to "Проведите, чтобы извлечь",
+      "slide_split" to "Проведите, чтобы разделить", "slide_merge" to "Проведите, чтобы объединить",
+      "slide_compress" to "Проведите, чтобы сжать", "slide_convert_all" to "Проведите, чтобы конвертировать всё",
+      "slide_resize" to "Проведите, чтобы изменить размер", "slide_extract_text" to "Проведите, чтобы извлечь текст",
+      "slide_unlock" to "Проведите, чтобы разблокировать PDF", "slide_protect" to "Проведите, чтобы защитить PDF",
+      "group_images_reading" to "Изображения и чтение", "group_fix_pdf" to "Исправить PDF"
     ),
     "ja" to mapOf(
       "home" to "ホーム", "history" to "履歴", "settings" to "設定",
@@ -321,7 +417,13 @@ object LocaleHelper {
       "contact_support" to "サポートに連絡", "check_updates" to "アップデートを確認",
       "storage" to "ストレージ", "app_lock" to "アプリロック",
       "font_size" to "フォントサイズ", "clear_cache" to "キャッシュを消去",
-      "privacy_policy" to "プライバシーポリシー"
+      "privacy_policy" to "プライバシーポリシー",
+      "slide_convert" to "スライドして変換", "slide_extract" to "スライドして抽出",
+      "slide_split" to "スライドして分割", "slide_merge" to "スライドして結合",
+      "slide_compress" to "スライドして圧縮", "slide_convert_all" to "スライドしてすべて変換",
+      "slide_resize" to "スライドしてリサイズ", "slide_extract_text" to "スライドしてテキスト抽出",
+      "slide_unlock" to "スライドしてPDFのロック解除", "slide_protect" to "スライドしてPDFを保護",
+      "group_images_reading" to "画像と閲覧", "group_fix_pdf" to "PDFを修正"
     )
   )
 

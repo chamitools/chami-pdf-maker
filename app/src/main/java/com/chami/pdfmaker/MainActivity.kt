@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,13 +69,18 @@ class MainActivity : ComponentActivity() {
     setContent {
       val ctx = LocalContext.current
       var theme by remember { mutableStateOf(tm.current()) }
-      var activeTool by remember { mutableStateOf<String?>(null) }
-      var currentTab by remember { mutableStateOf("Home") }
-      var readerFile by remember { mutableStateOf<java.io.File?>(null) }
+      // M12 (Phase 2): navigation state is rememberSaveable, so a
+      // language change (activity recreation) no longer kicks the user
+      // out of the tool they were in. String and java.io.File
+      // (Serializable) save directly; the Uri uses the String-based
+      // rememberSaveableUri() from the ui package.
+      var activeTool by rememberSaveable { mutableStateOf<String?>(null) }
+      var currentTab by rememberSaveable { mutableStateOf("Home") }
+      var readerFile by rememberSaveable { mutableStateOf<java.io.File?>(null) }
       // FIX 2026-11-18 (report #27): the file the Reader hands to
       // Split / Merge / Compress, so the target tool opens with it
       // already selected instead of asking the user to re-pick it.
-      var pendingToolFileUri by remember { mutableStateOf<Uri?>(null) }
+      var pendingToolFileUri by rememberSaveableUri()
       val haptic = LocalHapticFeedback.current
       val scope = rememberCoroutineScope()
       val homeGridState = rememberLazyGridState()
@@ -186,7 +192,7 @@ class MainActivity : ComponentActivity() {
           ) {
             Icon(
               Icons.Filled.Lock,
-              contentDescription = "Locked",
+              contentDescription = LocaleHelper.t(ctx, "app_lock"),
               tint = theme.primary,
               modifier = Modifier.size(40.dp)
             )
@@ -201,7 +207,7 @@ class MainActivity : ComponentActivity() {
             )
             Spacer(Modifier.height(Ds.s8))
             Text(
-              "Enter your 4-digit PIN",
+              LocaleHelper.t(ctx, "pin_enter_prompt"),
               fontSize = Ds.HINT_SP.sp,
               lineHeight = (Ds.HINT_SP * 1.4).sp,
               color = theme.textSecondary
@@ -223,7 +229,7 @@ class MainActivity : ComponentActivity() {
             if (pinError) {
               Spacer(Modifier.height(Ds.s8))
               Text(
-                "Wrong PIN — try again",
+                LocaleHelper.t(ctx, "pin_wrong_try_again"),
                 fontSize = Ds.HINT_SP.sp,
                 color = MaterialTheme.colorScheme.error
               )
@@ -232,15 +238,15 @@ class MainActivity : ComponentActivity() {
             Button(
               onClick = {
                 if (pinMatches(savedPinStored, pinInput)) {
-                  // Migrate a legacy plain-text PIN to its SHA-256 hash.
-                  if (!savedPinStored.startsWith("sha256:")) {
+                  // Migrate legacy plain-text and unsalted-hash PINs to salted hash.
+                  if (!savedPinStored.startsWith("sha256:") || isLegacyPinHash(savedPinStored)) {
                     lockPrefs.edit().putString("app_pin", hashPin(pinInput)).apply()
                   }
                   unlocked = true
                 } else {
                   pinError = true
                   pinInput = ""
-                  Toast.makeText(ctx, "Wrong PIN", Toast.LENGTH_SHORT).show()
+                  Toast.makeText(ctx, LocaleHelper.t(ctx, "pin_wrong"), Toast.LENGTH_SHORT).show()
                 }
               },
               enabled = pinInput.length == 4,
@@ -249,7 +255,7 @@ class MainActivity : ComponentActivity() {
               modifier = Modifier.fillMaxWidth().height(Ds.secondaryButtonHeight)
             ) {
               Text(
-                "UNLOCK",
+                LocaleHelper.t(ctx, "pin_unlock"),
                 fontFamily = PixelFont,
                 color = theme.textOnPrimary,
                 fontSize = Ds.BODY_SP.sp,
@@ -262,7 +268,7 @@ class MainActivity : ComponentActivity() {
               modifier = Modifier.defaultMinSize(minHeight = Ds.minTouch)
             ) {
               Text(
-                "Forgot PIN?",
+                LocaleHelper.t(ctx, "pin_forgot"),
                 fontSize = Ds.HINT_SP.sp,
                 color = theme.textSecondary
               )
@@ -275,7 +281,7 @@ class MainActivity : ComponentActivity() {
                 onDismissRequest = { showForgotPin = false },
                 title = {
                   Text(
-                    "Forgot PIN?",
+                    LocaleHelper.t(ctx, "pin_forgot"),
                     fontFamily = PixelFont,
                     fontWeight = FontWeight.Bold,
                     fontSize = Ds.SECTION_SP.sp
@@ -283,15 +289,14 @@ class MainActivity : ComponentActivity() {
                 },
                 text = {
                   Text(
-                    "Resetting a forgotten PIN requires reinstalling the app. " +
-                      "There is no other way to remove App Lock.",
+                    LocaleHelper.t(ctx, "pin_forgot_body"),
                     fontSize = Ds.BODY_SP.sp,
                     lineHeight = (Ds.BODY_SP * 1.4).sp
                   )
                 },
                 confirmButton = {
                   TextButton(onClick = { showForgotPin = false }) {
-                    Text("CLOSE", fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp)
+                    Text(LocaleHelper.t(ctx, "close"), fontFamily = PixelFont, fontSize = Ds.HINT_SP.sp)
                   }
                 }
               )

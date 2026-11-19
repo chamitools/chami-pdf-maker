@@ -402,3 +402,13 @@ fun getBookmarks(context: Context, pdfUri: Uri): List<Int> {
     ?.sorted()
     ?: emptyList()
 }
+
+// M26 (final pass): Uri-based remove, so the Reader no longer recomputes
+// the key locally — one key scheme, defined here only.
+fun removeBookmark(context: Context, pdfUri: Uri, page: Int) {
+  val prefs = context.getSharedPreferences("chami_bookmarks", Context.MODE_PRIVATE)
+  val key = bookmarkKeyForUri(context, pdfUri)
+  val set = prefs.getStringSet(key, emptySet())?.toMutableSet() ?: mutableSetOf()
+  set.remove(page.toString())
+  prefs.edit().putStringSet(key, set).apply()
+}

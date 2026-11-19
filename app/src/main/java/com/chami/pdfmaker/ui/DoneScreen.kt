@@ -2,8 +2,10 @@ package com.chami.pdfmaker.ui
 
 import android.graphics.PathMeasure
 import android.graphics.pdf.PdfRenderer
+import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.ParcelFileDescriptor
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -33,6 +35,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.chami.pdfmaker.LocaleHelper
 import com.chami.pdfmaker.pdf.ShareHelper
 import com.chami.pdfmaker.theme.ChamiTheme
 import java.io.File
@@ -96,6 +100,16 @@ private val CONFETTI_COLORS = listOf(
   Color(0xFF38BDF8), Color(0xFFF472B6), Color(0xFFFB923C)
 )
 
+// L2: reused tick-geometry holder — the check path, its measure and
+// the trimmed segment are allocated once and rebuilt only when the
+// canvas size changes, never per animation frame.
+private class TickPathCache {
+  val path = Path()
+  val measure = PathMeasure()
+  val segment = Path()
+  var size = 0f
+}
+
 /**
  * Success screen shown right after a file is made — same after every tool.
  * Tick draws in (600ms), confetti bursts ONCE, success sound plays ONCE
@@ -129,6 +143,26 @@ fun DoneScreen(
   val haptic = LocalHapticFeedback.current
   var started by remember { mutableStateOf(false) }
 
+  // PHASE 2 (H1): system Back on a single-file Done screen goes Home
+  // instead of exiting the app (this screen early-returns before
+  // ToolScreenContainer, so it never gets that container's BackHandler).
+  BackHandler { onBackHome() }
+
+  // L2: keep a handle to the success ringtone so it can be stopped
+  // when this screen leaves composition (it used to keep playing
+  // after navigation if the sound was still ringing).
+  var successRingtone by remember { mutableStateOf<Ringtone?>(null) }
+  DisposableEffect(Unit) {
+    onDispose {
+      try { successRingtone?.stop() } catch (_: Exception) {}
+    }
+  }
+
+  // L2: the check path / measure / segment are allocated once here
+  // and rebuilt only when the tick canvas size changes (see below);
+  // the per-frame draw only trims the reused segment.
+  val tickCache = remember { TickPathCache() }
+
   // Page count for PDFs, counted once off the main thread when the
   // caller did not supply one. Non-PDF files keep no page line.
   var countedPages by remember { mutableStateOf<Int?>(pageCount) }
@@ -156,10 +190,12 @@ fun DoneScreen(
   LaunchedEffect(Unit) {
     started = true
     try {
-      RingtoneManager.getRingtone(
+      val ringtone = RingtoneManager.getRingtone(
         ctx,
         RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-      )?.play()
+      )
+      successRingtone = ringtone
+      ringtone?.play()
     } catch (_: Exception) {
       // No sound on this device — the tick + confetti + vibration still show.
     }
@@ -201,11 +237,11 @@ fun DoneScreen(
   // FIX 2026-11-18 (#3): show the folder the user actually picked
   // (savedLocationText) when the caller supplies it; fall back to the
   // file's parent folder name as before.
-  val folderName = savedLocationText ?: (file.parentFile?.name ?: "Chami folder")
+  val folderName = savedLocationText ?: (file.parentFile?.name ?: LocaleHelper.t(ctx, "done_chami_folder"))
   val pages = countedPages
   val fileMeta = buildString {
     append(formatFileSize(file.length()))
-    if (pages != null) append("  •  $pages ${if (pages == 1) "page" else "pages"}")
+    if (pages != null) append("  •  $pages ${if (pages == 1) LocaleHelper.t(ctx, "done_page") else LocaleHelper.t(ctx, "done_pages")}")
   }
   val shareFile: (File) -> Unit = onShare ?: { f -> ShareHelper.shareFile(ctx, f, mimeForFile(f)) }
 
@@ -255,18 +291,26 @@ fun DoneScreen(
           .graphicsLayer(scaleX = scale, scaleY = scale, alpha = tickProgress.coerceIn(0.05f, 1f))
       ) {
         drawCircle(theme.primary, size.minDimension / 2f, center)
-        val check = Path().apply {
-          val s = size.minDimension
-          moveTo(s * 0.28f, s * 0.52f)
-          lineTo(s * 0.45f, s * 0.68f)
-          lineTo(s * 0.74f, s * 0.34f)
+        // L2: rebuild the check path only when the canvas size
+        // changes; each frame only trims the reused segment.
+        val s = size.minDimension
+        if (s != tickCache.size) {
+          tickCache.size = s
+          tickCache.path.apply {
+            reset()
+            moveTo(s * 0.28f, s * 0.52f)
+            lineTo(s * 0.45f, s * 0.68f)
+            lineTo(s * 0.74f, s * 0.34f)
+          }
+          tickCache.measure.setPath(tickCache.path.asAndroidPath(), false)
         }
-        val measure = PathMeasure()
-        measure.setPath(check.asAndroidPath(), false)
-        val segment = Path()
-        measure.getSegment(0f, measure.length * tickProgress, segment.asAndroidPath(), true)
+        tickCache.segment.reset()
+        tickCache.measure.getSegment(
+          0f, tickCache.measure.length * tickProgress,
+          tickCache.segment.asAndroidPath(), true
+        )
         drawPath(
-          segment,
+          tickCache.segment,
           Color.White,
           style = Stroke(width = size.minDimension * 0.09f, cap = StrokeCap.Round)
         )
@@ -274,7 +318,7 @@ fun DoneScreen(
     }
 
     Text(
-      "Done",
+      LocaleHelper.t(ctx, "done"),
       fontFamily = PixelFontFamily,
       fontSize = Ds.TITLE_SP.sp,
       fontWeight = FontWeight.Bold,
@@ -283,7 +327,7 @@ fun DoneScreen(
     )
     Spacer(Modifier.height(Ds.s4))
     Text(
-      if (isPdf) "PDF created successfully" else "File created successfully",
+      if (isPdf) LocaleHelper.t(ctx, "done_pdf_created") else LocaleHelper.t(ctx, "done_file_created"),
       fontSize = Ds.BODY_SP.sp,
       lineHeight = (Ds.BODY_SP * 1.4).sp,
       color = theme.textSecondary
@@ -340,7 +384,7 @@ fun DoneScreen(
           )
           Spacer(Modifier.height(Ds.s4))
           Text(
-            "Saved to: $folderName",
+            LocaleHelper.t(ctx, "label_saved_to").replace("{location}", folderName),
             fontSize = Ds.META_SP.sp,
             lineHeight = (Ds.META_SP * 1.4).sp,
             color = theme.textSecondary,
@@ -368,7 +412,7 @@ fun DoneScreen(
     ) {
       Icon(Icons.Filled.OpenInNew, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
       Spacer(Modifier.size(Ds.s8))
-      Text("Open", fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+      Text(LocaleHelper.t(ctx, "done_open"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
     }
     Spacer(Modifier.height(Ds.s12))
     Button(
@@ -382,7 +426,7 @@ fun DoneScreen(
     ) {
       Icon(Icons.Filled.Share, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(24.dp))
       Spacer(Modifier.size(Ds.s8))
-      Text("Share", fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
+      Text(LocaleHelper.t(ctx, "done_share"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
     }
     Spacer(Modifier.height(Ds.s12))
     Button(
@@ -399,7 +443,7 @@ fun DoneScreen(
     ) {
       Icon(Icons.Filled.Home, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(24.dp))
       Spacer(Modifier.size(Ds.s8))
-      Text("Done", fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
+      Text(LocaleHelper.t(ctx, "done"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
     }
   }
 }

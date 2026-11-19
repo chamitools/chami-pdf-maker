@@ -13,8 +13,10 @@ import com.chami.pdfmaker.pdf.PdfReader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
+import java.security.SecureRandom
 import android.webkit.WebView
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -102,8 +104,12 @@ private fun historyToolOf(file: File): String {
 // HistoryStore record written at creation first, so a renamed file
 // stays filterable; fall back to the filename-prefix inference above
 // when no record exists (old files, files from another app).
-private fun historyToolName(ctx: Context, file: File): String {
-  return when (HistoryStore.toolFor(ctx, file.name)) {
+// FIX 2026-11-19 (M19): the tool map is loaded ONCE per History
+// screen (see HistoryScreen's toolMap) and passed in — looking a row
+// up here must do NO disk read or JSON parse, so item composition
+// stays off the disk.
+private fun historyToolName(toolMap: Map<String, String>, file: File): String {
+  return when (toolMap[file.name]) {
     "img_pdf" -> "Images to PDF"
     "merge" -> "Merge"
     "split" -> "Split"
@@ -114,6 +120,20 @@ private fun historyToolName(ctx: Context, file: File): String {
     "convert" -> "Format Convert"
     "ocr" -> "OCR"
     else -> historyToolOf(file)
+  }
+}
+
+/** FIX 2026-11-19 (L21): derive the open/share MIME from the file
+ *  extension — a PNG/WebP in History was previously handed to viewers
+ *  as "image/jpeg". Unknown extensions fall back to
+ *  "application/octet-stream" so the viewer still gets a real file. */
+private fun mimeForFile(file: File): String {
+  return when (file.extension.lowercase(Locale.getDefault())) {
+    "pdf" -> "application/pdf"
+    "png" -> "image/png"
+    "jpg", "jpeg" -> "image/jpeg"
+    "webp" -> "image/webp"
+    else -> "application/octet-stream"
   }
 }
 
@@ -141,16 +161,64 @@ private fun formatKbFromKb(kb: Long): String {
   return if (kb >= 1024) "%.1f MB".format(kb / 1024f) else "$kb KB"
 }
 
-/** App Lock PIN hashing (SHA-256, never plain text). Stored as "sha256:<hex>". */
+/** App Lock PIN hashing (salted SHA-256, never plain text).
+ *  FIX 2026-11-19 (L23): the old unsalted SHA-256 of a 4-digit PIN was
+ *  trivially brute-forceable offline (10,000 possibilities). New PINs
+ *  are stored as "sha256:<saltHex>:<hex>" where the salt is 16 random
+ *  bytes and the hash covers salt + PIN. Legacy "sha256:<hex>" hashes
+ *  (and plain 4-digit PINs) are still accepted by [pinMatches] and are
+ *  re-hashed with a salt on the next successful unlock (see
+ *  [isLegacyPinHash] and the verify dialog / MainActivity migration). */
 fun hashPin(pin: String): String {
-  val digest = MessageDigest.getInstance("SHA-256").digest(pin.toByteArray(Charsets.UTF_8))
-  return "sha256:" + digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+  val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
+  return "sha256:" + salt.toHex() + ":" + hashPinWithSalt(pin, salt)
 }
 
-/** Accepts a "sha256:…" hash, or a legacy plain 4-digit PIN (migrated on next unlock). */
+private fun ByteArray.toHex(): String =
+  joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+private fun String.hexToBytes(): ByteArray? {
+  if (length % 2 != 0) return null
+  return try {
+    ByteArray(length / 2) { i ->
+      ((substring(i * 2, i * 2 + 2).toInt(16)) and 0xff).toByte()
+    }
+  } catch (_: Exception) {
+    null
+  }
+}
+
+private fun hashPinWithSalt(pin: String, salt: ByteArray): String {
+  val digest = MessageDigest.getInstance("SHA-256")
+  digest.update(salt)
+  val hash = digest.digest(pin.toByteArray(Charsets.UTF_8))
+  return hash.toHex()
+}
+
+/** True when [stored] is a pre-salt hash (or a plain PIN) that should
+ *  be re-hashed with a salt after a successful unlock. */
+fun isLegacyPinHash(stored: String?): Boolean {
+  if (stored.isNullOrBlank()) return false
+  if (!stored.startsWith("sha256:")) return true // legacy plain PIN
+  return stored.split(":").size == 2 // unsalted "sha256:<hex>"
+}
+
+/** Accepts a salted "sha256:<salt>:<hex>" hash, a legacy unsalted
+ *  "sha256:<hex>" hash, or a legacy plain 4-digit PIN (migrated on
+ *  next unlock). */
 fun pinMatches(stored: String?, input: String): Boolean {
   if (stored.isNullOrBlank() || input.length != 4) return false
-  return if (stored.startsWith("sha256:")) stored == hashPin(input) else stored == input
+  if (!stored.startsWith("sha256:")) return stored == input
+  val parts = stored.split(":")
+  return when (parts.size) {
+    3 -> {
+      val salt = parts[1].hexToBytes() ?: return false
+      stored == "sha256:${parts[1]}:${hashPinWithSalt(input, salt)}"
+    }
+    2 -> stored == "sha256:" + MessageDigest.getInstance("SHA-256")
+      .digest(input.toByteArray(Charsets.UTF_8)).toHex()
+    else -> false
+  }
 }
 
 private const val COMPRESS_RESULTS_PREFS = "chami_compress_results"
@@ -301,6 +369,14 @@ fun HistoryScreen(
   var menuFor by remember { mutableStateOf<String?>(null) }
   var pageCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
 
+  // FIX 2026-11-19 (M19): the HistoryStore tool map is loaded ONCE per
+  // screen, off the main thread, and rows look it up in memory — no
+  // disk read or JSON parse inside item composition. Reloads when the
+  // file list changes (refresh / delete / rename).
+  val toolMap by produceState<Map<String, String>>(emptyMap(), fileList) {
+    value = withContext(Dispatchers.IO) { HistoryStore.toolMap(ctx) }
+  }
+
   fun vibrate() {
     if (tm.hapticOn()) {
       try {
@@ -361,10 +437,10 @@ fun HistoryScreen(
   // (see historyToolName); "PDF to Images", "Reader" and
   // "OCR" write no files into the Chami folder, so those chips are
   // honestly empty unless such a file exists.
-  val visible = remember(fileList, query, filter, sortMode, favourites) {
+  val visible = remember(fileList, query, filter, sortMode, favourites, toolMap) {
     var list = fileList.filter { f ->
       (query.isBlank() || f.name.contains(query, ignoreCase = true)) &&
-        (filter == "All" || historyToolName(ctx, f) == filter)
+        (filter == "All" || historyToolName(toolMap, f) == filter)
     }
     list = when (sortMode) {
       "Oldest" -> list.sortedBy { it.lastModified() }
@@ -403,8 +479,8 @@ fun HistoryScreen(
   val toolOrder = listOf(
     "Images to PDF", "Merge", "Split", "Protect", "Compress", "Resizer"
   )
-  val filterChips = remember(fileList) {
-    val present = fileList.map { historyToolName(ctx, it) }.toSet()
+  val filterChips = remember(fileList, toolMap) {
+    val present = fileList.map { historyToolName(toolMap, it) }.toSet()
     listOf("All") + toolOrder.filter { it in present }
   }
   val multiSelect = selected.isNotEmpty()
@@ -669,23 +745,23 @@ fun HistoryScreen(
             is HistoryEntry.FileRow -> {
               val file = entry.file
               val isPdf = file.name.endsWith(".pdf", ignoreCase = true)
-              val mime = if (isPdf) "application/pdf" else "image/jpeg"
+              val mime = mimeForFile(file)
               val isSel = selected.contains(file.absolutePath)
               val isFav = favourites.contains(file.absolutePath)
               val pages = pageCounts[file.absolutePath]
-              val compressResult = if (historyToolName(ctx, file) == "Compress") {
+              val compressResult = if (historyToolName(toolMap, file) == "Compress") {
                 readCompressResult(ctx, file.name)
               } else null
               Column(
                 Modifier
                   .fillMaxWidth()
                   .defaultMinSize(minHeight = Ds.listRowMinHeight)
-                  .clip(RoundedCornerShape(14.dp))
+                  .clip(RoundedCornerShape(Ds.tileRadius))
                   .background(if (isSel) theme.primary.copy(alpha = 0.12f) else theme.card)
                   .border(
                     1.dp,
                     if (isSel) theme.primary else theme.cardBorder,
-                    RoundedCornerShape(14.dp)
+                    RoundedCornerShape(Ds.tileRadius)
                   )
                   .combinedClickable(
                     onClick = {
@@ -984,12 +1060,25 @@ fun SettingsScreen(
   var previewFontScale by remember { mutableStateOf(fontScale) }
 
   val chamiDir = remember { File(ctx.getExternalFilesDir(null), "Chami") }
-  var storageUsedBytes by remember { mutableStateOf(dirSizeBytes(chamiDir)) }
-  var cacheBytes by remember { mutableStateOf(dirSizeBytes(ctx.cacheDir)) }
+  // FIX 2026-11-19 (M20): folder sizes are computed off the main
+  // thread — walking the whole file tree at first composition blocked
+  // the first frame. null = still calculating; the rows show a
+  // "Calculating…" placeholder until the values arrive.
+  val settingsScope = rememberCoroutineScope()
+  var storageUsedBytes by remember { mutableStateOf<Long?>(null) }
+  var cacheBytes by remember { mutableStateOf<Long?>(null) }
   fun refreshSizes() {
-    storageUsedBytes = dirSizeBytes(chamiDir)
-    cacheBytes = dirSizeBytes(ctx.cacheDir)
+    storageUsedBytes = null
+    cacheBytes = null
+    settingsScope.launch {
+      val sizes = withContext(Dispatchers.IO) {
+        dirSizeBytes(chamiDir) to dirSizeBytes(ctx.cacheDir)
+      }
+      storageUsedBytes = sizes.first
+      cacheBytes = sizes.second
+    }
   }
+  LaunchedEffect(Unit) { refreshSizes() }
 
   fun vibrate() {
     try {
@@ -1154,6 +1243,16 @@ fun SettingsScreen(
     // PRO pill + "Professional PDF Toolkit"). The version shown here
     // also lives in the About card below, so nothing is lost.
 
+    // M20: while the folder sizes are still being computed off the
+    // main thread, show a placeholder instead of a stale "0 KB".
+    val calculatingText = LocaleHelper.t(ctx, "calculating_sizes")
+    val storageValue = if (storageUsedBytes == null || cacheBytes == null) {
+      calculatingText
+    } else {
+      "${formatKb(storageUsedBytes!!)} used • ${formatKb(cacheBytes!!)} cache"
+    }
+    val cacheValue = cacheBytes?.let { formatKb(it) } ?: calculatingText
+
     // ---- General ----
     SectionHeading("General")
     SettingsCard {
@@ -1178,12 +1277,12 @@ fun SettingsScreen(
       )
       SettingsRow(
         title = LocaleHelper.t(ctx, "storage"),
-        value = "${formatKb(storageUsedBytes)} used • ${formatKb(cacheBytes)} cache",
+        value = storageValue,
         onClick = { refreshSizes() }
       )
       SettingsRow(
         title = LocaleHelper.t(ctx, "clear_cache"),
-        value = formatKb(cacheBytes),
+        value = cacheValue,
         onClick = { refreshSizes(); showClearCacheDialog = true }
       )
       SettingsRow(
@@ -1453,6 +1552,11 @@ fun SettingsScreen(
               pinVerifyError = "Wrong PIN — try again"
               pinVerifyText = ""
             } else {
+              // L23 migration: a legacy unsalted/plain PIN that just
+              // unlocked is re-hashed with a salt.
+              if (isLegacyPinHash(prefs.getString("app_pin", null))) {
+                prefs.edit().putString("app_pin", hashPin(pin)).apply()
+              }
               prefs.edit().putBoolean("app_lock", false).apply()
               appLockOn = false
               showPinVerifyDialog = false
@@ -1542,7 +1646,10 @@ fun SettingsScreen(
         }
       },
       title = {
-        Text("Clear Cache (${formatKb(cacheBytes)})?", fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = (Ds.BODY_SP * fontScale).sp)
+        Text(
+          "Clear Cache" + (cacheBytes?.let { " (${formatKb(it)})" } ?: "") + "?",
+          fontFamily = PixelFont, fontWeight = FontWeight.Bold, fontSize = (Ds.BODY_SP * fontScale).sp
+        )
       },
       text = {
         Text(

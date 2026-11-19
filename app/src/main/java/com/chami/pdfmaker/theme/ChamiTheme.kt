@@ -36,41 +36,17 @@ object ChamiThemes {
     isDark = false
   )
 
-  val OBSIDIAN_AMOLED = ChamiTheme(
-    id = "obsidian_amoled",
-    name = "Obsidian AMOLED",
-    subtitle = "Pitch black for OLED screens & battery saving",
-    bg = Color(0xFF000000),
-    card = Color(0xFF111113),
-    cardBorder = Color(0xFF232326),
-    primary = Color(0xFF10B981),
-    primaryDark = Color(0xFF059669),
-    text = Color(0xFFFAFAFA),
-    textSecondary = Color(0xFFA1A1AA),
-    textOnPrimary = Color.Black,
-    accent = Color(0xFF34D399),
-    isDark = true
-  )
-
-  val ALL = listOf(
-    EMERALD_PRO,
-    OBSIDIAN_AMOLED
-  )
-
-  // Map any legacy or removed theme IDs cleanly to either Emerald Pro or Obsidian AMOLED
-  fun byId(id: String): ChamiTheme {
-    return when (id) {
-      "obsidian_amoled", "dark_arcade", "sapphire_dark", "pixel_navy", "cyber_slate", "dark" -> OBSIDIAN_AMOLED
-      else -> EMERALD_PRO
-    }
-  }
+  // L8 (Phase 2): the dead Obsidian AMOLED theme and the ALL list
+  // were removed — Executive Emerald is the only theme. Any id,
+  // including legacy dark-theme ids, maps to Emerald Pro.
+  fun byId(id: String): ChamiTheme = EMERALD_PRO
 }
 
 // Phase 6 — THEME LOCK: Executive Emerald is the only theme.
 // current() always returns emerald_pro no matter what is saved, and
 // set() forces emerald_pro instead of storing the requested id.
-// The Obsidian theme object is kept so old references still compile,
-// but it can no longer be selected.
+// The Obsidian theme object was deleted in Phase 2 (L8): no code
+// referenced it any more, and it can no longer be selected.
 class ThemeManager(ctx: Context) {
   private val p = ctx.getSharedPreferences("chami_theme", Context.MODE_PRIVATE)
 

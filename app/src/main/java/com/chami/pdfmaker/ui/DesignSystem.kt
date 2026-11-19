@@ -195,11 +195,12 @@ fun ChamiIconButton(
     }
 }
 
-/** Small chip — 36dp, 12sp. Small toggle chip for option rows. */
+/** Small chip — 48dp, 12sp. Small toggle chip for option rows.
+ *  FIX 2026-11-19 (M27): was 36dp, below the 48dp touch-target rule. */
 @Composable
 fun ChamiCompactChip(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
-        modifier = modifier.defaultMinSize(minHeight = 36.dp).clickable(onClick = onClick),
+        modifier = modifier.defaultMinSize(minHeight = Ds.minTouch).clickable(onClick = onClick),
         shape = RoundedCornerShape(50),
         color = if (selected) ChamiColors.lightGreen else Color.White,
         border = BorderStroke(1.dp, if (selected) ChamiColors.darkGreen else Color(0xFFCBD5E1)),
@@ -211,14 +212,17 @@ fun ChamiCompactChip(label: String, selected: Boolean, onClick: () -> Unit, modi
     }
 }
 
-/** Primary button — 52dp, bright green, white 14sp semibold (spec §5). */
+/** Primary button — 52dp, theme primary green (0xFF16A34A), white 14sp semibold (spec §5).
+ *  FIX 2026-11-19 (L1): was brightGreen (0xFF22C55E); unified on
+ *  theme.primary (ChamiColors.darkGreen, 0xFF16A34A) so every primary
+ *  button is the same green. */
 @Composable
 fun ChamiPrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     Button(
         onClick = onClick, enabled = enabled, modifier = modifier.height(Ds.primaryButtonHeight),
         shape = RoundedCornerShape(Ds.buttonRadius),
         colors = ButtonDefaults.buttonColors(
-            containerColor = ChamiColors.brightGreen, disabledContainerColor = ChamiColors.lightGreen,
+            containerColor = ChamiColors.darkGreen, disabledContainerColor = ChamiColors.lightGreen,
             contentColor = Color.White, disabledContentColor = Color.White.copy(alpha = 0.5f)),
     ) { Text(text, fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold) }
 }

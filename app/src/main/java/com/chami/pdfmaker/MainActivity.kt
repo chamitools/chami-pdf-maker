@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,6 +27,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.mutableStateSetOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -175,7 +177,7 @@ class MainActivity : ComponentActivity() {
             .background(theme.card)
             .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
             .pressScale(animationsOn, interactionSource)
-            .clickable(interactionSource = interactionSource) {
+            .clickable(interactionSource = interactionSource, indication = LocalIndication.current) {
               vibrate()
               activeTool = t.id
             }
@@ -540,7 +542,7 @@ class MainActivity : ComponentActivity() {
                       .clip(RoundedCornerShape(Ds.s12))
                       .background(if (isSelected) theme.primary.copy(alpha = 0.15f) else Color.Transparent)
                       .pressScale(animationsOn, navInteraction)
-                      .clickable(interactionSource = navInteraction) {
+                      .clickable(interactionSource = navInteraction, indication = LocalIndication.current) {
                         vibrate()
                         if (tab == "Home" && currentTab == "Home") {
                           scope.launch { homeGridState.scrollToItem(0) }

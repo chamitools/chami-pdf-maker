@@ -1951,6 +1951,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
+  val animOn = animationsEnabled(ctx)
   var pdfUri by rememberSaveableUri()
   var totalPages by remember { mutableStateOf(0) }
   var pageOnePreview by remember { mutableStateOf<Bitmap?>(null) }
@@ -2192,18 +2193,15 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         Text(LocaleHelper.t(ctx, "label_pdf_unopenable"), fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
       }
 
-      if (pageOnePreview != null) {
+      // Phase 5 follow-up: empty state while no PDF is picked yet.
+      if (pdfUri == null) {
         Spacer(Modifier.height(Ds.s16))
-        SectionText(LocaleHelper.t(ctx, "label_preview_page_1").replace("{n}", "$totalPages"), color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
-        Column(
-          modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Ds.s8))
-            .background(theme.card)
-            .padding(Ds.s12),
-          horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        ToolEmptyState(Icons.Filled.PictureAsPdf, LocaleHelper.t(ctx, "reason_pick_pdf_first"), theme)
+      }
+
+      if (pageOnePreview != null) {
+        ToolSectionHeader(LocaleHelper.t(ctx, "label_preview_page_1").replace("{n}", "$totalPages"), theme.text)
+        ToolCard(theme = theme, horizontalAlignment = Alignment.CenterHorizontally) {
           Image(
             bitmap = pageOnePreview!!.asImageBitmap(),
             contentDescription = "Page 1 Preview",
@@ -2214,9 +2212,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
       }
 
       if (pdfUri != null) {
-        Spacer(Modifier.height(Ds.s16))
-        SectionText(LocaleHelper.t(ctx, "label_format"), color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
+        ToolSectionHeader(LocaleHelper.t(ctx, "label_format"), theme.text)
         Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
           listOf("JPG", "PNG").forEach { f ->
             ChamiChip(f, format == f, { vibrate(); format = f })
@@ -2226,18 +2222,14 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
           Spacer(Modifier.height(Ds.s4))
           HintText(LocaleHelper.t(ctx, "hint_png_larger"))
         }
-        Spacer(Modifier.height(Ds.s16))
-        SectionText(LocaleHelper.t(ctx, "label_resolution"), color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
+        ToolSectionHeader(LocaleHelper.t(ctx, "label_resolution"), theme.text)
         Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
           // PHASE 2 (H3): "Print 600" removed — see extract().
           listOf("Screen 150", "High 300").forEach { r ->
             ChamiChip(r, resolutionLabel == r, { vibrate(); resolution = r })
           }
         }
-        Spacer(Modifier.height(Ds.s16))
-        SectionText(LocaleHelper.t(ctx, "label_page_range"), color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
+        ToolSectionHeader(LocaleHelper.t(ctx, "label_page_range"), theme.text)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
           DebouncedTextField(
             value = rangeFrom, onValueChange = { rangeFrom = it.filter { ch -> ch.isDigit() } },
@@ -2271,9 +2263,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
         // (Select all / Clear + tick overlay), but with real page
         // thumbnails, labelled Page N. Extraction converts only the
         // selected pages inside the range above.
-        Spacer(Modifier.height(Ds.s16))
-        SectionText(LocaleHelper.t(ctx, "label_pages_tap_select"), color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
+        ToolSectionHeader(LocaleHelper.t(ctx, "label_pages_tap_select"), theme.text)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
           Text(
             LocaleHelper.t(ctx, "label_selected_pages_count")
@@ -2331,12 +2321,12 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
                 Modifier
                   .fillMaxWidth()
                   .aspectRatio(595f / 842f)
-                  .clip(RoundedCornerShape(Ds.s8))
+                  .clip(RoundedCornerShape(Ds.tileRadius))
                   .background(theme.card)
                   .border(
                     2.dp,
                     if (isSelected) theme.primary else theme.cardBorder,
-                    RoundedCornerShape(Ds.s8)
+                    RoundedCornerShape(Ds.tileRadius)
                   ),
                 contentAlignment = Alignment.Center
               ) {
@@ -2348,7 +2338,15 @@ fun PdfToImagesScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = 
                     contentScale = ContentScale.Fit
                   )
                 } else {
-                  Text("…", fontSize = Ds.BODY_SP.sp, color = theme.textSecondary)
+                  // Phase 5 follow-up: grey skeleton while the thumbnail
+                  // renders (same as the Images-to-PDF strip).
+                  Box(
+                    Modifier
+                      .fillMaxSize()
+                      .padding(Ds.s4)
+                      .clip(RoundedCornerShape(Ds.s8))
+                      .background(ChamiColors.skeletonBg)
+                  )
                 }
                 if (isSelected) {
                   Box(
@@ -2419,6 +2417,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   val haptic = LocalHapticFeedback.current
   val tm = remember { ThemeManager(ctx) }
   val scope = rememberCoroutineScope()
+  val animOn = animationsEnabled(ctx)
   var pdfUri by rememberSaveableUri()
   var totalPages by remember { mutableStateOf(0) }
   var pdfLoadFailed by remember { mutableStateOf(false) }
@@ -2634,22 +2633,32 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         Text(LocaleHelper.t(ctx, "label_pdf_unopenable"), fontSize = Ds.BODY_SP.sp, color = ChamiColors.errorRed)
       }
 
-      if (totalPages > 0) {
+      // Phase 5 follow-up: empty state while no PDF is picked yet.
+      if (pdfUri == null) {
         Spacer(Modifier.height(Ds.s16))
-        SectionText(LocaleHelper.t(ctx, "label_split_mode"), color = theme.text)
-        Spacer(Modifier.height(Ds.s8))
-        Row(horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
-          // The mode string is the internal key (splitMode drives the
-          // split logic), so only the DISPLAY text is translated.
-          listOf("Selected", "Range", "Every N").forEach { m ->
-            val modeLabel = when (m) {
+        ToolEmptyState(Icons.Filled.PictureAsPdf, LocaleHelper.t(ctx, "reason_pick_pdf_first"), theme)
+      }
+
+      if (totalPages > 0) {
+        // Phase 5 follow-up: shared segmented tab row (same as
+        // Compress / Protect) instead of three chips. The mode string
+        // stays the internal key; only the DISPLAY text is translated.
+        ToolSectionHeader(LocaleHelper.t(ctx, "label_split_mode"), theme.text)
+        val splitModes = listOf("Selected", "Range", "Every N")
+        ToolTabRow(
+          tabs = splitModes.map { m ->
+            when (m) {
               "Selected" -> LocaleHelper.t(ctx, "split_mode_selected")
               "Range" -> LocaleHelper.t(ctx, "split_mode_range")
               else -> LocaleHelper.t(ctx, "split_mode_every_n")
             }
-            ChamiChip(modeLabel, splitMode == m, { vibrate(); splitMode = m })
-          }
-        }
+          },
+          selectedIndex = splitModes.indexOf(splitMode),
+          onSelect = { splitMode = splitModes[it] },
+          theme = theme,
+          animOn = animOn,
+          onTap = { vibrate() }
+        )
         if (splitMode == "Range") {
           Spacer(Modifier.height(Ds.s12))
           Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Ds.s8)) {
@@ -2679,15 +2688,20 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
           )
           if (parts.isNotEmpty()) {
             Spacer(Modifier.height(Ds.s12))
-            Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
-              parts.forEachIndexed { i, range ->
-                Text(
-                  LocaleHelper.t(ctx, "label_part_pages")
-                    .replace("{n}", "${i + 1}")
-                    .replace("{from}", "${range.first}")
-                    .replace("{to}", "${range.last}"),
-                  fontSize = Ds.BODY_SP.sp, color = theme.text
-                )
+            // Phase 5 follow-up: parts preview in the shared card,
+            // rows fading up in order.
+            ToolCard(theme = theme) {
+              Column(verticalArrangement = Arrangement.spacedBy(Ds.s4)) {
+                parts.forEachIndexed { i, range ->
+                  Text(
+                    LocaleHelper.t(ctx, "label_part_pages")
+                      .replace("{n}", "${i + 1}")
+                      .replace("{from}", "${range.first}")
+                      .replace("{to}", "${range.last}"),
+                    fontSize = Ds.BODY_SP.sp, color = theme.text,
+                    modifier = Modifier.toolEnterFade(i, animOn)
+                  )
+                }
               }
             }
           }
@@ -2729,7 +2743,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
             Box(
               Modifier
                 .size(Ds.minTouch)
-                .clip(RoundedCornerShape(Ds.s8))
+                .clip(RoundedCornerShape(Ds.tileRadius))
                 .background(if (isSelected) theme.primary else theme.card)
                 .border(
                   2.dp,
@@ -2738,7 +2752,7 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
                     previewPageIndex == p -> theme.primaryDark
                     else -> theme.cardBorder
                   },
-                  RoundedCornerShape(Ds.s8)
+                  RoundedCornerShape(Ds.tileRadius)
                 )
                 .clickable {
                   vibrate()
@@ -2778,17 +2792,8 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         }
 
         if (pagePreviewBitmap != null) {
-          Spacer(Modifier.height(Ds.s16))
-          SectionText(LocaleHelper.t(ctx, "label_previewing_page").replace("{n}", "$previewPageIndex"), color = theme.text)
-          Spacer(Modifier.height(Ds.s8))
-          Column(
-            modifier = Modifier
-              .fillMaxWidth()
-              .clip(RoundedCornerShape(Ds.s8))
-              .background(theme.card)
-              .padding(Ds.s12),
-            horizontalAlignment = Alignment.CenterHorizontally
-          ) {
+          ToolSectionHeader(LocaleHelper.t(ctx, "label_previewing_page").replace("{n}", "$previewPageIndex"), theme.text)
+          ToolCard(theme = theme, horizontalAlignment = Alignment.CenterHorizontally) {
             Image(
               bitmap = pagePreviewBitmap!!.asImageBitmap(),
               contentDescription = "Page $previewPageIndex",

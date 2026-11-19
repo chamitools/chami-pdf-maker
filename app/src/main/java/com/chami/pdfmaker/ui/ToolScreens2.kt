@@ -117,12 +117,14 @@ import java.io.FileOutputStream
 // one card style, one segmented tab row, one empty state, and the
 // staggered enter fade for list rows. No behaviour change — these only
 // restyle what the three screens already render.
+// Phase 5 follow-up: the helpers are internal (not private) so Split /
+// PDF to Images in ToolScreens.kt reuse them instead of duplicating them.
 // ---------------------------------------------------------------------------
 
 /** Phase 5: section header matching Home — 4dp green accent bar + bold
  *  section text. `topPadding` is 0 inside cards, Ds.s16 between blocks. */
 @Composable
-private fun ToolSectionHeader(text: String, color: Color, topPadding: Dp = Ds.s16) {
+internal fun ToolSectionHeader(text: String, color: Color, topPadding: Dp = Ds.s16) {
   Row(
     verticalAlignment = Alignment.CenterVertically,
     modifier = Modifier.padding(top = topPadding, bottom = Ds.s12)
@@ -142,7 +144,7 @@ private fun ToolSectionHeader(text: String, color: Color, topPadding: Dp = Ds.s1
 /** Phase 5: the one card style for these screens — 12dp radius, card
  *  background, 1dp border, 16dp padding by default. */
 @Composable
-private fun ToolCard(
+internal fun ToolCard(
   theme: ChamiTheme,
   modifier: Modifier = Modifier,
   padding: Dp = Ds.s16,
@@ -167,7 +169,7 @@ private fun ToolCard(
  *  selected green. Pills shrink slightly while pressed (Phase 3
  *  pressScale); the labels are passed through unchanged. */
 @Composable
-private fun ToolTabRow(
+internal fun ToolTabRow(
   tabs: List<String>,
   selectedIndex: Int,
   onSelect: (Int) -> Unit,
@@ -213,7 +215,7 @@ private fun ToolTabRow(
  *  guidance, in the same card style. The text reuses an existing
  *  LocaleHelper string (no new keys). */
 @Composable
-private fun ToolEmptyState(icon: ImageVector, text: String, theme: ChamiTheme) {
+internal fun ToolEmptyState(icon: ImageVector, text: String, theme: ChamiTheme) {
   Column(
     modifier = Modifier
       .fillMaxWidth()
@@ -253,7 +255,7 @@ private fun MergeRowSkeleton() {
  *  tiles — fade + 16dp rise, Ds.STAGGER_MS apart, shared easing.
  *  Instant (no motion) when animations are off. */
 @Composable
-private fun Modifier.toolEnterFade(index: Int, enabled: Boolean): Modifier {
+internal fun Modifier.toolEnterFade(index: Int, enabled: Boolean): Modifier {
   var entered by remember { mutableStateOf(!enabled) }
   LaunchedEffect(Unit) {
     if (enabled) {

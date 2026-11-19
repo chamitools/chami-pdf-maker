@@ -57,12 +57,13 @@ data class ToolItem(val id: String, val title: String, val iconRes: Int, val cat
 class MainActivity : ComponentActivity() {
   override fun onCreate(b: Bundle?) {
     super.onCreate(b)
-    // Screenshots / screen recording are always blocked. No toggle, no
-    // option in the app — FLAG_SECURE is always on.
-    window.setFlags(
-      WindowManager.LayoutParams.FLAG_SECURE,
-      WindowManager.LayoutParams.FLAG_SECURE
-    )
+    // SCREENSHOT BUILD ONLY (2026-11-19): FLAG_SECURE OFF so the user
+    // can take store screenshots. DO NOT merge this branch to main —
+    // the release build must keep FLAG_SECURE on.
+    // window.setFlags(
+    //   WindowManager.LayoutParams.FLAG_SECURE,
+    //   WindowManager.LayoutParams.FLAG_SECURE
+    // )
     // ALL ADS REMOVED (user decision 2026-11-13) — no interstitial, no
     // banner, no AdMob at all in this build.
     // THEME LOCK: Executive Emerald (emerald_pro) is the only theme —

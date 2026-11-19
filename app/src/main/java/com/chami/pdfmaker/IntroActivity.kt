@@ -25,12 +25,12 @@ import kotlinx.coroutines.delay
 class IntroActivity : ComponentActivity() {
   override fun onCreate(b: Bundle?) {
     super.onCreate(b)
-    // Phase 4, point 4: screenshots / screen recording always blocked,
-    // same as MainActivity. No toggle anywhere in the app.
-    window.setFlags(
-      WindowManager.LayoutParams.FLAG_SECURE,
-      WindowManager.LayoutParams.FLAG_SECURE
-    )
+    // SCREENSHOT BUILD ONLY (2026-11-19): FLAG_SECURE OFF so the user
+    // can take store screenshots. DO NOT merge this branch to main.
+    // window.setFlags(
+    //   WindowManager.LayoutParams.FLAG_SECURE,
+    //   WindowManager.LayoutParams.FLAG_SECURE
+    // )
     val tm = ThemeManager(this)
     setContent {
       val ctx = LocalContext.current

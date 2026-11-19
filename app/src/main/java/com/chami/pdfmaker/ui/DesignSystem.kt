@@ -1,7 +1,13 @@
 package com.chami.pdfmaker.ui
 
+import android.content.Context
+import android.provider.Settings
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -9,6 +15,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -16,6 +24,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -33,7 +42,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -49,6 +60,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chami.pdfmaker.theme.ChamiTheme
+import kotlinx.coroutines.launch
 
 /** Executive Emerald — exact spec §2 values (the only theme). */
 object ChamiColors {
@@ -61,6 +73,12 @@ object ChamiColors {
     val secondaryText: Color = Color(0xFF5B6B5F)
     val errorRed: Color = Color(0xFFB91C1C)
     val warningAmber: Color = Color(0xFFB45309)
+    // Phase 3: named tokens for colours that were literals in several
+    // components (border grey, error banner, skeleton) — one source.
+    val borderGrey: Color = Color(0xFFCBD5E1)
+    val errorBg: Color = Color(0xFFFEE2E2)
+    val errorBorder: Color = Color(0xFFFECACA)
+    val skeletonBg: Color = Color(0xFFEDF2F7)
 }
 
 /**
@@ -72,7 +90,11 @@ object ChamiColors {
  * Spacing scale (4dp grid): 4 / 8 / 12 / 16 / 20 / 24 / 32dp only.
  * Screen side margin: 16dp everywhere. Minimum touch target: 48x48dp.
  * Typography: title 20sp bold, section 16sp bold, tile/body 14sp,
- * button 14sp semibold, hint/meta 12sp, nav label 11sp. Line height 1.4x.
+ * button 14sp semibold, hint/meta 12sp, nav label 12sp. Line height 1.4x.
+ * Motion: one shared easing (Ds.sharedEasing) over Ds.ANIM_MS (250ms);
+ * tiles stagger in at Ds.STAGGER_MS (30ms) apart; press-scale is
+ * Ds.PRESS_SCALE (0.96). All motion is off when the system animator
+ * duration scale is 0 — see [animationsEnabled].
  */
 object Ds {
     val s4: Dp = 4.dp
@@ -98,8 +120,23 @@ object Ds {
     const val NAV_SP = 12
 
     val tileRadius: Dp = 12.dp
-    val buttonRadius: Dp = 10.dp
+    // Phase 3: was 10dp — off the 4dp grid. 12dp matches the card radius.
+    val buttonRadius: Dp = 12.dp
     val dialogRadius: Dp = 16.dp
+    val pillRadius: Dp = 50.dp
+    // Phase 3: one icon size per role — no more literal 24dp / 40dp
+    // scattered through the components.
+    val iconSize: Dp = 24.dp
+    val tileIconSize: Dp = 40.dp
+    // Phase 3: soft elevation for cards/tiles/header (shadow, not border-only).
+    val tileElevation: Dp = 2.dp
+    // Phase 3: Home tile enter animation — fade + rise by this much.
+    val enterOffsetY: Dp = 16.dp
+    // Phase 3: the ONE shared easing and timing for every animation.
+    val sharedEasing: Easing = CubicBezierEasing(0.4f, 0.0f, 0.2f, 1.0f)
+    const val ANIM_MS = 250
+    const val STAGGER_MS = 30
+    const val PRESS_SCALE = 0.96f
     val primaryButtonHeight: Dp = 52.dp
     val secondaryButtonHeight: Dp = 48.dp
     val minTouch: Dp = 48.dp
@@ -145,17 +182,17 @@ fun SectionText(text: String, color: Color = ChamiColors.deepGreen) {
 }
 
 @Composable
-fun BodyText(text: String, color: Color = Color(0xFF1A2B1F)) {
+fun BodyText(text: String, color: Color = ChamiColors.bodyText) {
     Text(text, fontSize = Ds.BODY_SP.sp, lineHeight = (Ds.BODY_SP * 1.4).sp, color = color)
 }
 
 @Composable
-fun HintText(text: String, color: Color = Color(0xFF5B6B5F)) {
+fun HintText(text: String, color: Color = ChamiColors.secondaryText) {
     Text(text, fontSize = Ds.HINT_SP.sp, lineHeight = (Ds.HINT_SP * 1.4).sp, color = color)
 }
 
 @Composable
-fun MetaText(text: String, color: Color = Color(0xFF5B6B5F)) {
+fun MetaText(text: String, color: Color = ChamiColors.secondaryText) {
     Text(text, fontSize = Ds.META_SP.sp, lineHeight = (Ds.META_SP * 1.4).sp, color = color)
 }
 
@@ -170,13 +207,13 @@ fun ChamiChip(
 ) {
     Surface(
         modifier = modifier.defaultMinSize(minHeight = Ds.minTouch).clickable(onClick = onClick),
-        shape = RoundedCornerShape(50),
+        shape = RoundedCornerShape(Ds.pillRadius),
         color = if (selected) ChamiColors.lightGreen else Color.White,
-        border = BorderStroke(1.5.dp, if (selected) ChamiColors.darkGreen else Color(0xFFCBD5E1)),
+        border = BorderStroke(1.5.dp, if (selected) ChamiColors.darkGreen else ChamiColors.borderGrey),
     ) {
         Box(Modifier.padding(horizontal = Ds.s16, vertical = Ds.s12), contentAlignment = Alignment.Center) {
             Text(label, fontSize = Ds.BODY_SP.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (selected) ChamiColors.deepGreen else Color(0xFF1A2B1F), textAlign = TextAlign.Center)
+                color = if (selected) ChamiColors.deepGreen else ChamiColors.bodyText, textAlign = TextAlign.Center)
         }
     }
 }
@@ -191,7 +228,7 @@ fun ChamiIconButton(
     tint: Color = ChamiColors.deepGreen,
 ) {
     IconButton(onClick = onClick, modifier = modifier.size(Ds.minTouch)) {
-        Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(24.dp))
+        Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(Ds.iconSize))
     }
 }
 
@@ -201,13 +238,13 @@ fun ChamiIconButton(
 fun ChamiCompactChip(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier.defaultMinSize(minHeight = Ds.minTouch).clickable(onClick = onClick),
-        shape = RoundedCornerShape(50),
+        shape = RoundedCornerShape(Ds.pillRadius),
         color = if (selected) ChamiColors.lightGreen else Color.White,
-        border = BorderStroke(1.dp, if (selected) ChamiColors.darkGreen else Color(0xFFCBD5E1)),
+        border = BorderStroke(1.dp, if (selected) ChamiColors.darkGreen else ChamiColors.borderGrey),
     ) {
         Box(Modifier.padding(horizontal = Ds.s16, vertical = Ds.s8), contentAlignment = Alignment.Center) {
             Text(label, fontSize = Ds.HINT_SP.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (selected) ChamiColors.deepGreen else Color(0xFF1A2B1F))
+                color = if (selected) ChamiColors.deepGreen else ChamiColors.bodyText)
         }
     }
 }
@@ -258,11 +295,11 @@ fun PreviewActionButton(icon: ImageVector, description: String, onClick: () -> U
                 .size(Ds.minTouch)
                 .shadow(4.dp, CircleShape)
                 .background(Color.White, CircleShape)
-                .border(1.dp, Color(0xFFCBD5E1), CircleShape)
+                .border(1.dp, ChamiColors.borderGrey, CircleShape)
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
-        ) { Icon(icon, contentDescription = description, tint = ChamiColors.deepGreen, modifier = Modifier.size(24.dp)) }
-        Spacer(Modifier.height(2.dp))
+        ) { Icon(icon, contentDescription = description, tint = ChamiColors.deepGreen, modifier = Modifier.size(Ds.iconSize)) }
+        Spacer(Modifier.height(Ds.s4))
         Text(
             shortLabel,
             fontSize = Ds.HINT_SP.sp,
@@ -270,7 +307,7 @@ fun PreviewActionButton(icon: ImageVector, description: String, onClick: () -> U
             color = ChamiColors.deepGreen,
             maxLines = 1,
             modifier = Modifier
-                .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(4.dp))
+                .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(Ds.s4))
                 .padding(horizontal = Ds.s4)
         )
     }
@@ -324,8 +361,8 @@ fun ChamiErrorBanner(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(Ds.tileRadius))
-            .background(Color(0xFFFEE2E2))
-            .border(1.dp, Color(0xFFFECACA), RoundedCornerShape(Ds.tileRadius))
+            .background(ChamiColors.errorBg)
+            .border(1.dp, ChamiColors.errorBorder, RoundedCornerShape(Ds.tileRadius))
             .padding(Ds.s16),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -333,7 +370,7 @@ fun ChamiErrorBanner(
             Icons.Filled.ErrorOutline,
             contentDescription = null,
             tint = ChamiColors.errorRed,
-            modifier = Modifier.size(24.dp)
+            modifier = Modifier.size(Ds.iconSize)
         )
         Spacer(Modifier.width(Ds.s12))
         Column(Modifier.weight(1f)) {
@@ -367,7 +404,7 @@ fun PageSkeletonLoader(modifier: Modifier = Modifier) {
             .fillMaxWidth()
             .aspectRatio(1f / 1.414f)
             .clip(RoundedCornerShape(Ds.s8))
-            .background(Color(0xFFEDF2F7)),
+            .background(ChamiColors.skeletonBg),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(Modifier.height(Ds.s24))
@@ -377,7 +414,7 @@ fun PageSkeletonLoader(modifier: Modifier = Modifier) {
                 .height(Ds.s12)
                 .graphicsLayer { alpha = pulse }
                 .clip(RoundedCornerShape(Ds.s4))
-                .background(Color(0xFFCBD5E1))
+                .background(ChamiColors.borderGrey)
         )
         Spacer(Modifier.height(Ds.s12))
         repeat(4) {
@@ -387,9 +424,84 @@ fun PageSkeletonLoader(modifier: Modifier = Modifier) {
                     .height(Ds.s8)
                     .graphicsLayer { alpha = pulse }
                     .clip(RoundedCornerShape(Ds.s4))
-                    .background(Color(0xFFCBD5E1))
+                    .background(ChamiColors.borderGrey)
             )
             Spacer(Modifier.height(Ds.s8))
         }
     }
+}
+
+/**
+ * Phase 3 — motion gate. True unless the system "remove animations"
+ * setting is on (animator duration scale 0). Every Phase 3 animation
+ * honours this; with it off, content appears instantly and no motion
+ * runs. No permission is needed to read Settings.Global.
+ */
+fun animationsEnabled(context: Context): Boolean {
+    return try {
+        Settings.Global.getFloat(
+            context.contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE, 1f
+        ) != 0f
+    } catch (_: Exception) {
+        true
+    }
+}
+
+/**
+ * Phase 3 — press-scale effect for tiles and buttons. The pressed
+ * component shrinks to Ds.PRESS_SCALE (0.96) over 150ms on the shared
+ * easing and springs back on release. The caller owns the
+ * [MutableInteractionSource] and passes the SAME instance to its
+ * clickable, so the press state is shared. When [enabled] is false
+ * (animations off) the scale stays 1 — no motion at all. GPU
+ * scale only; input is never blocked while it runs.
+ */
+@Composable
+fun Modifier.pressScale(enabled: Boolean, interactionSource: MutableInteractionSource): Modifier {
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) Ds.PRESS_SCALE else 1f,
+        animationSpec = tween(150, easing = Ds.sharedEasing),
+        label = "pressScale"
+    )
+    return this.graphicsLayer { scaleX = scale; scaleY = scale }
+}
+
+/**
+ * Phase 3 — shared screen transition. Enter-only fade + a slight
+ * scale-up over Ds.ANIM_MS (250ms) on Ds.sharedEasing, using
+ * animation-core only (no extra dependency).
+ *
+ * Enter-only is deliberate: the outgoing screen is removed at once,
+ * so the two screens are never composed together — HomeJourneyTest
+ * asserts CHAMI appears exactly once, and a crossfade would briefly
+ * show it twice. When [enabled] is false the new screen appears
+ * instantly. The first composition also fades in (app launch).
+ */
+@Composable
+fun <T> ChamiScreenTransition(
+    targetState: T,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable (T) -> Unit
+) {
+    val alpha = remember { Animatable(1f) }
+    val scale = remember { Animatable(1f) }
+    LaunchedEffect(targetState) {
+        if (enabled) {
+            alpha.snapTo(0f)
+            scale.snapTo(0.98f)
+            launch { alpha.animateTo(1f, tween(Ds.ANIM_MS, easing = Ds.sharedEasing)) }
+            launch { scale.animateTo(1f, tween(Ds.ANIM_MS, easing = Ds.sharedEasing)) }
+        } else {
+            alpha.snapTo(1f)
+            scale.snapTo(1f)
+        }
+    }
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .graphicsLayer { this.alpha = alpha.value; scaleX = scale.value; scaleY = scale.value }
+    ) { content(targetState) }
 }

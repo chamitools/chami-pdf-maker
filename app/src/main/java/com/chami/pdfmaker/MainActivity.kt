@@ -8,10 +8,13 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,10 +30,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -42,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chami.pdfmaker.theme.*
 import com.chami.pdfmaker.ui.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 data class ToolItem(val id: String, val title: String, val iconRes: Int, val category: String = "CORE", val titleKey: String = "")
@@ -84,6 +91,12 @@ class MainActivity : ComponentActivity() {
       val haptic = LocalHapticFeedback.current
       val scope = rememberCoroutineScope()
       val homeGridState = rememberLazyGridState()
+      // Phase 3 polish: Home tiles stagger in once (first composition),
+      // and all motion honours the system "remove animations" setting.
+      // enteredTiles remembers which tiles already played, so a tile
+      // never re-animates when it scrolls back into view.
+      val animationsOn = remember { animationsEnabled(ctx) }
+      val enteredTiles = remember { mutableStateSetOf<String>() }
       // History keeps its scroll position across tab switches: the list
       // state lives here, not inside HistoryScreen.
       val historyListState = remember { androidx.compose.foundation.lazy.LazyListState() }
@@ -139,16 +152,36 @@ class MainActivity : ComponentActivity() {
       )
 
       @Composable
-      fun ToolTile(t: ToolItem) {
+      fun ToolTile(t: ToolItem, enterDelayMs: Int, animateIn: Boolean, onEntered: (String) -> Unit) {
+        val interactionSource = remember { MutableInteractionSource() }
+        // Phase 3: staggered fade-up on first composition only. One
+        // progress value drives both alpha and rise, on the shared
+        // easing; tiles that already played (or animations off) start
+        // at full opacity. Input is never blocked while it runs.
+        val enterOffsetPx = with(LocalDensity.current) { Ds.enterOffsetY.toPx() }
+        val enterProgress = remember { Animatable(if (animateIn) 0f else 1f) }
+        LaunchedEffect(Unit) {
+          if (animateIn) {
+            delay(enterDelayMs.toLong())
+            enterProgress.animateTo(1f, tween(Ds.ANIM_MS, easing = Ds.sharedEasing))
+            onEntered(t.id)
+          }
+        }
         Column(
           Modifier
             .aspectRatio(1f)
+            .shadow(Ds.tileElevation, RoundedCornerShape(Ds.tileRadius))
             .clip(RoundedCornerShape(Ds.tileRadius))
             .background(theme.card)
             .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
-            .clickable {
+            .pressScale(animationsOn, interactionSource)
+            .clickable(interactionSource = interactionSource) {
               vibrate()
               activeTool = t.id
+            }
+            .graphicsLayer {
+              alpha = enterProgress.value
+              translationY = (1f - enterProgress.value) * enterOffsetPx
             }
             .padding(Ds.s8),
           horizontalAlignment = Alignment.CenterHorizontally,
@@ -157,7 +190,7 @@ class MainActivity : ComponentActivity() {
           Image(
             painter = painterResource(id = t.iconRes),
             contentDescription = t.title,
-            modifier = Modifier.size(40.dp),
+            modifier = Modifier.size(Ds.tileIconSize),
             contentScale = ContentScale.Fit
           )
           Spacer(Modifier.height(Ds.s8))
@@ -173,6 +206,33 @@ class MainActivity : ComponentActivity() {
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center
+          )
+        }
+      }
+
+      // Phase 3: section header with a small green accent bar — the
+      // heading text, order and translations are unchanged.
+      @Composable
+      fun SectionHeader(heading: String) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          modifier = Modifier.padding(top = Ds.s24, bottom = Ds.s12)
+        ) {
+          Box(
+            Modifier
+              .width(Ds.s4)
+              .height(Ds.s20)
+              .clip(RoundedCornerShape(Ds.pillRadius))
+              .background(theme.primary)
+          )
+          Spacer(Modifier.width(Ds.s8))
+          Text(
+            LocaleHelper.t(ctx, heading),
+            fontFamily = PixelFont,
+            fontWeight = FontWeight.Bold,
+            fontSize = Ds.SECTION_SP.sp,
+            lineHeight = (Ds.SECTION_SP * 1.4).sp,
+            color = theme.primaryDark
           )
         }
       }
@@ -303,11 +363,14 @@ class MainActivity : ComponentActivity() {
             }
           }
         } else if (activeTool != null) {
+          // Phase 3: tool screens fade in on the shared easing; the
+          // transition is enter-only (see ChamiScreenTransition).
+          ChamiScreenTransition(targetState = activeTool, enabled = animationsOn) { tool ->
           // 10 tools only. Dead routes are NOT wired: text_pdf (Word
           // editor), editor (PDF Editor), Passport Photo and PDF to Text
           // screens exist as dead code elsewhere but are never opened
           // from here — an unknown id just returns to Home.
-          when (activeTool) {
+          when (tool) {
             // FIX 2026-11-18 (report #4): every tool screen gets
             // onOpenPdfInReader, so a Done "Open" on a PDF goes to the
             // inbuilt Reader instead of an external viewer. Reader
@@ -325,6 +388,7 @@ class MainActivity : ComponentActivity() {
             "ocr" -> OcrScreen(theme, onOpenPdfInReader = { f -> readerFile = f; activeTool = "reader" }) { activeTool = null }
             "reader" -> PdfReaderScreen(theme, initialFile = readerFile, onOpenTool = { tool, uri -> pendingToolFileUri = uri; activeTool = tool }) { activeTool = null; readerFile = null }
             else -> { activeTool = null }
+          }
           }
         } else {
           BackHandler(enabled = currentTab != "Home") {
@@ -345,8 +409,16 @@ class MainActivity : ComponentActivity() {
             ) {
               // Header — CHAMI PRO kept (user confirmed). Nothing else:
               // no OFFLINE badge, no feature count, no subtext.
+              // Phase 3: the same content in a soft card so the header
+              // reads as one friendly unit with the tiles below it.
               Row(
-                Modifier.fillMaxWidth(),
+                Modifier
+                  .fillMaxWidth()
+                  .shadow(Ds.tileElevation, RoundedCornerShape(Ds.tileRadius))
+                  .clip(RoundedCornerShape(Ds.tileRadius))
+                  .background(theme.card)
+                  .border(1.dp, theme.cardBorder, RoundedCornerShape(Ds.tileRadius))
+                  .padding(Ds.s12),
                 verticalAlignment = Alignment.CenterVertically
               ) {
                 ChamiAppIcon(theme)
@@ -361,7 +433,7 @@ class MainActivity : ComponentActivity() {
                       lineHeight = (Ds.TITLE_SP * 1.4).sp,
                       color = theme.text
                     )
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(Ds.s8))
                     Box(
                       Modifier
                         .clip(RoundedCornerShape(4.dp))
@@ -387,8 +459,10 @@ class MainActivity : ComponentActivity() {
               }
 
               // Body based on selected bottom tab
+              // Phase 3: tab switches fade in on the shared easing.
               Box(Modifier.weight(1f)) {
-                when (currentTab) {
+                ChamiScreenTransition(targetState = currentTab, enabled = animationsOn) { tab ->
+                when (tab) {
                   "History" -> HistoryScreen(
                     theme,
                     onOpenInReader = { file -> readerFile = file; activeTool = "reader" },
@@ -404,22 +478,23 @@ class MainActivity : ComponentActivity() {
                       contentPadding = PaddingValues(bottom = Ds.s24),
                       modifier = Modifier.fillMaxSize()
                     ) {
+                      // Phase 3: stagger delay from the tile's position
+                      // in the flat 10-tile order (30ms apart).
+                      val flatTools = toolGroups.flatMap { it.second }
                       toolGroups.forEach { (heading, tools) ->
-                        item(span = { GridItemSpan(3) }) {
-                          Text(
-                            LocaleHelper.t(ctx, heading),
-                            fontFamily = PixelFont,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = Ds.SECTION_SP.sp,
-                            lineHeight = (Ds.SECTION_SP * 1.4).sp,
-                            color = theme.primaryDark,
-                            modifier = Modifier.padding(top = Ds.s24, bottom = Ds.s12)
+                        item(span = { GridItemSpan(3) }) { SectionHeader(heading) }
+                        items(tools, key = { it.id }) { t ->
+                          ToolTile(
+                            t,
+                            enterDelayMs = flatTools.indexOf(t) * Ds.STAGGER_MS,
+                            animateIn = animationsOn && !enteredTiles.contains(t.id),
+                            onEntered = { enteredTiles.add(it) }
                           )
                         }
-                        items(tools, key = { it.id }) { t -> ToolTile(t) }
                       }
                     }
                   }
+                }
                 }
               }
 
@@ -453,6 +528,10 @@ class MainActivity : ComponentActivity() {
                   Triple("Settings", Icons.Filled.Settings, LocaleHelper.t(ctx, "settings"))
                 )
                 navItems.forEach { (tab, icon, label) ->
+                  // Phase 3: key() so each item's press interaction
+                  // source belongs to that tab, not its loop position.
+                  key(tab) {
+                  val navInteraction = remember { MutableInteractionSource() }
                   val isSelected = currentTab == tab
                   Column(
                     Modifier
@@ -460,7 +539,8 @@ class MainActivity : ComponentActivity() {
                       .fillMaxHeight()
                       .clip(RoundedCornerShape(Ds.s12))
                       .background(if (isSelected) theme.primary.copy(alpha = 0.15f) else Color.Transparent)
-                      .clickable {
+                      .pressScale(animationsOn, navInteraction)
+                      .clickable(interactionSource = navInteraction) {
                         vibrate()
                         if (tab == "Home" && currentTab == "Home") {
                           scope.launch { homeGridState.scrollToItem(0) }
@@ -476,7 +556,7 @@ class MainActivity : ComponentActivity() {
                       icon,
                       contentDescription = label,
                       tint = if (isSelected) theme.primary else theme.textSecondary,
-                      modifier = Modifier.size(24.dp)
+                      modifier = Modifier.size(Ds.iconSize)
                     )
                     Spacer(Modifier.height(Ds.s4))
                     Text(
@@ -487,6 +567,7 @@ class MainActivity : ComponentActivity() {
                       lineHeight = (Ds.NAV_SP * 1.4).sp,
                       maxLines = 1
                     )
+                  }
                   }
                 }
                 }

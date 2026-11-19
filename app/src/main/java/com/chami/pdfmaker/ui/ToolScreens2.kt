@@ -2170,7 +2170,6 @@ fun OcrScreen(theme: ChamiTheme, onOpenPdfInReader: ((File) -> Unit)? = null, on
 // the list at once. PHONE FIX 2026-11-19 (issue 4): a swipe past the
 // zoomed page's edge changes page at the same zoom — the user is never
 // forced to zoom out to turn the page.
-@Composable
 private class ReaderSessionHolder {
   var session: PdfReaderSession? = null
   var gen: Int = 0

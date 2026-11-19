@@ -8,6 +8,35 @@
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
   <uses-permission android:name="android.permission.VIBRATE"/>
   <!-- No INTERNET / ACCESS_NETWORK_STATE: offline-first, no network calls. -->
+  <!-- FIX 2026-11-19: Android 11+ package visibility — without <queries>,
+       resolveActivity() returns null for other apps even when a PDF
+       viewer / browser IS installed, so Done "Open" always showed
+       "No app can open this file" and Check for Updates never opened
+       the browser. Covers every implicit intent the app resolves:
+       VIEW for PDF / images / text (Open) and web links (Check for
+       Updates, privacy policy), plus SEND (Share). -->
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.VIEW" />
+      <data android:mimeType="application/pdf" />
+    </intent>
+    <intent>
+      <action android:name="android.intent.action.VIEW" />
+      <data android:mimeType="image/*" />
+    </intent>
+    <intent>
+      <action android:name="android.intent.action.VIEW" />
+      <data android:mimeType="text/plain" />
+    </intent>
+    <intent>
+      <action android:name="android.intent.action.VIEW" />
+      <data android:scheme="https" />
+    </intent>
+    <intent>
+      <action android:name="android.intent.action.SEND" />
+      <data android:mimeType="*/*" />
+    </intent>
+  </queries>
   <application
       android:allowBackup="true"
       android:icon="@mipmap/ic_launcher"

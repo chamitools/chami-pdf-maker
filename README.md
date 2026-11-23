@@ -1,3 +1,9 @@
+# Chami PDF Maker — Free Online PDF Tools
+
+**Try it free online:** [Chami PDF Maker — Free Online PDF Tools](https://chamitools.github.io/chami-pdf-maker-website/) — compress PDF to 100KB / 150KB / 200KB, merge, split, convert and resize images, entirely in your browser. No signup, no watermark.
+
+**Android app:** [Download Chami PDF Maker v1.2 APK](https://github.com/chamitools/chami-pdf-maker/releases/download/v1.2/chami-pdf-maker-v1.2.apk)
+
 <div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
 </div>

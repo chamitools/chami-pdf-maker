@@ -56,23 +56,24 @@ class HomeJourneyTest {
   @Test
   fun home_imagesToPdfIsFirstAndGroupsAreOrdered() {
     composeRule.onNodeWithText("Images to PDF").assertIsDisplayed()
-    composeRule.onNodeWithText("Images & Reading").assertIsDisplayed()
-    // Group order, top to bottom: Images & Reading, Fix a PDF, Convert.
-    val readingTop = composeRule.onNodeWithText("Images & Reading")
+    composeRule.onNodeWithText("Images").assertIsDisplayed()
+    // Group order, top to bottom: Images, Fix a PDF, Convert.
+    val imagesTop = composeRule.onNodeWithText("Images")
       .fetchSemanticsNode().boundsInRoot.top
     val fixTop = composeRule.onNodeWithText("Fix a PDF")
       .fetchSemanticsNode().boundsInRoot.top
     val convertTop = composeRule.onNodeWithText("Convert")
       .fetchSemanticsNode().boundsInRoot.top
-    assertTrue(readingTop < fixTop)
+    assertTrue(imagesTop < fixTop)
     assertTrue(fixTop < convertTop)
-    // All 10 tools present, no Scan tile.
+    // All 9 tools present, no Scan and no PDF Reader tile.
     listOf(
-      "Images to PDF", "Image Resizer", "PDF Reader",
+      "Images to PDF", "Image Resizer",
       "Merge PDF", "Split PDF", "Protect PDF", "Compress KB",
       "PDF to Images", "Format Convert", "OCR Text"
     ).forEach { composeRule.onNodeWithText(it).assertIsDisplayed() }
     composeRule.onNodeWithText("Scan to PDF").assertDoesNotExist()
+    composeRule.onNodeWithText("PDF Reader").assertDoesNotExist()
   }
 
   @Test
@@ -87,8 +88,7 @@ class HomeJourneyTest {
       "PDF to Images" to "Select PDF",
       "Image Resizer" to "Select image",
       "Format Convert" to "Select images",
-      "OCR Text" to "Select photo",
-      "PDF Reader" to "Open PDF file"
+      "OCR Text" to "Select photo"
     )
     for ((tile, expected) in tools) {
       tapTile(tile)
@@ -165,12 +165,5 @@ class HomeJourneyTest {
     composeRule.waitForIdle()
     composeRule.onNodeWithText("No Documents Found").assertIsDisplayed()
     composeRule.onNodeWithText("0 documents saved").assertIsDisplayed()
-  }
-
-  @Test
-  fun reader_emptyStateIsClear() {
-    tapTile("PDF Reader")
-    composeRule.onNodeWithText("Open PDF file").assertIsDisplayed()
-    goBack()
   }
 }

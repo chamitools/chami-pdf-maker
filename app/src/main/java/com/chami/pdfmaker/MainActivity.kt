@@ -95,6 +95,7 @@ class MainActivity : ComponentActivity() {
       // and all motion honours the system "remove animations" setting.
       // enteredTiles remembers which tiles already played, so a tile
       // never re-animates when it scrolls back into view.
+      // PHASE 2: animations are always on (no toggle, no system gate).
       val animationsOn = remember { animationsEnabled(ctx) }
       val enteredTiles = remember { mutableStateOf(setOf<String>()) }
       // History keeps its scroll position across tab switches: the list
@@ -395,6 +396,11 @@ class MainActivity : ComponentActivity() {
               .fillMaxSize()
               .background(theme.bg)
           ) {
+            // PHASE 2: Particles live wallpaper — Home tab ONLY. It is
+            // composed before the Column, so every tile, label and
+            // button is drawn on top of it; leaving Home removes it
+            // and stops its frame loop.
+            if (currentTab == "Home") HomeParticlesBackground()
             Column(
               Modifier
                 .fillMaxSize()

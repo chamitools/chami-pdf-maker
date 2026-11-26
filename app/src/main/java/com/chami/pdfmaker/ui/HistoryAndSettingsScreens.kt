@@ -287,6 +287,19 @@ fun recordCompressResult(ctx: Context, outputName: String, beforeKb: Long, after
     .edit().putString(outputName, "$beforeKb|$afterKb").apply()
 }
 
+/** FIX 2026-11-24 (Phase 3): keep the before→after KB record in step
+ *  with delete / rename (it is keyed by file name). */
+private fun removeCompressResult(ctx: Context, name: String) {
+  ctx.getSharedPreferences(COMPRESS_RESULTS_PREFS, Context.MODE_PRIVATE)
+    .edit().remove(name).apply()
+}
+
+private fun moveCompressResult(ctx: Context, oldName: String, newName: String) {
+  val prefs = ctx.getSharedPreferences(COMPRESS_RESULTS_PREFS, Context.MODE_PRIVATE)
+  val raw = prefs.getString(oldName, null) ?: return
+  prefs.edit().remove(oldName).putString(newName, raw).apply()
+}
+
 private fun readCompressResult(ctx: Context, outputName: String): Pair<Long, Long>? {
   val raw = ctx.getSharedPreferences(COMPRESS_RESULTS_PREFS, Context.MODE_PRIVATE)
     .getString(outputName, null) ?: return null
@@ -312,11 +325,11 @@ private object HistoryThumbCache {
       // FIX 2026-11-19 (final audit): recycle the evicted bitmap so its
       // native pixels are freed instead of leaking until GC. Rows guard
       // against a recycled bitmap (see HistoryThumb) and re-render it.
-      val evict = size > MAX_ENTRIES
-      if (evict) {
-        eldest?.value?.let { if (!it.isRecycled) it.recycle() }
-      }
-      return evict
+      // PHASE 3: no longer recycles the evicted bitmap. A row that is
+      // still on screen can hold it, and drawing a recycled bitmap
+      // crashes. At most 40 small (0.5x) thumbnails are cached; the
+      // evicted one is freed by the GC once no row references it.
+      return size > MAX_ENTRIES
     }
   }
 
@@ -551,7 +564,13 @@ fun HistoryScreen(
         if (dir.exists()) dir.listFiles()?.filter { it.isFile } ?: emptyList() else emptyList()
       }
       fileList = files
-      storageUsed = files.sumOf { it.length() }
+      // FIX 2026-11-24 (Phase 3): the total now counts the whole Chami
+      // folder, sub-folders included (PDF to Images writes into
+      // Chami/Images_*), the same way Settings > Storage does. It used
+      // to count top-level files only and under-reported.
+      storageUsed = withContext(Dispatchers.IO) {
+        dirSizeBytes(File(ctx.getExternalFilesDir(null), "Chami"))
+      }
       loaded = true
     }
   }
@@ -584,12 +603,37 @@ fun HistoryScreen(
   }
 
   fun deleteFiles(files: List<File>) {
-    files.forEach { it.delete() }
+    // FIX 2026-11-26 (Phase 1): the dialog closes at once and the delete
+    // runs OFF the main thread. History records (tool, before->after KB,
+    // favourite) are cleared only for files that are really gone, and the
+    // "File deleted" message is shown only if that is true — a failed
+    // delete now says so instead of reporting success.
     selected = emptySet()
     fileToDelete = null
     filesToDelete = emptyList()
-    refresh()
-    Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_file_deleted"), Toast.LENGTH_SHORT).show()
+    historyScope.launch {
+      val deletedFiles = withContext(Dispatchers.IO) {
+        val gone = files.filter { it.delete() || !it.exists() }
+        gone.forEach {
+          HistoryStore.remove(ctx, it.name)
+          removeCompressResult(ctx, it.name)
+        }
+        gone
+      }
+      val goneFavs = deletedFiles.map { it.absolutePath }.toSet()
+      if (favourites.any { it in goneFavs }) {
+        val nextFavs = favourites - goneFavs
+        favourites = nextFavs
+        favPrefs.edit().putStringSet("favs", nextFavs).apply()
+      }
+      refresh()
+      val failed = files.size - deletedFiles.size
+      Toast.makeText(
+        ctx,
+        LocaleHelper.t(ctx, if (failed == 0) "toast_file_deleted" else "toast_delete_failed"),
+        Toast.LENGTH_SHORT
+      ).show()
+    }
   }
 
   val sdf = remember { SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault()) }
@@ -604,11 +648,14 @@ fun HistoryScreen(
       (query.isBlank() || f.name.contains(query, ignoreCase = true)) &&
         (filter == "All" || historyToolName(toolMap, f) == filter)
     }
+    // FIX 2026-11-26 (Phase 1): each file is stat-ed ONCE, then sorted by
+    // the stored value (the comparator used to hit the disk on every
+    // comparison, on the main thread, for every recomposition).
     list = when (sortMode) {
-      "Oldest" -> list.sortedBy { it.lastModified() }
-      "Biggest" -> list.sortedByDescending { it.length() }
+      "Oldest" -> list.map { it to it.lastModified() }.sortedBy { it.second }.map { it.first }
+      "Biggest" -> list.map { it to it.length() }.sortedByDescending { it.second }.map { it.first }
       "Name" -> list.sortedBy { it.name.lowercase(Locale.getDefault()) }
-      else -> list.sortedByDescending { it.lastModified() }
+      else -> list.map { it to it.lastModified() }.sortedByDescending { it.second }.map { it.first }
     }
     // Favourites / pinned files always come first.
     list.sortedByDescending { favourites.contains(it.absolutePath) }
@@ -907,6 +954,9 @@ fun HistoryScreen(
             is HistoryEntry.FileRow -> entry.file.absolutePath
           }
         }) { index, entry ->
+          // PHASE 3: rows slide into place when a file is deleted or
+          // the sort/filter changes (150-300ms, transform only).
+          Box(Modifier.animateItem()) {
           when (entry) {
             is HistoryEntry.Header -> {
               // Phase 6: date-group header in the shared Phase 5 style
@@ -1059,6 +1109,7 @@ fun HistoryScreen(
               }
             }
           }
+          }
         }
       }
     }
@@ -1155,6 +1206,17 @@ fun HistoryScreen(
                     Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_rename_exists"), Toast.LENGTH_SHORT).show()
                   } else if (f.renameTo(newFile)) {
                     Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_renamed"), Toast.LENGTH_SHORT).show()
+                    // FIX 2026-11-24 (Phase 3): a rename used to drop the
+                    // file's tool filter, its before→after KB and its
+                    // favourite mark (all keyed by the OLD name / path).
+                    // Carry all three over to the new name.
+                    HistoryStore.rename(ctx, f.name, newName)
+                    moveCompressResult(ctx, f.name, newName)
+                    if (favourites.contains(f.absolutePath)) {
+                      val nextFavs = (favourites - f.absolutePath) + newFile.absolutePath
+                      favourites = nextFavs
+                      favPrefs.edit().putStringSet("favs", nextFavs).apply()
+                    }
                     fileToRename = null
                     refresh()
                   } else {
@@ -1281,7 +1343,7 @@ fun SettingsScreen(
     try {
       val intent = Intent(
         Intent.ACTION_VIEW,
-        Uri.parse("https://flemax369-sketch.github.io/chami-privacy/")
+        Uri.parse("https://chamitools.github.io/chami-privacy/")
       )
       ctx.startActivity(intent)
     } catch (_: Exception) {

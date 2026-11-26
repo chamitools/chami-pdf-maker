@@ -76,7 +76,10 @@ import com.chami.pdfmaker.LocaleHelper
 import com.chami.pdfmaker.pdf.*
 import com.chami.pdfmaker.theme.ChamiTheme
 import com.chami.pdfmaker.theme.ThemeManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -235,6 +238,30 @@ class PagesViewModel : ViewModel() {
 }
 
 // --- Shared UI -----------------------------------------------------------
+
+/**
+ * FIX 2026-11-24 (Phase 2): shared processing panel — a REAL progress
+ * bar (done/total, not endless) plus a Cancel button. Used by Split and
+ * PDF to Images. [progress] null = unknown (indeterminate bar).
+ */
+@Composable
+internal fun ProcessingPanel(progress: Float?, text: String, theme: ChamiTheme, onCancel: () -> Unit) {
+  val ctx = LocalContext.current
+  Column(Modifier.fillMaxWidth()) {
+    if (progress != null) {
+      LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth(), color = theme.primary)
+    } else {
+      LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
+    }
+    Spacer(Modifier.height(Ds.s8))
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+      Text(text, fontSize = Ds.HINT_SP.sp, color = theme.text, modifier = Modifier.weight(1f))
+      TextButton(onClick = onCancel, modifier = Modifier.defaultMinSize(minHeight = Ds.minTouch)) {
+        Text(LocaleHelper.t(ctx, "editor_cancel"), color = theme.primaryDark, fontWeight = FontWeight.SemiBold)
+      }
+    }
+  }
+}
 
 @Composable
 fun ToolScreenContainer(
@@ -599,14 +626,9 @@ fun MultiDoneScreen(
       .verticalScroll(rememberScrollState()),
     horizontalAlignment = Alignment.CenterHorizontally
   ) {
-    Spacer(Modifier.height(Ds.s24))
-    Box(
-      Modifier.size(72.dp).clip(CircleShape).background(ChamiColors.lightGreen),
-      contentAlignment = Alignment.Center
-    ) {
-      Icon(Icons.Filled.Check, contentDescription = LocaleHelper.t(ctx, "done"), tint = ChamiColors.darkGreen, modifier = Modifier.size(36.dp))
-    }
-    Spacer(Modifier.height(Ds.s16))
+    // FIX 2026-11-24 (Phase 1): animated tick + confetti + success sound,
+    // same as the single-file DoneScreen (was a static tick, silent).
+    SuccessTickBurst(theme, areaHeight = 140.dp)
     TitleText(title, color = theme.text)
     Spacer(Modifier.height(Ds.s8))
     summaryLines.forEach { line ->
@@ -839,14 +861,22 @@ fun PageThumbnailStrip(
       }
       LaunchedEffect(page.uri) {
         if (thumbImage != null) return@LaunchedEffect
-        val scaled = withContext(Dispatchers.Default) {
+        // FIX 2026-11-26 (Phase 1): a page deleted while its thumbnail is
+        // being scaled recycles the source bitmap under this call, which
+        // threw IllegalStateException and crashed the app. The source is
+        // checked and the scale is guarded; a miss just shows no thumbnail.
+        val scaled: Bitmap? = withContext(Dispatchers.Default) {
           thumbCache[page.uri] ?: run {
             val bmp = page.bitmap
-            val h = (bmp.height * (200f / bmp.width)).toInt().coerceAtLeast(1)
-            Bitmap.createScaledBitmap(bmp, 200, h, true).also { thumbCache[page.uri] = it }
+            if (bmp.isRecycled) return@run null
+            try {
+              val h = (bmp.height * (200f / bmp.width)).toInt().coerceAtLeast(1)
+              Bitmap.createScaledBitmap(bmp, 200, h, true).also { thumbCache[page.uri] = it }
+            } catch (_: Exception) { null }
+              catch (_: OutOfMemoryError) { null }
           }
         }
-        thumbImage = scaled.asImageBitmap()
+        if (scaled != null && !scaled.isRecycled) thumbImage = scaled.asImageBitmap()
       }
       // PHASE 4: neighbours slide aside instead of teleporting when the
       // list reorders mid-drag. animateItemPlacement is applied to
@@ -1973,6 +2003,8 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
   var loadedPdfUri by remember { mutableStateOf<Uri?>(null) }
   var isProcessing by remember { mutableStateOf(false) }
   var progressText by remember { mutableStateOf("") }
+  var progressFraction by remember { mutableStateOf<Float?>(null) }
+  var extractJob by remember { mutableStateOf<Job?>(null) }
   var format by rememberSaveable { mutableStateOf("JPG") }
   var resolution by rememberSaveable { mutableStateOf("High 300") }
   var rangeFrom by rememberSaveable { mutableStateOf("1") }
@@ -2061,7 +2093,8 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
       return
     }
     isProcessing = true
-    scope.launch {
+    progressFraction = 0f
+    extractJob = scope.launch {
       val dir = File(ctx.getExternalFilesDir(null), "Chami/Images_${System.currentTimeMillis()}")
       if (!dir.exists()) dir.mkdirs()
       // PHASE 2 (H3): "Print 600" is gone — one A4 page at 600 DPI is a
@@ -2077,35 +2110,55 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
       // returns null, e.g. on out-of-memory) is a FAILED page, counted
       // and reported — never silently skipped.
       var failedPages = 0
+      try {
+      // FIX 2026-11-26 (Phase 1): ONE PdfRenderer for the whole run
+      // (PdfEngine.renderPages) instead of re-opening the PDF for every
+      // page. Cancel still stops at the next page and is cleaned up below.
+      withContext(Dispatchers.Main) {
+        progressFraction = 0f
+        progressText = LocaleHelper.t(ctx, "progress_image_of").replace("{i}", "1").replace("{n}", "${effectivePages.size}")
+      }
       withContext(Dispatchers.IO) {
-        for ((idx, p) in effectivePages.withIndex()) {
-          withContext(Dispatchers.Main) { progressText = LocaleHelper.t(ctx, "progress_image_of").replace("{i}", "${idx + 1}").replace("{n}", "${effectivePages.size}") }
-          val bmp = try {
-            PdfReader.renderPageBitmap(ctx, u, p - 1, scale)
-          } catch (_: OutOfMemoryError) {
-            null
-          } catch (_: Exception) {
-            null
-          }
+        PdfEngine.renderPages(ctx, u, effectivePages, scale) { idx, p, bmp ->
           if (bmp == null) {
             failedPages++
-            continue
+          } else {
+            val f = File(dir, "${base}_p$p.$ext")
+            try {
+              FileOutputStream(f).use { bmp.compress(fmt, 90, it) }
+              files.add(f)
+            } catch (_: Exception) {
+              // PHASE 2 (L18): a failed write leaves no orphan partial
+              // file behind in the Chami folder.
+              f.delete()
+              failedPages++
+            }
           }
-          val f = File(dir, "${base}_p$p.$ext")
-          try {
-            FileOutputStream(f).use { bmp.compress(fmt, 90, it) }
-            files.add(f)
-          } catch (_: Exception) {
-            // PHASE 2 (L18): a failed write leaves no orphan partial
-            // file behind in the Chami folder.
-            f.delete()
-            failedPages++
+          val done = idx + 1
+          withContext(Dispatchers.Main) {
+            progressFraction = done / effectivePages.size.toFloat()
+            progressText = LocaleHelper.t(ctx, "progress_image_of")
+              .replace("{i}", "${done}")  // REN REVIEW 2026-11-26: was done+1, so page 1 showed as page 2
+              .replace("{n}", "${effectivePages.size}")
           }
-          bmp.recycle()
         }
       }
-      isProcessing = false
-      progressText = ""
+      // REN REVIEW 2026-11-24 (Fix 4): bar now reaches 100% before Done.
+      withContext(Dispatchers.Main) { progressFraction = 1f }
+      ensureActive()
+      } catch (e: CancellationException) {
+        // User pressed Cancel: delete everything made so far, no partial output.
+        withContext(kotlinx.coroutines.NonCancellable) {
+          files.forEach { it.delete() }
+          dir.delete()
+        }
+        throw e
+      } finally {
+        isProcessing = false
+        progressText = ""
+        progressFraction = null
+        extractJob = null
+      }
       if (files.isNotEmpty()) {
         if (failedPages > 0) {
           Toast.makeText(
@@ -2361,9 +2414,7 @@ fun PdfToImagesScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        Spacer(Modifier.height(Ds.s8))
-        Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+        ProcessingPanel(progressFraction, progressText, theme, onCancel = { extractJob?.cancel() })
       }
     }
 
@@ -2408,6 +2459,8 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   var pagePreviewBitmap by remember { mutableStateOf<Bitmap?>(null) }
   var isProcessing by remember { mutableStateOf(false) }
   var progressText by remember { mutableStateOf("") }
+  var progressFraction by remember { mutableStateOf<Float?>(null) }
+  var splitJob by remember { mutableStateOf<Job?>(null) }
   var splitMode by rememberSaveable { mutableStateOf("Selected") }
   var rangeFrom by rememberSaveable { mutableStateOf("1") }
   var rangeTo by rememberSaveable { mutableStateOf("") }
@@ -2534,36 +2587,86 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
       ).show()
       return
     }
+    // FIX 2026-11-26 (Phase 1): "Every N" with an empty / zero / negative
+    // number used to fall back to 5 pages (or produce nothing) while the
+    // screen showed something else. The number must now be valid.
+    if (splitMode == "Every N" && (everyN.toIntOrNull() ?: 0) < 1) {
+      Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_split_every_invalid"), Toast.LENGTH_SHORT).show()
+      return
+    }
     isProcessing = true
-    scope.launch {
+    progressFraction = null
+    splitJob = scope.launch {
       val files = mutableListOf<File>()
+      // PHASE 4: real pages are copied (text stays selectable). These two
+      // flags remember a part that needed the image fallback, or a PDF
+      // that needs a password.
+      var usedImageFallback = false
+      var lockedFound = false
       val base = baseNameOf(ctx, u, "Split")
+      try {
       withContext(Dispatchers.IO) {
+        val keepGoing = { coroutineContext[Job]?.isActive != false }
+        fun addPart(out: File, pages: Set<Int>) {
+          when (PdfEngine.copyPagesKeepText(ctx, listOf(u to pages), out, shouldContinue = keepGoing)) {
+            PdfEngine.CopyOutcome.TEXT_KEPT -> files.add(out)
+            PdfEngine.CopyOutcome.AS_IMAGES -> { usedImageFallback = true; files.add(out) }
+            PdfEngine.CopyOutcome.LOCKED -> lockedFound = true
+            PdfEngine.CopyOutcome.FAILED -> {}
+          }
+        }
         when (splitMode) {
           "Every N" -> {
             parts.forEachIndexed { i, range ->
-              withContext(Dispatchers.Main) { progressText = LocaleHelper.t(ctx, "progress_part_of").replace("{i}", "${i + 1}").replace("{n}", "${parts.size}") }
+              ensureActive()
+              withContext(Dispatchers.Main) { progressFraction = i / parts.size.toFloat(); progressText = LocaleHelper.t(ctx, "progress_part_of").replace("{i}", "${i + 1}").replace("{n}", "${parts.size}") }
               val out = PdfEngine.outFile(ctx, "${base}_part${i + 1}_${System.currentTimeMillis()}.pdf")
-              if (PdfEngine.copyPages(ctx, listOf(u to range.toSet()), out)) files.add(out)
+              addPart(out, range.toSet())
             }
           }
           "Range" -> {
             val f = fromInt ?: 1
             val t = toInt ?: totalPages
             val out = PdfEngine.outFile(ctx, "${base}_${f}-${t}_${System.currentTimeMillis()}.pdf")
-            if (PdfEngine.copyPages(ctx, listOf(u to (f..t).toSet()), out)) files.add(out)
+            addPart(out, (f..t).toSet())
           }
           else -> {
             val out = PdfEngine.outFile(ctx, "${base}_split_${System.currentTimeMillis()}.pdf")
-            if (PdfEngine.copyPages(ctx, listOf(u to selectedPages.toSet()), out)) files.add(out)
+            addPart(out, selectedPages.toSet())
           }
         }
       }
-      isProcessing = false
-      progressText = ""
+      // REN REVIEW 2026-11-24 (Fix 4): Every N bar now reaches 100%.
+      if (splitMode == "Every N") withContext(Dispatchers.Main) { progressFraction = 1f }
+      ensureActive()
+      } catch (e: CancellationException) {
+        // User pressed Cancel: remove every part already written.
+        withContext(kotlinx.coroutines.NonCancellable) { files.forEach { it.delete() } }
+        throw e
+      } finally {
+        isProcessing = false
+        progressText = ""
+        progressFraction = null
+        splitJob = null
+      }
+      // FIX 2026-11-26 (Phase 1): a part that failed is reported, not
+      // silently missing from the saved set.
+      if (splitMode == "Every N" && files.isNotEmpty() && files.size < parts.size) {
+        Toast.makeText(
+          ctx,
+          LocaleHelper.t(ctx, "toast_split_partial")
+            .replace("{saved}", "${files.size}")
+            .replace("{total}", "${parts.size}"),
+          Toast.LENGTH_LONG
+        ).show()
+      }
+      if (usedImageFallback && files.isNotEmpty()) {
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_pages_as_images"), Toast.LENGTH_LONG).show()
+      }
       when {
         files.size > 1 -> folderSave(files.map { it to "application/pdf" })
         files.size == 1 -> singleSave(files[0])
+        lockedFound -> Toast.makeText(ctx, LocaleHelper.t(ctx, "label_pdf_unopenable"), Toast.LENGTH_LONG).show()
         else -> Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_split_failed"), Toast.LENGTH_SHORT).show()
       }
     }
@@ -2780,15 +2883,13 @@ fun SplitPdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
             )
           }
         }
-        Spacer(Modifier.height(Ds.s12))
-        HintText(LocaleHelper.t(ctx, "hint_split_rasterised"))
+        // PHASE 4: the old "pages are rendered as images" hint is gone —
+        // Split now keeps real pages and selectable text.
       }
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        Spacer(Modifier.height(Ds.s8))
-        Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+        ProcessingPanel(progressFraction, progressText, theme, onCancel = { splitJob?.cancel() })
       }
     }
 

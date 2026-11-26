@@ -1,11 +1,7 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
-
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
-  alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
 }
 
 android {
@@ -71,15 +67,10 @@ android {
   }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
-}
-
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
+// FIX 2026-11-24 (Phase 1): the Secrets Gradle Plugin and the google-services
+// plugin were AI Studio template leftovers. Nothing reads .env values or
+// google-services.json (BuildConfig is only used for VERSION_NAME), so both
+// plugins and their config blocks are removed.
 
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
@@ -97,6 +88,10 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  // PHASE 4 (approved by the user 26 Nov 2026): the ONE PDF library.
+  // PdfBox-Android, Apache-2.0, offline. Used only by Merge / Split /
+  // Compress KB (pdf/PdfBoxTools.kt).
+  implementation(libs.pdfbox.android)
   implementation("com.google.mlkit:text-recognition:16.0.0")
   implementation("com.google.mlkit:text-recognition-devanagari:16.0.1")
   // Phase 6: ads removed — play-services-ads dependency deleted (no code imports it).

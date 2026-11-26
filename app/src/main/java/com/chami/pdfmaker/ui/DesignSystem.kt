@@ -1,7 +1,6 @@
 package com.chami.pdfmaker.ui
 
 import android.content.Context
-import android.provider.Settings
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
@@ -14,6 +13,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -39,6 +40,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalDensity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlin.math.sin
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -442,21 +451,14 @@ fun PageSkeletonLoader(modifier: Modifier = Modifier) {
 }
 
 /**
- * Phase 3 — motion gate. True unless the system "remove animations"
- * setting is on (animator duration scale 0). Every Phase 3 animation
- * honours this; with it off, content appears instantly and no motion
- * runs. No permission is needed to read Settings.Global.
+ * Motion gate. PHASE 2 (user decision 26 Nov 2026): animations are ALWAYS
+ * ON — there is no in-app toggle and the app no longer follows the
+ * system "remove animations" setting. Every caller keeps its existing
+ * `animOn` branch, so this single function is the only switch.
+ * [context] is kept so no call site has to change.
  */
-fun animationsEnabled(context: Context): Boolean {
-    return try {
-        Settings.Global.getFloat(
-            context.contentResolver,
-            Settings.Global.ANIMATOR_DURATION_SCALE, 1f
-        ) != 0f
-    } catch (_: Exception) {
-        true
-    }
-}
+@Suppress("UNUSED_PARAMETER")
+fun animationsEnabled(context: Context): Boolean = true
 
 /**
  * Phase 3 — press-scale effect for tiles and buttons. The pressed
@@ -514,4 +516,86 @@ fun <T> ChamiScreenTransition(
             .fillMaxSize()
             .graphicsLayer { this.alpha = alpha.value; scaleX = scale.value; scaleY = scale.value }
     ) { content(targetState) }
+}
+
+/**
+ * PHASE 2 — HOME LIVE WALLPAPER: PARTICLES (user pick #2, 26 Nov 2026).
+ * Tiny Emerald dots rise slowly behind the Home screen. Rules kept:
+ *  - Home only: the caller composes this on the Home tab and nowhere else,
+ *    so leaving Home removes it and the frame loop stops with it.
+ *  - Also paused whenever the app is not RESUMED (background / screen off).
+ *  - Colours are only #22C55E, #16A34A, #86EFAC, #BBF7D0.
+ *  - Each dot is a 5-9dp circle moved ONLY by graphicsLayer translation +
+ *    alpha, read inside the layer block: no recomposition and no
+ *    re-layout per frame, no blur, no shadow.
+ *  - 8 dots, rise period 4.0-6.4s, staggered phases so they never move
+ *    as a block. They sit BEHIND every tile, button and label.
+ *  - No touch handling: it never intercepts a tap or scroll.
+ */
+private class Particle(
+    val xFrac: Float,
+    val sizeDp: Float,
+    val periodS: Float,
+    val phase: Float,
+    val swayDp: Float,
+    val color: Color,
+    val maxAlpha: Float
+)
+
+private val HomeParticles = listOf(
+    Particle(0.08f, 7f, 4.0f, 0.00f, 6f, Color(0xFF22C55E), 0.40f),
+    Particle(0.22f, 5f, 5.2f, 0.37f, 4f, Color(0xFF86EFAC), 0.70f),
+    Particle(0.36f, 9f, 6.4f, 0.71f, 8f, Color(0xFFBBF7D0), 0.80f),
+    Particle(0.50f, 6f, 4.4f, 0.18f, 5f, Color(0xFF16A34A), 0.30f),
+    Particle(0.63f, 8f, 5.6f, 0.52f, 7f, Color(0xFF86EFAC), 0.65f),
+    Particle(0.76f, 5f, 4.8f, 0.86f, 4f, Color(0xFF22C55E), 0.35f),
+    Particle(0.88f, 7f, 6.0f, 0.29f, 6f, Color(0xFFBBF7D0), 0.80f),
+    Particle(0.95f, 6f, 4.2f, 0.63f, 5f, Color(0xFF16A34A), 0.30f)
+)
+
+@Composable
+fun HomeParticlesBackground(modifier: Modifier = Modifier) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsState()
+    val resumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+    // Seconds of animation played so far. Only read inside graphicsLayer
+    // blocks below, so a change redraws the layers and nothing else.
+    var elapsed by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(resumed) {
+        if (!resumed) return@LaunchedEffect
+        var last = withFrameNanos { it }
+        while (true) {
+            val now = withFrameNanos { it }
+            // Cap one step so a long frame never makes dots jump.
+            elapsed += ((now - last) / 1_000_000_000f).coerceAtMost(0.05f)
+            last = now
+        }
+    }
+    val density = LocalDensity.current
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        val travelPx = with(density) { maxHeight.toPx() }
+        val widthDp = maxWidth
+        HomeParticles.forEach { p ->
+            val sizePx = with(density) { p.sizeDp.dp.toPx() }
+            val swayPx = with(density) { p.swayDp.dp.toPx() }
+            Box(
+                Modifier
+                    .offset(x = widthDp * p.xFrac, y = maxHeight - p.sizeDp.dp)
+                    .size(p.sizeDp.dp)
+                    .graphicsLayer {
+                        val t = ((elapsed / p.periodS) + p.phase) % 1f
+                        translationY = -(travelPx - sizePx) * t
+                        translationX = sin(t * 6.2831855f) * swayPx
+                        // Fade in over the first 15%, out over the last 25%.
+                        val env = when {
+                            t < 0.15f -> t / 0.15f
+                            t > 0.75f -> (1f - t) / 0.25f
+                            else -> 1f
+                        }
+                        alpha = p.maxAlpha * env
+                    }
+                    .background(p.color, CircleShape)
+            )
+        }
+    }
 }

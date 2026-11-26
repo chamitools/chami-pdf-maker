@@ -209,7 +209,7 @@ fun DoneScreen(
   // animateFloatAsState call itself stays unconditional.
   val tickProgress by animateFloatAsState(
     targetValue = if (started) 1f else 0f,
-    animationSpec = if (animOn) tween(durationMillis = 600) else tween(durationMillis = 0),
+    animationSpec = if (animOn) tween(durationMillis = 450, easing = Ds.sharedEasing) else tween(durationMillis = 0),
     label = "tick"
   )
   // Confetti bursts once (1800ms) — `started` only ever goes false -> true.
@@ -218,7 +218,7 @@ fun DoneScreen(
   // is simply never drawn.
   val confettiProgress by animateFloatAsState(
     targetValue = if (started) 1f else 0f,
-    animationSpec = if (animOn) tween(durationMillis = 1800) else tween(durationMillis = 0),
+    animationSpec = if (animOn) tween(durationMillis = 800) else tween(durationMillis = 0),
     label = "confetti"
   )
 
@@ -281,7 +281,7 @@ fun DoneScreen(
         for (piece in pieces) {
           val x = piece.startX * w + piece.drift * confettiProgress
           val y = piece.startY * h + piece.fall * h * confettiProgress
-          val alpha = (1f - confettiProgress).coerceIn(0f, 1f)
+          val alpha = ((1f - confettiProgress) * 2f).coerceIn(0f, 1f)
           rotate(piece.rotation + piece.spin * confettiProgress, Offset(x, y)) {
             if (piece.isDot) {
               drawCircle(piece.color.copy(alpha = alpha), piece.size / 2f, Offset(x, y))
@@ -296,7 +296,8 @@ fun DoneScreen(
         }
       }
       // Animated green success tick: circle scales in, checkmark draws in.
-      val scale = 0.6f + 0.4f * tickProgress
+      // Phase 3: small overshoot (1.0 -> 1.08 -> 1.0) so the tick "pops".
+      val scale = 0.6f + 0.4f * tickProgress + 0.08f * kotlin.math.sin(Math.PI.toFloat() * tickProgress)
       Canvas(
         Modifier
           // One-off size: the success tick, not a spacing token.
@@ -350,8 +351,26 @@ fun DoneScreen(
     // Created file card — immediately visible, no scrolling needed.
     // Name, size, page count and the folder it was saved to.
     // Phase 6: soft elevation (Ds.tileElevation) like the Phase 5 cards.
+    // Phase 3: the card pops in (scale 0.94 -> 1, rise, fade) 100ms
+    // after the tick starts. It is visible from the first frame
+    // (alpha starts at 0.3) and never blocks Open / Share / Done.
+    val cardPop = remember { androidx.compose.animation.core.Animatable(if (animOn) 0f else 1f) }
+    LaunchedEffect(Unit) {
+      if (animOn) {
+        kotlinx.coroutines.delay(100)
+        cardPop.animateTo(1f, tween(250, easing = Ds.sharedEasing))
+      }
+    }
     Card(
-      modifier = Modifier.fillMaxWidth(),
+      modifier = Modifier
+        .fillMaxWidth()
+        .graphicsLayer {
+          val v = cardPop.value
+          alpha = 0.3f + 0.7f * v
+          scaleX = 0.94f + 0.06f * v
+          scaleY = 0.94f + 0.06f * v
+          translationY = (1f - v) * 24f
+        },
       shape = RoundedCornerShape(Ds.tileRadius),
       colors = CardDefaults.cardColors(containerColor = theme.card),
       border = androidx.compose.foundation.BorderStroke(1.dp, theme.cardBorder),
@@ -471,6 +490,127 @@ fun DoneScreen(
       Icon(Icons.Filled.Home, contentDescription = null, tint = ChamiColors.darkGreen, modifier = Modifier.size(Ds.iconSize))
       Spacer(Modifier.size(Ds.s8))
       Text(LocaleHelper.t(ctx, "done"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
+    }
+  }
+}
+
+/**
+ * FIX 2026-11-24 (Phase 1): the success animation for MULTI-file Done
+ * screens. MultiDoneScreen used to show a plain static tick with no
+ * animation, no confetti and no sound, while the single-file DoneScreen
+ * had all three. This is the same tick (draws in 600ms), the same
+ * one-shot confetti (1800ms), the same success sound + vibration fired
+ * ONCE on entry, and the same "remove animations" gate. DoneScreen
+ * itself is untouched.
+ */
+@Composable
+fun SuccessTickBurst(theme: ChamiTheme, areaHeight: androidx.compose.ui.unit.Dp = 140.dp) {
+  val ctx = LocalContext.current
+  val haptic = LocalHapticFeedback.current
+  val animOn = animationsEnabled(ctx)
+  var started by remember { mutableStateOf(false) }
+  var successRingtone by remember { mutableStateOf<Ringtone?>(null) }
+  DisposableEffect(Unit) {
+    onDispose {
+      try { successRingtone?.stop() } catch (_: Exception) {}
+    }
+  }
+  val tickCache = remember { TickPathCache() }
+  LaunchedEffect(Unit) {
+    started = true
+    try {
+      val ringtone = RingtoneManager.getRingtone(
+        ctx,
+        RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+      )
+      successRingtone = ringtone
+      ringtone?.play()
+    } catch (_: Exception) {
+      // No sound on this device — tick + confetti + vibration still show.
+    }
+    try { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } catch (_: Exception) {}
+  }
+  val tickProgress by animateFloatAsState(
+    targetValue = if (started) 1f else 0f,
+    animationSpec = if (animOn) tween(durationMillis = 450, easing = Ds.sharedEasing) else tween(durationMillis = 0),
+    label = "multiTick"
+  )
+  val confettiProgress by animateFloatAsState(
+    targetValue = if (started) 1f else 0f,
+    animationSpec = if (animOn) tween(durationMillis = 800) else tween(durationMillis = 0),
+    label = "multiConfetti"
+  )
+  val pieces = remember {
+    val rnd = Random(42)
+    List(40) { i ->
+      ConfettiPiece(
+        startX = rnd.nextFloat(),
+        startY = rnd.nextFloat() * 0.35f,
+        fall = 0.45f + rnd.nextFloat() * 0.55f,
+        size = 8f + rnd.nextFloat() * 10f,
+        color = CONFETTI_COLORS[i % CONFETTI_COLORS.size],
+        rotation = rnd.nextFloat() * 360f,
+        spin = (rnd.nextFloat() - 0.5f) * 720f,
+        drift = (rnd.nextFloat() - 0.5f) * 120f,
+        isDot = rnd.nextBoolean()
+      )
+    }
+  }
+  Box(
+    modifier = Modifier
+      .fillMaxWidth()
+      .height(areaHeight),
+    contentAlignment = Alignment.Center
+  ) {
+    Canvas(Modifier.fillMaxSize()) {
+      val w = size.width
+      val h = size.height
+      for (piece in pieces) {
+        val x = piece.startX * w + piece.drift * confettiProgress
+        val y = piece.startY * h + piece.fall * h * confettiProgress
+        val alpha = ((1f - confettiProgress) * 2f).coerceIn(0f, 1f)
+        rotate(piece.rotation + piece.spin * confettiProgress, Offset(x, y)) {
+          if (piece.isDot) {
+            drawCircle(piece.color.copy(alpha = alpha), piece.size / 2f, Offset(x, y))
+          } else {
+            drawRect(
+              piece.color.copy(alpha = alpha),
+              topLeft = Offset(x - piece.size / 2f, y - piece.size / 4f),
+              size = androidx.compose.ui.geometry.Size(piece.size, piece.size / 2f)
+            )
+          }
+        }
+      }
+    }
+    // Phase 3: small overshoot (1.0 -> 1.08 -> 1.0) so the tick "pops".
+      val scale = 0.6f + 0.4f * tickProgress + 0.08f * kotlin.math.sin(Math.PI.toFloat() * tickProgress)
+    Canvas(
+      Modifier
+        .size(88.dp)
+        .graphicsLayer(scaleX = scale, scaleY = scale, alpha = tickProgress.coerceIn(0.05f, 1f))
+    ) {
+      drawCircle(theme.primary, size.minDimension / 2f, center)
+      val s = size.minDimension
+      if (s != tickCache.size) {
+        tickCache.size = s
+        tickCache.path.apply {
+          reset()
+          moveTo(s * 0.28f, s * 0.52f)
+          lineTo(s * 0.45f, s * 0.68f)
+          lineTo(s * 0.74f, s * 0.34f)
+        }
+        tickCache.measure.setPath(tickCache.path.asAndroidPath(), false)
+      }
+      tickCache.segment.reset()
+      tickCache.measure.getSegment(
+        0f, tickCache.measure.length * tickProgress,
+        tickCache.segment.asAndroidPath(), true
+      )
+      drawPath(
+        tickCache.segment,
+        Color.White,
+        style = Stroke(width = size.minDimension * 0.09f, cap = StrokeCap.Round)
+      )
     }
   }
 }

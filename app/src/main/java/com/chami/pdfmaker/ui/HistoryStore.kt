@@ -82,6 +82,36 @@ object HistoryStore {
     }
   }
 
+  /** FIX 2026-11-24 (Phase 3): forget a deleted file's record so the
+   *  map does not keep names of files that no longer exist. */
+  fun remove(ctx: Context, fileName: String) {
+    try {
+      val json = readAll(ctx)
+      if (json.has(fileName)) {
+        json.remove(fileName)
+        writeAll(ctx, json)
+      }
+    } catch (_: Exception) {
+      // Best-effort.
+    }
+  }
+
+  /** FIX 2026-11-24 (Phase 3): carry the tool record over when a file is
+   *  renamed. The record is keyed by file name, so without this a renamed
+   *  file lost its tool and dropped out of its History filter. The
+   *  original timestamp is kept. */
+  fun rename(ctx: Context, oldName: String, newName: String) {
+    try {
+      val json = readAll(ctx)
+      val raw = json.optString(oldName, null) ?: return
+      json.remove(oldName)
+      json.put(newName, raw)
+      writeAll(ctx, json)
+    } catch (_: Exception) {
+      // Best-effort.
+    }
+  }
+
   fun toolFor(ctx: Context, fileName: String): String? {
     return try {
       parseEntry(readAll(ctx).optString(fileName, null)).first.takeIf { it.isNotBlank() }

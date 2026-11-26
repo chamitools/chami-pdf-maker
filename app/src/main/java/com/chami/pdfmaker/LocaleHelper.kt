@@ -311,6 +311,12 @@ object LocaleHelper {
       "toast_no_email_app" to "No email app found",
       "toast_rename_exists" to "A file with that name already exists",
       "toast_rename_failed" to "Could not rename",
+      "toast_delete_failed" to "Could not delete the file. Close it in any other app and try again.",
+      "toast_split_every_invalid" to "Enter a whole number of pages, 1 or more, for each part",
+      "toast_split_partial" to "Only {saved} of {total} parts could be created",
+      "toast_pages_as_images" to "This PDF could not be copied exactly, so its pages were saved as pictures. Text in the new file is not selectable.",
+      "toast_compress_as_images" to "This PDF could not be compressed exactly, so its pages were saved as pictures. Text in the new file is not selectable.",
+      "compress_pdf_quality_hint_text" to "Lower quality = smaller file. Pictures inside the PDF are recompressed; text stays selectable.",
       "toast_renamed" to "Renamed",
       // ToolScreens2
       "merge_progress_pages" to "Merging {n} pages…",

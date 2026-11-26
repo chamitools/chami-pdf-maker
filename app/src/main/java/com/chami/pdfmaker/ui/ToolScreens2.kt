@@ -116,6 +116,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -363,6 +364,9 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
   var pdfSizes by remember { mutableStateOf<List<Long>>(emptyList()) }
   var previewJob by remember { mutableStateOf<Job?>(null) }
   var isProcessing by remember { mutableStateOf(false) }
+  // PHASE 2: Merge now has a real progress bar and a Cancel button.
+  var mergeJob by remember { mutableStateOf<Job?>(null) }
+  var mergeFraction by remember { mutableStateOf<Float?>(null) }
   var draggingUri by remember { mutableStateOf<Uri?>(null) }
   var dragOffsetY by remember { mutableStateOf(0f) }
 
@@ -499,14 +503,48 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
     // change — the total page count is shown instead of a bare spinner.
     val totalPages = pdfPreviews.sumOf { it.first }
     mergeProgressText = if (totalPages > 0) LocaleHelper.t(ctx, "merge_progress_pages").replace("{n}", "$totalPages") else LocaleHelper.t(ctx, "merge_progress")
-    scope.launch {
+    mergeFraction = if (totalPages > 0) 0f else null
+    mergeJob = scope.launch {
       val out = PdfEngine.outFile(ctx, "MERGED_${System.currentTimeMillis()}.pdf")
       val sources = pdfUris.map { it to null }
-      val ok = withContext(Dispatchers.IO) { PdfEngine.copyPages(ctx, sources, out) }
-      isProcessing = false
-      mergeProgressText = ""
-      if (ok) singleSave(out)
-      else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_merge_failed"), Toast.LENGTH_SHORT).show()
+      var outcome = PdfEngine.CopyOutcome.FAILED
+      try {
+        // Phase 1: leaving the screen or pressing Cancel stops the merge
+        // at the next page. Phase 2: progress is reported. PHASE 4: real
+        // PDF pages are merged (text stays selectable); only a file the
+        // library cannot handle falls back to the old image method.
+        outcome = withContext(Dispatchers.IO) {
+          PdfEngine.copyPagesKeepText(
+            ctx, sources, out,
+            shouldContinue = { coroutineContext[Job]?.isActive != false },
+            onPageDone = { done ->
+              if (totalPages > 0) mergeFraction = (done / totalPages.toFloat()).coerceIn(0f, 1f)
+            }
+          )
+        }
+        ensureActive()
+        if (outcome == PdfEngine.CopyOutcome.TEXT_KEPT || outcome == PdfEngine.CopyOutcome.AS_IMAGES) mergeFraction = 1f
+      } catch (e: CancellationException) {
+        // Cancel: no partial MERGED_*.pdf is left behind.
+        withContext(kotlinx.coroutines.NonCancellable) { try { out.delete() } catch (_: Exception) {} }
+        throw e
+      } finally {
+        isProcessing = false
+        mergeProgressText = ""
+        mergeFraction = null
+        mergeJob = null
+      }
+      when (outcome) {
+        PdfEngine.CopyOutcome.TEXT_KEPT -> singleSave(out)
+        PdfEngine.CopyOutcome.AS_IMAGES -> {
+          Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_pages_as_images"), Toast.LENGTH_LONG).show()
+          singleSave(out)
+        }
+        PdfEngine.CopyOutcome.LOCKED ->
+          Toast.makeText(ctx, LocaleHelper.t(ctx, "label_pdf_unopenable"), Toast.LENGTH_LONG).show()
+        PdfEngine.CopyOutcome.FAILED ->
+          Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_merge_failed"), Toast.LENGTH_SHORT).show()
+      }
     }
   }
 
@@ -528,7 +566,8 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
         onClick = { vibrate(); picker.launch("application/pdf") },
         modifier = Modifier.fillMaxWidth()
       )
-      HintText(LocaleHelper.t(ctx, "merge_rasterised_hint"))
+      // PHASE 4: the old "pages are rendered as images" hint is gone —
+      // Merge now keeps real pages and selectable text.
 
       // Phase 5: empty state while no file is chosen yet.
       if (pdfUris.isEmpty()) {
@@ -668,9 +707,12 @@ fun MergePdfScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdfCo
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        Spacer(Modifier.height(Ds.s8))
-        Text(if (mergeProgressText.isNotEmpty()) mergeProgressText else LocaleHelper.t(ctx, "merge_progress"), fontSize = Ds.HINT_SP.sp, color = theme.text)
+        ProcessingPanel(
+          mergeFraction,
+          if (mergeProgressText.isNotEmpty()) mergeProgressText else LocaleHelper.t(ctx, "merge_progress"),
+          theme,
+          onCancel = { mergeJob?.cancel() }
+        )
       }
     }
 
@@ -957,7 +999,14 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
       val res = withContext(Dispatchers.IO) { compressPdfWithQuality(ctx, u, quality, out) }
       isPdfProcessing = false
       pdfProgressText = ""
-      if (res.ok && out.exists()) {
+      if (res.locked) {
+        // PHASE 4: password-protected PDF — plain words, nothing written.
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "label_pdf_unopenable"), Toast.LENGTH_LONG).show()
+      } else if (res.ok && out.exists()) {
+        // PHASE 4: tell the user when the old image method had to be used.
+        if (!res.textPreserved) {
+          Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_compress_as_images"), Toast.LENGTH_LONG).show()
+        }
         // FIX 2026-11-18 (report #18): the engine already keeps the
         // smaller file and reports it via res.keptOriginal — no
         // second keep-smaller pass here. res.outKb is the measured
@@ -1169,7 +1218,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
           }
           Spacer(Modifier.height(Ds.s16))
           Text(LocaleHelper.t(ctx, "compress_quality").replace("{n}", "$quality"), fontWeight = FontWeight.Bold, fontSize = Ds.BODY_SP.sp, color = theme.text)
-          HintText(LocaleHelper.t(ctx, "compress_pdf_quality_hint"))
+          HintText(LocaleHelper.t(ctx, "compress_pdf_quality_hint_text"))
           // FIX 2026-11-18 (report #18): warn that a text PDF can
           // come out larger — when it does, the original is kept.
           HintText(LocaleHelper.t(ctx, "compress_pdf_larger_note"))
@@ -1298,6 +1347,10 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
   var targetKbStr by rememberSaveable { mutableStateOf("") }
   var isProcessing by remember { mutableStateOf(false) }
   var progressText by remember { mutableStateOf("") }
+  // PHASE 2: Format Convert batch — real progress (files done / total)
+  // and a Cancel button.
+  var convertJob by remember { mutableStateOf<Job?>(null) }
+  var convertFraction by remember { mutableStateOf<Float?>(null) }
   var batchResults by remember { mutableStateOf<List<String>>(emptyList()) }
 
   var doneFiles by remember { mutableStateOf<List<DoneFileInfo>?>(null) }
@@ -1517,12 +1570,16 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
     val ext = formatChoice.lowercase()
     isProcessing = true
     batchResults = emptyList()
-    scope.launch {
+    convertFraction = 0f
+    convertJob = scope.launch {
       val outs = mutableListOf<File>()
       val lines = mutableListOf<String>()
       var done = 0
       var skipped = 0
+      try {
       for ((idx, u) in imageUris.withIndex()) {
+        ensureActive()
+        withContext(Dispatchers.Main) { convertFraction = idx / imageUris.size.toFloat() }
         withContext(Dispatchers.Main) { progressText = LocaleHelper.t(ctx, "convert_progress_file").replace("{i}", "${idx + 1}").replace("{total}", "${imageUris.size}") }
         val srcFmt = sourceFormatOf(ctx, u)
         val name = displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "convert_image_fallback").replace("{n}", "${idx + 1}")
@@ -1553,8 +1610,18 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
         }
         withContext(Dispatchers.Main) { batchResults = lines.toList() }
       }
-      isProcessing = false
-      progressText = ""
+      convertFraction = 1f
+      ensureActive()
+      } catch (e: CancellationException) {
+        // Cancel: every file already written in this run is removed.
+        withContext(kotlinx.coroutines.NonCancellable) { outs.forEach { try { it.delete() } catch (_: Exception) {} } }
+        throw e
+      } finally {
+        isProcessing = false
+        progressText = ""
+        convertFraction = null
+        convertJob = null
+      }
       batchResults = lines
       if (outs.isNotEmpty()) {
         doneSummary = lines + listOf(LocaleHelper.t(ctx, "convert_batch_summary").replace("{done}", "$done").replace("{skipped}", "$skipped").replace("{format}", formatChoice))
@@ -1810,9 +1877,13 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        Spacer(Modifier.height(Ds.s8))
-        Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+        if (isBatch) {
+          ProcessingPanel(convertFraction, progressText, theme, onCancel = { convertJob?.cancel() })
+        } else {
+          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
+          Spacer(Modifier.height(Ds.s8))
+          Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+        }
       }
     }
 

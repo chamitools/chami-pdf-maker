@@ -9,6 +9,8 @@ import java.io.*
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 object PdfEngine {
   // Load bitmap safely. maxDim is a LONG-SIDE cap only, to avoid OOM:
@@ -24,8 +26,114 @@ object PdfEngine {
       val maxSide = maxOf(opts.outWidth, opts.outHeight)
       while(maxSide/sample > maxDim) sample *= 2
       val o2 = BitmapFactory.Options().apply{ inSampleSize=sample }
-      ctx.contentResolver.openInputStream(uri)?.use{ BitmapFactory.decodeStream(it, null, o2) }
+      val decoded = ctx.contentResolver.openInputStream(uri)?.use{ BitmapFactory.decodeStream(it, null, o2) }
+        ?: return null
+      // FIX 2026-11-26 (Phase 1): BitmapFactory ignores the EXIF
+      // orientation tag, so a phone photo taken in portrait was
+      // previewed and written into PDFs / resized files sideways.
+      // The orientation is applied here, once, for every caller.
+      applyExifOrientation(decoded, readExifOrientation(ctx, uri))
     } catch(e:Exception){ null }
+      catch(e:OutOfMemoryError){ null }
+  }
+
+  private fun readExifOrientation(ctx: Context, uri: Uri): Int {
+    return try {
+      ctx.contentResolver.openInputStream(uri)?.use { input ->
+        android.media.ExifInterface(input).getAttributeInt(
+          android.media.ExifInterface.TAG_ORIENTATION,
+          android.media.ExifInterface.ORIENTATION_NORMAL
+        )
+      } ?: android.media.ExifInterface.ORIENTATION_NORMAL
+    } catch (_: Exception) {
+      android.media.ExifInterface.ORIENTATION_NORMAL
+    }
+  }
+
+  /** Returns [src] rotated / flipped to match [orientation]. When a new
+   *  bitmap is made the old one is recycled; on any failure [src] is
+   *  returned unchanged (never lose the image). */
+  private fun applyExifOrientation(src: Bitmap, orientation: Int): Bitmap {
+    val m = Matrix()
+    when (orientation) {
+      android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
+      android.media.ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+      android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> { m.postRotate(180f); m.postScale(-1f, 1f) }
+      android.media.ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.postScale(-1f, 1f) }
+      android.media.ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+      android.media.ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
+      android.media.ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+      else -> return src
+    }
+    return try {
+      val out = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+      if (out !== src) src.recycle()
+      out
+    } catch (_: Exception) { src }
+      catch (_: OutOfMemoryError) { src }
+  }
+
+  // FIX 2026-11-26 (Phase 1): render the chosen pages of ONE pdf with ONE
+  // open PdfRenderer. PDF to Images used to re-open the file for every
+  // page (PdfReader.renderPageBitmap), which is slow on long PDFs.
+  // pageNumbers are 1-based. onPage gets the rendered bitmap (or null when
+  // that page could not be rendered) and the bitmap is recycled right after
+  // onPage returns. Cancelling the calling coroutine stops at the next page.
+  suspend fun renderPages(
+    ctx: Context,
+    uri: Uri,
+    pageNumbers: List<Int>,
+    scale: Float,
+    onPage: suspend (index: Int, pageNumber: Int, bitmap: Bitmap?) -> Unit
+  ) {
+    var pfd: ParcelFileDescriptor? = null
+    var renderer: PdfRenderer? = null
+    try {
+      try {
+        pfd = ctx.contentResolver.openFileDescriptor(uri, "r")
+        renderer = pfd?.let { PdfRenderer(it) }
+      } catch (_: Exception) { renderer = null }
+        catch (_: OutOfMemoryError) { renderer = null }
+      for ((idx, p) in pageNumbers.withIndex()) {
+        currentCoroutineContext().ensureActive()
+        var bmp: Bitmap? = null
+        try {
+          val r = renderer
+          if (r != null && p - 1 in 0 until r.pageCount) {
+            var page: PdfRenderer.Page? = null
+            try {
+              page = r.openPage(p - 1)
+              val (w, h) = capPixelsFor((page.width * scale).toInt(), (page.height * scale).toInt())
+              bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+              bmp.eraseColor(Color.WHITE)
+              page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            } finally {
+              try { page?.close() } catch (_: Exception) {}
+            }
+          }
+        } catch (_: Exception) {
+          bmp?.recycle(); bmp = null
+        } catch (_: OutOfMemoryError) {
+          bmp?.recycle(); bmp = null
+        }
+        try {
+          onPage(idx, p, bmp)
+        } finally {
+          bmp?.recycle()
+        }
+      }
+    } finally {
+      try { renderer?.close() } catch (_: Exception) {}
+      try { pfd?.close() } catch (_: Exception) {}
+    }
+  }
+
+  /** Shrinks (w, h) to at most maxPixels, keeping the aspect ratio. */
+  private fun capPixelsFor(w: Int, h: Int, maxPixels: Long = 16_000_000L): Pair<Int, Int> {
+    val px = w.toLong() * h.toLong()
+    if (px <= maxPixels) return Pair(w.coerceAtLeast(1), h.coerceAtLeast(1))
+    val k = Math.sqrt(maxPixels.toDouble() / px.toDouble())
+    return Pair((w * k).toInt().coerceAtLeast(1), (h * k).toInt().coerceAtLeast(1))
   }
 
   // NOTE (L9, Phase 2): the legacy imagesToPdf / passportPhoto /
@@ -95,27 +203,88 @@ object PdfEngine {
   // android.graphics.pdf has no PDF object parser, so pages cannot be
   // copied as objects with this codebase's libraries. Do not describe
   // Merge / Split output as keeping text.
-  fun copyPages(ctx:Context, sources:List<Pair<Uri,Set<Int>?>>, outFile:File): Boolean {
+  // FIX 2026-11-26 (Phase 1):
+  //  * each output page now keeps the SOURCE page's own size and aspect
+  //    ratio. It used to force every page into an A4 box with a 36pt
+  //    margin, which squashed landscape / non-A4 pages and shrank A4.
+  //  * the render bitmap is capped (9M pixels) so one big page cannot
+  //    run the whole merge out of memory.
+  //  * shouldContinue is polled before every page, so Cancel stops a long
+  //    split / merge within one page. When it returns false nothing is
+  //    written and false is returned.
+  //  * a failed write removes the partial output file.
+  /** PHASE 4: result of a Merge / Split copy. */
+  enum class CopyOutcome { TEXT_KEPT, AS_IMAGES, LOCKED, FAILED }
+
+  /**
+   * PHASE 4: copies REAL pages with PdfBox-Android so text stays
+   * selectable (Merge: keep == null per source; Split: keep = page set).
+   * If the library cannot handle the file (damaged etc.) it falls back to
+   * the old image method [copyPages] and returns AS_IMAGES so the screen
+   * can say so in plain words. A password-protected file returns LOCKED
+   * (the image method cannot open it either). Cancel returns FAILED and
+   * leaves no file. A page is never dropped and no partial file is kept.
+   */
+  fun copyPagesKeepText(
+    ctx: Context,
+    sources: List<Pair<Uri, Set<Int>?>>,
+    outFile: File,
+    shouldContinue: () -> Boolean = { true },
+    onPageDone: (Int) -> Unit = {}
+  ): CopyOutcome {
+    val r = PdfBoxTools.copyPages(ctx, sources, outFile, shouldContinue, onPageDone)
+    when (r.status) {
+      PdfBoxTools.Status.OK -> return CopyOutcome.TEXT_KEPT
+      PdfBoxTools.Status.CANCELLED -> { try { outFile.delete() } catch (_: Exception) {}; return CopyOutcome.FAILED }
+      PdfBoxTools.Status.LOCKED -> { try { outFile.delete() } catch (_: Exception) {}; return CopyOutcome.LOCKED }
+      PdfBoxTools.Status.FAILED -> { try { outFile.delete() } catch (_: Exception) {} }
+    }
+    if (!shouldContinue()) return CopyOutcome.FAILED
+    val ok = copyPages(ctx, sources, outFile, shouldContinue, onPageDone)
+    return if (ok) CopyOutcome.AS_IMAGES else CopyOutcome.FAILED
+  }
+
+  fun copyPages(
+    ctx:Context,
+    sources:List<Pair<Uri,Set<Int>?>>,
+    outFile:File,
+    shouldContinue:() -> Boolean = { true },
+    onPageDone:(Int) -> Unit = {}
+  ): Boolean {
     val doc = PdfDocument(); var pageNo=1
     return try {
-      sources.forEach{ (uri, keep) ->
+      for ((uri, keep) in sources) {
         var pfd: ParcelFileDescriptor? = null
         var renderer: PdfRenderer? = null
         try {
-          pfd = ctx.contentResolver.openFileDescriptor(uri,"r") ?: return@forEach
+          pfd = ctx.contentResolver.openFileDescriptor(uri,"r") ?: continue
           renderer = PdfRenderer(pfd)
           for(i in 0 until renderer.pageCount){
             if(keep!=null && !keep.contains(i+1)) continue
+            if (!shouldContinue()) return false
             var page: PdfRenderer.Page? = null
             var bmp: Bitmap? = null
             try {
               page = renderer.openPage(i)
-              // Render at 2x for sharp text, then draw into A4 page
-              bmp = Bitmap.createBitmap(page.width*2, page.height*2, Bitmap.Config.ARGB_8888)
+              val pw = page.width.coerceAtLeast(1)
+              val ph = page.height.coerceAtLeast(1)
+              // PdfDocument limit is 14400pt per side; shrink proportionally if ever exceeded.
+              val cap = minOf(14400f / pw, 14400f / ph, 1f)
+              val outW = (pw * cap).toInt().coerceAtLeast(1)
+              val outH = (ph * cap).toInt().coerceAtLeast(1)
+              // 2x for sharp text, but never more than 9M pixels.
+              var s = 2f
+              val px2 = pw.toDouble() * ph.toDouble() * 4.0
+              if (px2 > 9_000_000.0) s = Math.sqrt(9_000_000.0 / (pw.toDouble() * ph.toDouble())).toFloat()
+              val bw = (pw * s).toInt().coerceAtLeast(1)
+              val bh = (ph * s).toInt().coerceAtLeast(1)
+              bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
               bmp.eraseColor(Color.WHITE); page.render(bmp,null,null,PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-              val info = PdfDocument.PageInfo.Builder(595,842,pageNo++).create()
+              val info = PdfDocument.PageInfo.Builder(outW,outH,pageNo++).create()
               val np = doc.startPage(info); np.canvas.drawColor(Color.WHITE)
-              np.canvas.drawBitmap(bmp,null,RectF(36f,36f,559f,806f),null); doc.finishPage(np)
+              np.canvas.drawBitmap(bmp,null,RectF(0f,0f,outW.toFloat(),outH.toFloat()),null); doc.finishPage(np)
+              // PHASE 2: real progress for Merge (pages copied so far).
+              onPageDone(pageNo - 1)
             } finally {
               bmp?.recycle()
               try { page?.close() } catch (_: Exception) {}
@@ -126,9 +295,10 @@ object PdfEngine {
           try { pfd?.close() } catch (_: Exception) {}
         }
       }
+      if (pageNo == 1) return false // nothing was copied — never write an empty PDF
       FileOutputStream(outFile).use{ doc.writeTo(it) }; true
-    } catch(e:Exception){ e.printStackTrace(); false }
-      catch(e:OutOfMemoryError){ false }
+    } catch(e:Exception){ e.printStackTrace(); try { outFile.delete() } catch (_: Exception) {}; false }
+      catch(e:OutOfMemoryError){ try { outFile.delete() } catch (_: Exception) {}; false }
     finally {
       try { doc.close() } catch (_: Exception) {}
     }

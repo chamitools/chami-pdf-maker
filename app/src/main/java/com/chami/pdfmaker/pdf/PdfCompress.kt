@@ -23,7 +23,9 @@ data class PdfCompressResult(
   // Always false for this engine: output pages are rasterised images,
   // so selectable text is NOT preserved (see compressPdf). Kept on the
   // result so no caller can mistake a compressed PDF for a text-kept one.
-  val textPreserved: Boolean = false
+  val textPreserved: Boolean = false,
+  // PHASE 4: true when the PDF needs a password (nothing was written).
+  val locked: Boolean = false
 )
 
 object PdfCompress {
@@ -195,9 +197,11 @@ object PdfCompress {
     }
   }
 
-  // Compress a PDF by re-rendering every page as a JPEG image.
+  // Compress a PDF. PHASE 4: first tries PdfBoxTools.compressImages (real
+  // pages, text kept). Everything below is now ONLY the FALLBACK for a
+  // file the library cannot handle.
   //
-  // HONEST LIMIT — TEXT IS NOT PRESERVED. This re-renders each page to
+  // FALLBACK LIMIT — TEXT IS NOT PRESERVED. This re-renders each page to
   // a bitmap and draws it into a new PDF, so selectable text, links and
   // vector content are LOST; the output is pictures of pages. The spec
   // headline "compress images inside a PDF without changing text" is
@@ -215,6 +219,36 @@ object PdfCompress {
     outFile: File
   ): PdfCompressResult {
     val origBytes = originalSizeBytes(ctx, pdfUri)
+    // PHASE 4: first try the real-PDF method (PdfBox-Android): pictures
+    // inside the PDF are recompressed, text is not touched. Only if the
+    // library cannot handle the file do we fall through to the old
+    // image method below (textPreserved = false, the screen says so).
+    val box = PdfBoxTools.compressImages(ctx, pdfUri, preset, outFile)
+    when (box.status) {
+      PdfBoxTools.Status.OK -> {
+        if (origBytes > 0 && outFile.length() >= origBytes) {
+          // Not smaller: keep the original file (its text is intact).
+          outFile.delete()
+          val kept = try {
+            ctx.contentResolver.openInputStream(pdfUri)?.use { input ->
+              FileOutputStream(outFile).use { output -> input.copyTo(output) }
+              true
+            } ?: false
+          } catch (_: Exception) { false }
+          if (!kept || !outFile.exists() || outFile.length() == 0L) {
+            try { outFile.delete() } catch (_: Exception) {}
+            return PdfCompressResult(false, 0L, false, box.pages)
+          }
+          return PdfCompressResult(true, outFile.length() / 1024L, true, box.pages, textPreserved = true)
+        }
+        return PdfCompressResult(true, outFile.length() / 1024L, false, box.pages, textPreserved = true)
+      }
+      PdfBoxTools.Status.LOCKED -> {
+        try { outFile.delete() } catch (_: Exception) {}
+        return PdfCompressResult(false, 0L, false, 0, locked = true)
+      }
+      else -> { try { outFile.delete() } catch (_: Exception) {} }
+    }
     var renderer: PdfRenderer? = null
     var pfd: android.os.ParcelFileDescriptor? = null
     try {
@@ -244,19 +278,21 @@ object PdfCompress {
               bmp.compress(Bitmap.CompressFormat.JPEG, preset.jpegQuality, baos)
               val jpgBytes = baos.toByteArray()
               val jpg = BitmapFactory.decodeByteArray(jpgBytes, 0, jpgBytes.size)
-              if (jpg != null) {
-                try {
-                  val info = PdfDocument.PageInfo.Builder(page.width, page.height, i + 1).create()
-                  val newPage = doc.startPage(info)
-                  newPage.canvas.drawColor(Color.WHITE)
-                  newPage.canvas.drawBitmap(
-                    jpg, null,
-                    RectF(0f, 0f, page.width.toFloat(), page.height.toFloat()), null
-                  )
-                  doc.finishPage(newPage)
-                } finally {
-                  jpg.recycle()
-                }
+              // FIX 2026-11-26 (Phase 1): if the JPEG round-trip cannot be
+              // decoded, the page is drawn from the original render instead
+              // of being silently dropped (the output used to lose that page).
+              val source = jpg ?: bmp
+              try {
+                val info = PdfDocument.PageInfo.Builder(page.width, page.height, i + 1).create()
+                val newPage = doc.startPage(info)
+                newPage.canvas.drawColor(Color.WHITE)
+                newPage.canvas.drawBitmap(
+                  source, null,
+                  RectF(0f, 0f, page.width.toFloat(), page.height.toFloat()), null
+                )
+                doc.finishPage(newPage)
+              } finally {
+                jpg?.recycle()
               }
             } finally {
               bmp.recycle()
@@ -265,8 +301,10 @@ object PdfCompress {
             page.close()
           }
         }
-      } finally {
+        // Written only after EVERY page succeeded (it used to run from a
+        // finally block, so a mid-way failure still wrote a partial PDF).
         FileOutputStream(outFile).use { doc.writeTo(it) }
+      } finally {
         doc.close()
       }
       // Never output bigger than the original: keep the original.
@@ -282,10 +320,13 @@ object PdfCompress {
           try { outFile.delete() } catch (_: Exception) {}
           return PdfCompressResult(false, 0L, false, pageCount, textPreserved = false)
         }
-        return PdfCompressResult(true, outFile.length() / 1024L, true, pageCount, textPreserved = false)
+        return PdfCompressResult(true, outFile.length() / 1024L, true, pageCount, textPreserved = true)
       }
       return PdfCompressResult(true, outFile.length() / 1024L, false, pageCount, textPreserved = false)
     } catch (_: Exception) {
+      try { outFile.delete() } catch (_: Exception) {}
+      return PdfCompressResult(false, 0L, false, 0)
+    } catch (_: OutOfMemoryError) {
       try { outFile.delete() } catch (_: Exception) {}
       return PdfCompressResult(false, 0L, false, 0)
     } finally {

@@ -62,9 +62,13 @@ object PdfBoxTools {
   private fun mem(ctx: Context): MemoryUsageSetting =
     MemoryUsageSetting.setupTempFileOnly().setTempDir(ctx.cacheDir)
 
-  private fun openStream(ctx: Context, uri: Uri): InputStream? =
-    if (uri.scheme == "file") java.io.FileInputStream(File(uri.path ?: return null))
-    else ctx.contentResolver.openInputStream(uri)
+  private fun openStream(ctx: Context, uri: Uri): InputStream? {
+    if (uri.scheme == "file") {
+      val path = uri.path ?: return null
+      return java.io.FileInputStream(File(path))
+    }
+    return ctx.contentResolver.openInputStream(uri)
+  }
 
   private fun load(ctx: Context, uri: Uri): PDDocument {
     val input = openStream(ctx, uri) ?: throw java.io.IOException("cannot open")

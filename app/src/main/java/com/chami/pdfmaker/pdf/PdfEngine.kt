@@ -494,15 +494,22 @@ object PdfEngine {
     ctx: Context,
     pages: List<Bitmap>,
     options: ImagesPdfOptions,
+    // PHASE 5: Cancel. Checked before every page and once more after the
+    // file is written. When it returns false the partial file is removed
+    // and a CancellationException is thrown. The default keeps every
+    // existing caller (and the tests) working unchanged.
+    shouldContinue: () -> Boolean = { true },
     onProgress: (Int, Int) -> Unit
   ): File {
     require(pages.isNotEmpty()) { "buildImagesPdf: pages must not be empty" }
     val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     val outFile = outFile(ctx, "IMG_PDF_$stamp.pdf")
     val doc = PdfDocument()
+    var completed = false
     try {
       val total = pages.size
       pages.forEachIndexed { index, source ->
+        if (!shouldContinue()) throw kotlinx.coroutines.CancellationException("Images to PDF cancelled")
         // "Original" quality: embed source pixels unmodified — no JPEG
         // round-trip. Any other quality: one JPEG round-trip at the
         // mapped quality, then draw the result.
@@ -563,10 +570,16 @@ object PdfEngine {
         }
         onProgress(index + 1, total)
       }
+      if (!shouldContinue()) throw kotlinx.coroutines.CancellationException("Images to PDF cancelled")
       FileOutputStream(outFile).use { doc.writeTo(it) }
+      // Cancel pressed while the file was being written: no file is kept.
+      if (!shouldContinue()) throw kotlinx.coroutines.CancellationException("Images to PDF cancelled")
+      completed = true
       return outFile
     } finally {
       doc.close()
+      // PHASE 5: a cancelled or failed run never leaves a partial PDF.
+      if (!completed) { try { outFile.delete() } catch (_: Exception) {} }
     }
   }
 

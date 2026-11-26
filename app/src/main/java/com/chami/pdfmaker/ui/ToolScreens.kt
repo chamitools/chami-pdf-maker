@@ -174,7 +174,15 @@ fun rememberSaveableUriList(initialValue: List<Uri> = emptyList()): MutableState
 // engine re-renders every page as an image, so text in the output is
 // rasterised, not kept as selectable text — the UI must not claim
 // otherwise. Input is a Uri here, so it is copied to a temp file first.
-fun compressPdfWithQuality(ctx: Context, uri: Uri, quality: Int, out: File): PdfCompressResult {
+fun compressPdfWithQuality(
+  ctx: Context,
+  uri: Uri,
+  quality: Int,
+  out: File,
+  // PHASE 5: Cancel + real progress (pages done / total).
+  shouldContinue: () -> Boolean = { true },
+  onProgress: (Int, Int) -> Unit = { _, _ -> }
+): PdfCompressResult {
   // FIX 2026-11-18 (report #18): call the engine's
   // PdfCompress.compressPdfWithQuality directly and return its result
   // untouched — it already keeps the smaller file and reports
@@ -182,7 +190,7 @@ fun compressPdfWithQuality(ctx: Context, uri: Uri, quality: Int, out: File): Pdf
   // rebuilt the result with keptOriginal = false, so the UI could
   // never tell the user the original was kept.
   return try {
-    PdfCompress.compressPdfWithQuality(ctx, uri, quality.coerceIn(10, 100), out)
+    PdfCompress.compressPdfWithQuality(ctx, uri, quality.coerceIn(10, 100), out, shouldContinue, onProgress)
   } catch (_: Exception) {
     PdfCompressResult(false, 0, false, 0)
   }
@@ -263,6 +271,17 @@ internal fun ProcessingPanel(progress: Float?, text: String, theme: ChamiTheme, 
   }
 }
 
+/**
+ * PHASE 5: plain-words "Cancelled" message for the five tools that gained
+ * Cancel. Shown only when the user pressed Cancel — when the screen is left
+ * the screen's scope is already cancelled, so nothing is shown over Home.
+ */
+internal fun toastCancelled(ctx: Context, scope: kotlinx.coroutines.CoroutineScope, key: String = "toast_cancelled_no_file") {
+  if (scope.coroutineContext[Job]?.isActive == true) {
+    Toast.makeText(ctx, LocaleHelper.t(ctx, key), Toast.LENGTH_SHORT).show()
+  }
+}
+
 @Composable
 fun ToolScreenContainer(
   title: String,
@@ -285,10 +304,11 @@ fun ToolScreenContainer(
     onBack()
   }
 
+  // PHASE 6: Particles behind every tool screen (faint — tool screens are text-heavy).
+  ParticlesBackdrop(theme.bg, fade = 0.6f) {
   Column(
     Modifier
       .fillMaxSize()
-      .background(theme.bg)
       .statusBarsPadding()
       .navigationBarsPadding()
       .padding(Ds.s16)
@@ -310,6 +330,7 @@ fun ToolScreenContainer(
     }
     Spacer(Modifier.height(Ds.s16))
     content()
+  }
   }
 }
 
@@ -616,10 +637,12 @@ fun MultiDoneScreen(
   // instead of exiting the app (this screen early-returns before
   // ToolScreenContainer, so it never gets that container's BackHandler).
   BackHandler { onBackHome() }
+  // PHASE 6: Particles behind the multi-file Done screen; the tick and
+  // confetti are drawn over them.
+  ParticlesBackdrop(theme.bg, fade = 0.6f) {
   Column(
     Modifier
       .fillMaxSize()
-      .background(theme.bg)
       .statusBarsPadding()
       .navigationBarsPadding()
       .padding(Ds.s16)
@@ -691,6 +714,7 @@ fun MultiDoneScreen(
       ChamiSecondaryButton(text = LocaleHelper.t(ctx, "done"), onClick = onBackHome, modifier = Modifier.weight(1f))
     }
     Spacer(Modifier.height(Ds.s16))
+  }
   }
 }
 
@@ -1713,6 +1737,9 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   val editor = remember(ctx, scope, vm) { PageEditor(ctx, scope, vm) }
   var isProcessing by remember { mutableStateOf(false) }
   var progressText by remember { mutableStateOf("") }
+  // PHASE 5: real progress (pages done / total) + Cancel.
+  var progressFraction by remember { mutableStateOf<Float?>(null) }
+  var buildJob by remember { mutableStateOf<Job?>(null) }
   var cropIndex by remember { mutableStateOf<Int?>(null) }
   var showFilters by remember { mutableStateOf(false) }
   var showAdjust by remember { mutableStateOf(false) }
@@ -1786,8 +1813,9 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       return
     }
     isProcessing = true
-    progressText = "Page 1 of ${pages.size}"
-    scope.launch {
+    progressFraction = 0f
+    progressText = LocaleHelper.t(ctx, "progress_page_of").replace("{i}", "1").replace("{n}", "${pages.size}")
+    buildJob = scope.launch {
       // FIX 2026-11-18 (fixed A4 page): pageSize was "Original", so the
       // PDF page became the cropped image's own pixel size — the page
       // changed with every crop. Now FIXED A4 (595x842pt) with the
@@ -1803,12 +1831,27 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
         pageNumbers = false,
         marginsMm = 15
       )
+      // PHASE 5: [made] is set INSIDE the IO block, so even if Cancel lands
+      // just as the build returns (withContext then drops its result), the
+      // file is still known and is deleted — no orphan in the Chami folder.
+      var made: File? = null
       val file: File? = try {
         withContext(Dispatchers.IO) {
-          PdfEngine.buildImagesPdf(ctx, pages.map { it.bitmap }, options) { done, total ->
-            scope.launch { progressText = "Page $done of $total" }
+          val keepGoing = { coroutineContext[Job]?.isActive != false }
+          made = PdfEngine.buildImagesPdf(ctx, pages.map { it.bitmap }, options, shouldContinue = keepGoing) { done, total ->
+            progressFraction = (done / total.toFloat()).coerceIn(0f, 1f)
+            progressText = LocaleHelper.t(ctx, "progress_page_of").replace("{i}", "$done").replace("{n}", "$total")
           }
+          made
+        }.also {
+          ensureActive()
+          progressFraction = 1f
         }
+      } catch (e: CancellationException) {
+        // User pressed Cancel (or left the screen): no partial PDF is kept.
+        withContext(kotlinx.coroutines.NonCancellable) { try { made?.delete() } catch (_: Exception) {} }
+        toastCancelled(ctx, scope)
+        throw e
       } catch (_: OutOfMemoryError) {
         // PHASE 2 (H2): out of memory mid-build — the page set is kept
         // and the user can retry (fewer/smaller photos). Never crash,
@@ -1818,9 +1861,12 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
       } catch (e: Exception) {
         e.printStackTrace()
         null
+      } finally {
+        isProcessing = false
+        progressText = ""
+        progressFraction = null
+        buildJob = null
       }
-      isProcessing = false
-      progressText = ""
       if (file != null) saveFile(file)
       else Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_create_pdf_failed"), Toast.LENGTH_SHORT).show()
     }
@@ -1926,9 +1972,7 @@ fun ImagesToPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        Spacer(Modifier.height(Ds.s8))
-        Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+        ProcessingPanel(progressFraction, progressText, theme, onCancel = { buildJob?.cancel() })
       }
     }
 

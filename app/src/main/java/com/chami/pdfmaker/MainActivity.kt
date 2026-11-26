@@ -396,11 +396,17 @@ class MainActivity : ComponentActivity() {
               .fillMaxSize()
               .background(theme.bg)
           ) {
-            // PHASE 2: Particles live wallpaper — Home tab ONLY. It is
-            // composed before the Column, so every tile, label and
-            // button is drawn on top of it; leaving Home removes it
-            // and stops its frame loop.
-            if (currentTab == "Home") HomeParticlesBackground()
+            // PHASE 2 + 6: Particles live wallpaper on Home, History and
+            // Settings. It is composed before the Column, so every tile,
+            // label and button is drawn on top of it. Home keeps full
+            // strength; History (long list) is the faintest.
+            ParticlesBackground(
+              fade = when (currentTab) {
+                "Home" -> 1f
+                "History" -> 0.45f
+                else -> 0.6f
+              }
+            )
             Column(
               Modifier
                 .fillMaxSize()

@@ -110,9 +110,15 @@ suspend fun ocrImage(ctx: Context, uri: Uri): String = ocrImage(ctx, uri, "Engli
 // mixed-script page (e.g. Hindi + English) returns both parts.
 // Scripts with no on-device recogniser return nothing here —
 // callers must say so plainly instead of failing silently.
-suspend fun ocrImageAnyLanguage(ctx: Context, uri: Uri): String {
+// PHASE 5: [onStepDone] reports (recogniser passes finished, 2) so the OCR
+// screen can show real progress; the default does nothing. Cancelling the
+// calling coroutine stops the wait at once (processImage is cancellable
+// and never delivers a late result).
+suspend fun ocrImageAnyLanguage(ctx: Context, uri: Uri, onStepDone: (Int, Int) -> Unit = { _, _ -> }): String {
   val latin = ocrImage(ctx, uri, "English")
+  onStepDone(1, 2)
   val devanagari = ocrImage(ctx, uri, "Hindi")
+  onStepDone(2, 2)
   return pickBetterOcrResult(latin, devanagari)
 }
 

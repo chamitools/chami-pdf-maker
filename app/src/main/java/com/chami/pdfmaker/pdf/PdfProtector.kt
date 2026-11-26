@@ -470,11 +470,21 @@ object PdfProtector {
    * (AES-128 for new files). Compatible with all standard PDF viewers.
    * Streams one page at a time (H5): peak memory is O(1 page).
    */
-  fun protectPdf(ctx: Context, inputUri: Uri, password: String, outFile: File, progressCallback: (Int, Int) -> Unit = { _, _ -> }): Boolean {
+  fun protectPdf(
+    ctx: Context,
+    inputUri: Uri,
+    password: String,
+    outFile: File,
+    // PHASE 5: Cancel. Checked before every page; false = stop, delete the
+    // partial file and return false. Default keeps old callers working.
+    shouldContinue: () -> Boolean = { true },
+    progressCallback: (Int, Int) -> Unit = { _, _ -> }
+  ): Boolean {
     var pfd: ParcelFileDescriptor? = null
     var renderer: PdfRenderer? = null
     var writer: EncryptedPdfWriter? = null
     var ok = false
+    var cancelled = false
     try {
       pfd = ctx.contentResolver.openFileDescriptor(inputUri, "r") ?: return false
       renderer = PdfRenderer(pfd)
@@ -484,10 +494,11 @@ object PdfProtector {
       val enc = computeEncryptionParams(password, "", docId)
       writer = EncryptedPdfWriter(outFile, enc, docId)
       for (i in 0 until pageCount) {
+        if (!shouldContinue()) { cancelled = true; break }
         renderPageToWriter(renderer, i, writer)
         progressCallback(i + 1, pageCount)
       }
-      ok = writer.finish()
+      ok = if (cancelled) false else writer.finish()
     } catch (e: Exception) {
       e.printStackTrace()
       ok = false
@@ -733,7 +744,15 @@ object PdfProtector {
   // unencrypted PDF with the same pages. The input file is mapped
   // read-only and never copied to the heap (H6); a failed unlock
   // deletes the partial output instead of leaving it behind.
-  fun unlockPdf(input: File, out: File, password: String): Boolean {
+  fun unlockPdf(
+    input: File,
+    out: File,
+    password: String,
+    // PHASE 5: Cancel + real progress (pages done / total). Cancel = stop,
+    // delete the partial output, return false. Defaults keep old callers.
+    shouldContinue: () -> Boolean = { true },
+    onProgress: (Int, Int) -> Unit = { _, _ -> }
+  ): Boolean {
     if (!input.exists()) return false
     if (!isEncryptedFile(input)) {
       return try {
@@ -767,6 +786,7 @@ object PdfProtector {
         doc = PdfDocument()
         var pageNo = 1
         for (ref in pageRefs) {
+          if (!shouldContinue()) return@use
           val jpg = decryptImageStream(buf, ref.imgObj, encKey, useAes) ?: return@use
           val bmp = BitmapFactory.decodeByteArray(jpg, 0, jpg.size) ?: return@use
           try {
@@ -778,9 +798,11 @@ object PdfProtector {
           } finally {
             bmp.recycle()
           }
+          onProgress(pageNo - 1, pageRefs.size)
         }
+        if (!shouldContinue()) return@use
         FileOutputStream(out).use { doc!!.writeTo(it) }
-        ok = true
+        ok = shouldContinue()
       }
     } catch (e: Exception) {
       e.printStackTrace()

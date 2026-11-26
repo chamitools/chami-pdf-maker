@@ -190,7 +190,11 @@ object PdfBoxTools {
     ctx: Context,
     pdfUri: Uri,
     preset: PdfCompressPreset,
-    outFile: File
+    outFile: File,
+    // PHASE 5: Cancel + real progress. Checked before every page and
+    // around the final save. Status.CANCELLED leaves no output file.
+    shouldContinue: () -> Boolean = { true },
+    onProgress: (Int, Int) -> Unit = { _, _ -> }
   ): Outcome {
     var doc: PDDocument? = null
     try {
@@ -200,11 +204,20 @@ object PdfBoxTools {
       if (pages == 0) return Outcome(Status.FAILED)
       val doneResources = IdentityHashMap<Any, Boolean>()
       val replaced = IdentityHashMap<COSStream, PDImageXObject>()
+      var pageNo = 0
       for (page in doc.pages) {
-        val res = page.resources ?: continue
-        recompressResources(doc, res, preset, doneResources, replaced)
+        if (!shouldContinue()) return Outcome(Status.CANCELLED)
+        val res = page.resources
+        if (res != null) recompressResources(doc, res, preset, doneResources, replaced)
+        pageNo++
+        onProgress(pageNo, pages)
       }
+      if (!shouldContinue()) return Outcome(Status.CANCELLED)
       val ok = saveVerified(ctx, doc, outFile, pages)
+      if (!shouldContinue()) {
+        try { outFile.delete() } catch (_: Exception) {}
+        return Outcome(Status.CANCELLED)
+      }
       return if (ok) Outcome(Status.OK, pages) else Outcome(Status.FAILED)
     } catch (e: InvalidPasswordException) {
       return Outcome(Status.LOCKED)

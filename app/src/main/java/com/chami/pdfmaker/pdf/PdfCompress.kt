@@ -25,7 +25,9 @@ data class PdfCompressResult(
   // result so no caller can mistake a compressed PDF for a text-kept one.
   val textPreserved: Boolean = false,
   // PHASE 4: true when the PDF needs a password (nothing was written).
-  val locked: Boolean = false
+  val locked: Boolean = false,
+  // PHASE 5: true when the user pressed Cancel (nothing was written).
+  val cancelled: Boolean = false
 )
 
 object PdfCompress {
@@ -70,8 +72,10 @@ object PdfCompress {
     ctx: Context,
     pdfUri: Uri,
     quality: Int,
-    outFile: File
-  ): PdfCompressResult = compressPdf(ctx, pdfUri, presetForQuality(quality), outFile)
+    outFile: File,
+    shouldContinue: () -> Boolean = { true },
+    onProgress: (Int, Int) -> Unit = { _, _ -> }
+  ): PdfCompressResult = compressPdf(ctx, pdfUri, presetForQuality(quality), outFile, shouldContinue, onProgress)
 
   // UI-facing entry point for the labelled preset buttons
   // (High / Medium / Low). The label is what the user picked; the
@@ -80,8 +84,10 @@ object PdfCompress {
     ctx: Context,
     pdfUri: Uri,
     label: String,
-    outFile: File
-  ): PdfCompressResult = compressPdf(ctx, pdfUri, presetByLabel(label), outFile)
+    outFile: File,
+    shouldContinue: () -> Boolean = { true },
+    onProgress: (Int, Int) -> Unit = { _, _ -> }
+  ): PdfCompressResult = compressPdf(ctx, pdfUri, presetByLabel(label), outFile, shouldContinue, onProgress)
 
   // Size of the file behind a Uri, in bytes. Cheap lookup first
   // (L15): content:// -> OpenableColumns.SIZE, file:// -> File.length().
@@ -216,15 +222,23 @@ object PdfCompress {
     ctx: Context,
     pdfUri: Uri,
     preset: PdfCompressPreset,
-    outFile: File
+    outFile: File,
+    // PHASE 5: Cancel + real progress (pages done / total). Cancelled =
+    // PdfCompressResult.cancelled, and no output file is left behind.
+    shouldContinue: () -> Boolean = { true },
+    onProgress: (Int, Int) -> Unit = { _, _ -> }
   ): PdfCompressResult {
     val origBytes = originalSizeBytes(ctx, pdfUri)
     // PHASE 4: first try the real-PDF method (PdfBox-Android): pictures
     // inside the PDF are recompressed, text is not touched. Only if the
     // library cannot handle the file do we fall through to the old
     // image method below (textPreserved = false, the screen says so).
-    val box = PdfBoxTools.compressImages(ctx, pdfUri, preset, outFile)
+    val box = PdfBoxTools.compressImages(ctx, pdfUri, preset, outFile, shouldContinue, onProgress)
     when (box.status) {
+      PdfBoxTools.Status.CANCELLED -> {
+        try { outFile.delete() } catch (_: Exception) {}
+        return PdfCompressResult(false, 0L, false, 0, cancelled = true)
+      }
       PdfBoxTools.Status.OK -> {
         if (origBytes > 0 && outFile.length() >= origBytes) {
           // Not smaller: keep the original file (its text is intact).
@@ -260,6 +274,10 @@ object PdfCompress {
       val doc = PdfDocument()
       try {
         for (i in 0 until pageCount) {
+          if (!shouldContinue()) {
+            try { outFile.delete() } catch (_: Exception) {}
+            return PdfCompressResult(false, 0L, false, pageCount, cancelled = true)
+          }
           val page = renderer.openPage(i)
           try {
             var w = (page.width * preset.scale).toInt().coerceAtLeast(1)
@@ -300,10 +318,19 @@ object PdfCompress {
           } finally {
             page.close()
           }
+          onProgress(i + 1, pageCount)
+        }
+        if (!shouldContinue()) {
+          try { outFile.delete() } catch (_: Exception) {}
+          return PdfCompressResult(false, 0L, false, pageCount, cancelled = true)
         }
         // Written only after EVERY page succeeded (it used to run from a
         // finally block, so a mid-way failure still wrote a partial PDF).
         FileOutputStream(outFile).use { doc.writeTo(it) }
+        if (!shouldContinue()) {
+          try { outFile.delete() } catch (_: Exception) {}
+          return PdfCompressResult(false, 0L, false, pageCount, cancelled = true)
+        }
       } finally {
         doc.close()
       }

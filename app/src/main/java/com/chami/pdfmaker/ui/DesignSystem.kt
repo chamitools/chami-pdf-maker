@@ -519,10 +519,14 @@ fun <T> ChamiScreenTransition(
 }
 
 /**
- * PHASE 2 — HOME LIVE WALLPAPER: PARTICLES (user pick #2, 26 Nov 2026).
- * Tiny Emerald dots rise slowly behind the Home screen. Rules kept:
- *  - Home only: the caller composes this on the Home tab and nowhere else,
- *    so leaving Home removes it and the frame loop stops with it.
+ * PHASE 2 — LIVE WALLPAPER: PARTICLES (user pick #2, 26 Nov 2026).
+ * PHASE 6 (user decision, 26 Nov 2026): the SAME dots now sit behind EVERY
+ * screen (Home, History, Settings, the 9 tools, Done). [fade] only scales
+ * the dots' alpha (1.0 = Home exactly); size, speed, colours and motion are
+ * identical everywhere. Rules kept:
+ *  - Each screen composes this itself, so leaving a screen removes it and
+ *    its frame loop stops with it. Only one screen is composed at a time,
+ *    so only one frame loop ever runs.
  *  - Also paused whenever the app is not RESUMED (background / screen off).
  *  - Colours are only #22C55E, #16A34A, #86EFAC, #BBF7D0.
  *  - Each dot is a 5-9dp circle moved ONLY by graphicsLayer translation +
@@ -542,7 +546,7 @@ private class Particle(
     val maxAlpha: Float
 )
 
-private val HomeParticles = listOf(
+private val ScreenParticles = listOf(
     Particle(0.08f, 7f, 4.0f, 0.00f, 6f, Color(0xFF22C55E), 0.40f),
     Particle(0.22f, 5f, 5.2f, 0.37f, 4f, Color(0xFF86EFAC), 0.70f),
     Particle(0.36f, 9f, 6.4f, 0.71f, 8f, Color(0xFFBBF7D0), 0.80f),
@@ -554,7 +558,7 @@ private val HomeParticles = listOf(
 )
 
 @Composable
-fun HomeParticlesBackground(modifier: Modifier = Modifier) {
+fun ParticlesBackground(modifier: Modifier = Modifier, fade: Float = 1f) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsState()
     val resumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
@@ -575,7 +579,7 @@ fun HomeParticlesBackground(modifier: Modifier = Modifier) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val travelPx = with(density) { maxHeight.toPx() }
         val widthDp = maxWidth
-        HomeParticles.forEach { p ->
+        ScreenParticles.forEach { p ->
             val sizePx = with(density) { p.sizeDp.dp.toPx() }
             val swayPx = with(density) { p.swayDp.dp.toPx() }
             Box(
@@ -592,10 +596,29 @@ fun HomeParticlesBackground(modifier: Modifier = Modifier) {
                             t > 0.75f -> (1f - t) / 0.25f
                             else -> 1f
                         }
-                        alpha = p.maxAlpha * env
+                        alpha = p.maxAlpha * env * fade
                     }
                     .background(p.color, CircleShape)
             )
         }
+    }
+}
+
+/**
+ * PHASE 6: screen backdrop = the theme background + Particles, then the
+ * screen's content on top. Particles are composed first, so every card,
+ * text, button and the Done tick/confetti are drawn OVER them; dialogs are
+ * separate windows and are always above. [fade] < 1 keeps busy screens calm.
+ */
+@Composable
+fun ParticlesBackdrop(
+    bg: Color,
+    modifier: Modifier = Modifier,
+    fade: Float = 0.6f,
+    content: @Composable () -> Unit
+) {
+    Box(modifier.fillMaxSize().background(bg)) {
+        ParticlesBackground(fade = fade)
+        content()
     }
 }

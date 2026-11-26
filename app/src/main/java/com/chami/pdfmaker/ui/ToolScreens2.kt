@@ -760,6 +760,9 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   var minPossibleKb by remember { mutableStateOf<Long?>(null) }
   var isImageProcessing by remember { mutableStateOf(false) }
   var imageProgressText by remember { mutableStateOf("") }
+  // PHASE 5: real progress (files done / total) + Cancel for the Images tab.
+  var imageFraction by remember { mutableStateOf<Float?>(null) }
+  var imageJob by remember { mutableStateOf<Job?>(null) }
   var imageResults by remember { mutableStateOf<List<String>>(emptyList()) }
 
   // --- PDF TAB STATE ---
@@ -772,6 +775,9 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   var pdfPreviewBmp by remember { mutableStateOf<Bitmap?>(null) }
   var isPdfProcessing by remember { mutableStateOf(false) }
   var pdfProgressText by remember { mutableStateOf("") }
+  // PHASE 5: real progress (pages done / total) + Cancel for the PDF tab.
+  var pdfFraction by remember { mutableStateOf<Float?>(null) }
+  var pdfJob by remember { mutableStateOf<Job?>(null) }
 
   // --- DONE STATE ---
   var doneFiles by remember { mutableStateOf<List<DoneFileInfo>?>(null) }
@@ -938,22 +944,38 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
     if (imageUris.isEmpty()) return
     isImageProcessing = true
     imageResults = emptyList()
-    scope.launch {
+    imageFraction = 0f
+    imageProgressText = LocaleHelper.t(ctx, "compress_progress_file").replace("{i}", "1").replace("{total}", "${imageUris.size}")
+    imageJob = scope.launch {
       val outs = mutableListOf<Pair<File, String>>()
       val lines = mutableListOf<String>()
+      // PHASE 5: every file this run wrote (including a kept-PNG sibling),
+      // so Cancel can remove them all. History records are applied only
+      // after the run finished, so a cancelled run leaves none behind.
+      val made = mutableListOf<File>()
+      val records = mutableListOf<Triple<String, Long, Long>>()
+      try {
       imageUris.forEachIndexed { i, u ->
-        withContext(Dispatchers.Main) { imageProgressText = LocaleHelper.t(ctx, "compress_progress_file").replace("{i}", "${i + 1}").replace("{total}", "${imageUris.size}") }
+        ensureActive()
+        withContext(Dispatchers.Main) {
+          imageFraction = i / imageUris.size.toFloat()
+          imageProgressText = LocaleHelper.t(ctx, "compress_progress_file").replace("{i}", "${i + 1}").replace("{total}", "${imageUris.size}")
+        }
         val origKb = (PdfCompress.originalSizeBytes(ctx, u) / 1024L).coerceAtLeast(0)
         val tgt = targetKb ?: (origKb * quality / 100L).toInt().coerceAtLeast(10)
         val out = PdfEngine.outFile(ctx, "Compressed_${i + 1}_${System.currentTimeMillis()}.jpg")
+        made.add(out)
         val compressResult = withContext(Dispatchers.IO) { PdfEngine.compressImageToKbDetailed(ctx, u, tgt, out) }
+        ensureActive()
         val ok = compressResult.ok
         if (ok && out.exists()) {
           // FIX 2026-11-18 (report #15): format-aware keep-smaller —
           // a PNG original that does not shrink is kept in a sibling
           // .png file with MIME image/png, never as PNG bytes in a
           // .jpg. Use the returned file/MIME, never assume .jpg.
-          val kept = withContext(Dispatchers.IO) { PdfCompress.keepSmallerImage(ctx, u, out) }
+          val kept = withContext(Dispatchers.IO) {
+            PdfCompress.keepSmallerImage(ctx, u, out).also { made.add(it.outFile) }
+          }
           if (!kept.ok) {
             lines.add(LocaleHelper.t(ctx, "compress_could_not").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")))
           } else {
@@ -969,16 +991,29 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
               else LocaleHelper.t(ctx, "compress_saved").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")).replace("{from}", "$origKb").replace("{to}", "$afterKb").replace("{pct}", "$savedPct")
             )
             // FIX 2026-11-18 (report #16): record the result so
-            // History can show before→after KB.
-            recordCompressResult(ctx, finalOut.name, origKb, afterKb)
+            // History can show before→after KB. (PHASE 5: applied after
+            // the whole run, see below.)
+            records.add(Triple(finalOut.name, origKb, afterKb))
             outs.add(finalOut to kept.mimeType)
           }
         } else {
           lines.add(LocaleHelper.t(ctx, "compress_could_not").replace("{name}", displayNameOf(ctx, u) ?: LocaleHelper.t(ctx, "compress_image_fallback").replace("{n}", "${i + 1}")))
         }
       }
-      isImageProcessing = false
-      imageProgressText = ""
+      imageFraction = 1f
+      ensureActive()
+      } catch (e: CancellationException) {
+        // Cancel: every file written in this run is removed.
+        withContext(kotlinx.coroutines.NonCancellable) { made.forEach { try { it.delete() } catch (_: Exception) {} } }
+        toastCancelled(ctx, scope)
+        throw e
+      } finally {
+        isImageProcessing = false
+        imageProgressText = ""
+        imageFraction = null
+        imageJob = null
+      }
+      records.forEach { (name, before, after) -> recordCompressResult(ctx, name, before, after) }
       imageResults = lines
       if (outs.isNotEmpty()) {
         doneSummary = lines
@@ -993,12 +1028,34 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
   fun compressPdf() {
     val u = pdfUri ?: return
     isPdfProcessing = true
+    pdfFraction = null // unknown until the first page is done
     pdfProgressText = LocaleHelper.t(ctx, "compress_pdf_progress")
-    scope.launch {
+    pdfJob = scope.launch {
       val out = PdfEngine.outFile(ctx, "Compressed_${System.currentTimeMillis()}.pdf")
-      val res = withContext(Dispatchers.IO) { compressPdfWithQuality(ctx, u, quality, out) }
-      isPdfProcessing = false
-      pdfProgressText = ""
+      var res = PdfCompressResult(false, 0L, false, 0)
+      try {
+        res = withContext(Dispatchers.IO) {
+          val keepGoing = { coroutineContext[Job]?.isActive != false }
+          compressPdfWithQuality(ctx, u, quality, out, shouldContinue = keepGoing) { done, total ->
+            // The last 5% is the final save + check, so the bar only
+            // reaches 100% when the file is really finished.
+            pdfFraction = (done / total.toFloat() * 0.95f).coerceIn(0f, 0.95f)
+            pdfProgressText = LocaleHelper.t(ctx, "progress_page_of").replace("{i}", "$done").replace("{n}", "$total")
+          }
+        }
+        ensureActive()
+        pdfFraction = 1f
+      } catch (e: CancellationException) {
+        // Cancel: no partial or finished output is kept.
+        withContext(kotlinx.coroutines.NonCancellable) { try { out.delete() } catch (_: Exception) {} }
+        toastCancelled(ctx, scope)
+        throw e
+      } finally {
+        isPdfProcessing = false
+        pdfProgressText = ""
+        pdfFraction = null
+        pdfJob = null
+      }
       if (res.locked) {
         // PHASE 4: password-protected PDF — plain words, nothing written.
         Toast.makeText(ctx, LocaleHelper.t(ctx, "label_pdf_unopenable"), Toast.LENGTH_LONG).show()
@@ -1152,9 +1209,7 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         }
         Spacer(Modifier.height(Ds.s16))
         if (isImageProcessing) {
-          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-          Spacer(Modifier.height(Ds.s8))
-          Text(imageProgressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
+          ProcessingPanel(imageFraction, imageProgressText, theme, onCancel = { imageJob?.cancel() })
         }
       } else {
         ChamiSecondaryButton(
@@ -1231,9 +1286,12 @@ fun CompressKbScreen(theme: ChamiTheme, initialPdfUri: Uri? = null, onInitialPdf
         }
         Spacer(Modifier.height(Ds.s16))
         if (isPdfProcessing) {
-          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-          Spacer(Modifier.height(Ds.s8))
-          Text(if (pdfProgressText.isNotEmpty()) pdfProgressText else LocaleHelper.t(ctx, "compress_pdf_progress"), fontSize = Ds.HINT_SP.sp, color = theme.text)
+          ProcessingPanel(
+            pdfFraction,
+            if (pdfProgressText.isNotEmpty()) pdfProgressText else LocaleHelper.t(ctx, "compress_pdf_progress"),
+            theme,
+            onCancel = { pdfJob?.cancel() }
+          )
         }
       }
     }
@@ -1497,27 +1555,51 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
     }
     val ext = formatChoice.lowercase()
     val kbTarget = targetKbStr.toIntOrNull()
+    // PHASE 5: a single image has no pages, so progress is STEPS: resize,
+    // then (only if chosen) re-encode at the picked quality, then (only if
+    // chosen, JPG) the exact-KB pass. One step = indeterminate bar + Cancel.
+    val doReencode = formatChoice != "PNG" && quality != 90
+    val doKb = kbTarget != null && kbTarget > 0 && formatChoice == "JPG"
+    val totalSteps = 1 + (if (doReencode) 1 else 0) + (if (doKb) 1 else 0)
+    fun stepText(n: Int): String =
+      if (totalSteps > 1) LocaleHelper.t(ctx, "progress_step_of").replace("{i}", "$n").replace("{n}", "$totalSteps")
+      else LocaleHelper.t(ctx, "resize_progress")
     isProcessing = true
-    progressText = LocaleHelper.t(ctx, "resize_progress")
-    scope.launch {
+    convertFraction = if (totalSteps > 1) 0f else null
+    progressText = stepText(1)
+    convertJob = scope.launch {
       val origKb = (PdfCompress.originalSizeBytes(ctx, u) / 1024L).coerceAtLeast(0)
       val tmp = PdfEngine.outFile(ctx, "Resized_${w}x${h}_${System.currentTimeMillis()}.$ext")
-      var ok = withContext(Dispatchers.IO) { PdfEngine.resizeConvert(ctx, u, w, h, format, tmp) }
+      var out2: File? = null
+      var ok = false
       var finalFile = tmp
       var kbNote: String? = null
+      try {
+      ok = withContext(Dispatchers.IO) { PdfEngine.resizeConvert(ctx, u, w, h, format, tmp) }
+      ensureActive()
+      var step = 1
       if (ok && formatChoice != "PNG" && quality != 90) {
+        step++
+        convertFraction = (step - 1) / totalSteps.toFloat()
+        progressText = stepText(step)
         // L17: a failed re-encode fails the conversion — the
         // quality-90 file must not silently stand as the result.
         val reencoded = withContext(Dispatchers.IO) { reencodeAtQuality(ctx, tmp, format, quality) }
+        ensureActive()
         if (!reencoded) ok = false
       }
       if (ok && kbTarget != null && kbTarget > 0) {
         if (formatChoice == "JPG") {
-          val out2 = PdfEngine.outFile(ctx, "Resized_${kbTarget}KB_${System.currentTimeMillis()}.jpg")
-          val kbResult = withContext(Dispatchers.IO) { PdfEngine.compressImageToKbDetailed(ctx, Uri.fromFile(tmp), kbTarget, out2) }
+          step++
+          convertFraction = (step - 1) / totalSteps.toFloat()
+          progressText = stepText(step)
+          val kbOut = PdfEngine.outFile(ctx, "Resized_${kbTarget}KB_${System.currentTimeMillis()}.jpg")
+          out2 = kbOut
+          val kbResult = withContext(Dispatchers.IO) { PdfEngine.compressImageToKbDetailed(ctx, Uri.fromFile(tmp), kbTarget, kbOut) }
+          ensureActive()
           if (kbResult.ok) {
-            finalFile = out2
-            val actualKb = out2.length() / 1024L
+            finalFile = kbOut
+            val actualKb = kbOut.length() / 1024L
             val devPct = ((actualKb - kbTarget) * 100.0 / kbTarget)
             kbNote = if (!kbResult.targetMet) {
               // M15: honest note — the target was not reached, this is
@@ -1535,8 +1617,22 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
           }
         }
       }
-      isProcessing = false
-      progressText = ""
+      if (totalSteps > 1) convertFraction = 1f
+      ensureActive()
+      } catch (e: CancellationException) {
+        // Cancel: the resized file and any exact-KB file are removed.
+        withContext(kotlinx.coroutines.NonCancellable) {
+          try { tmp.delete() } catch (_: Exception) {}
+          try { out2?.delete() } catch (_: Exception) {}
+        }
+        toastCancelled(ctx, scope)
+        throw e
+      } finally {
+        isProcessing = false
+        progressText = ""
+        convertFraction = null
+        convertJob = null
+      }
       if (ok) {
         val afterKb = finalFile.length() / 1024L
         doneSummary = listOfNotNull(
@@ -1877,13 +1973,9 @@ fun ResizeConvertScreen(theme: ChamiTheme, title: String = "Image Resizer", onBa
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
-        if (isBatch) {
-          ProcessingPanel(convertFraction, progressText, theme, onCancel = { convertJob?.cancel() })
-        } else {
-          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-          Spacer(Modifier.height(Ds.s8))
-          Text(progressText, fontSize = Ds.HINT_SP.sp, color = theme.text)
-        }
+        // PHASE 5: single mode now uses the same panel (progress + Cancel)
+        // as batch mode.
+        ProcessingPanel(convertFraction, progressText, theme, onCancel = { convertJob?.cancel() })
       }
     }
 
@@ -1939,6 +2031,10 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
   // decode returned null — show an error, never a forever skeleton.
   var previewLoadFailed by remember { mutableStateOf(false) }
   var isProcessing by remember { mutableStateOf(false) }
+  // PHASE 5: real progress (recogniser passes done / 2) + Cancel = stop waiting.
+  var ocrFraction by remember { mutableStateOf<Float?>(null) }
+  var ocrStepText by remember { mutableStateOf("") }
+  var ocrJob by remember { mutableStateOf<Job?>(null) }
   var extractedText by remember { mutableStateOf("") }
   var hasResult by remember { mutableStateOf(false) }
   var noTextFound by remember { mutableStateOf(false) }
@@ -2026,11 +2122,33 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
   fun runOcr() {
     val u = imageUri ?: return
     isProcessing = true
-    scope.launch {
+    ocrFraction = 0f
+    ocrStepText = LocaleHelper.t(ctx, "ocr_step").replace("{i}", "1").replace("{n}", "2")
+    ocrJob = scope.launch {
       // No language picking: ocrImageAnyLanguage runs every on-device
       // recogniser (Latin + Devanagari) and reads whatever is there.
-      val txt = withContext(Dispatchers.IO) { ocrImageAnyLanguage(ctx, u) }
-      isProcessing = false
+      var txt = ""
+      try {
+        txt = withContext(Dispatchers.IO) {
+          ocrImageAnyLanguage(ctx, u) { done, total ->
+            ocrFraction = (done / total.toFloat()).coerceIn(0f, 1f)
+            ocrStepText = LocaleHelper.t(ctx, "ocr_step")
+              .replace("{i}", "${minOf(done + 1, total)}").replace("{n}", "$total")
+          }
+        }
+        ensureActive()
+        ocrFraction = 1f
+      } catch (e: CancellationException) {
+        // Cancel = stop waiting. extractedText / hasResult are never
+        // touched here, so a late result can never appear.
+        toastCancelled(ctx, scope, "toast_cancelled_ocr")
+        throw e
+      } finally {
+        isProcessing = false
+        ocrFraction = null
+        ocrStepText = ""
+        ocrJob = null
+      }
       if (txt.isBlank()) {
         extractedText = ""
         hasResult = false
@@ -2099,9 +2217,12 @@ fun OcrScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
       Spacer(Modifier.height(Ds.s16))
       if (isProcessing) {
-        LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-        Spacer(Modifier.height(Ds.s8))
-        Text(LocaleHelper.t(ctx, "ocr_running"), fontSize = Ds.HINT_SP.sp, color = theme.text)
+        ProcessingPanel(
+          ocrFraction,
+          if (ocrStepText.isNotEmpty()) ocrStepText else LocaleHelper.t(ctx, "ocr_running"),
+          theme,
+          onCancel = { ocrJob?.cancel() }
+        )
         // Phase 6: skeleton reserves the result area while OCR runs.
         Spacer(Modifier.height(Ds.s12))
         Phase6SkeletonBox(200.dp, animOn)
@@ -2289,6 +2410,10 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
 
   var isProcessing by remember { mutableStateOf(false) }
   var progressStatus by remember { mutableStateOf("") }
+  // PHASE 5: real progress (pages done / total) + Cancel for Protect AND
+  // Unlock (only one of them can run at a time, so one job holder).
+  var progressFraction by remember { mutableStateOf<Float?>(null) }
+  var protectJob by remember { mutableStateOf<Job?>(null) }
 
   var doneFile by remember { mutableStateOf<File?>(null) }
   var showDone by remember { mutableStateOf(false) }
@@ -2354,26 +2479,45 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
   fun protect() {
     val uri = selectedUri ?: return
     isProcessing = true
+    progressFraction = null // unknown until the first page is done
     progressStatus = LocaleHelper.t(ctx, "protect_encrypting")
-    scope.launch(Dispatchers.IO) {
+    protectJob = scope.launch {
       val out = PdfEngine.outFile(ctx, "${selectedName}_protected_${System.currentTimeMillis()}.pdf")
-      val ok = PdfProtector.protectPdf(ctx, uri, password, out) { current, total ->
-        progressStatus = LocaleHelper.t(ctx, "protect_encrypting_page").replace("{current}", "$current").replace("{total}", "$total")
-      }
+      var ok = false
       var patched = true
-      if (ok && (!allowPrint || !allowCopy || !allowEdit)) {
-        patched = PdfProtector.patchPermissions(out, password, allowPrint = allowPrint, allowCopy = allowCopy, allowEdit = allowEdit)
-      }
-      withContext(Dispatchers.Main) {
-        isProcessing = false
-        if (ok) {
-          if (!patched) {
-            Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_protect_permissions_failed"), Toast.LENGTH_LONG).show()
+      try {
+        // Same work as before, still on Dispatchers.IO. Cancel (or leaving
+        // the screen) stops it at the next page.
+        withContext(Dispatchers.IO) {
+          val keepGoing = { coroutineContext[Job]?.isActive != false }
+          ok = PdfProtector.protectPdf(ctx, uri, password, out, shouldContinue = keepGoing) { current, total ->
+            progressFraction = (current / total.toFloat()).coerceIn(0f, 1f)
+            progressStatus = LocaleHelper.t(ctx, "protect_encrypting_page").replace("{current}", "$current").replace("{total}", "$total")
           }
-          singleSave(out)
-        } else {
-          Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_encrypt_failed"), Toast.LENGTH_SHORT).show()
+          if (ok && keepGoing() && (!allowPrint || !allowCopy || !allowEdit)) {
+            patched = PdfProtector.patchPermissions(out, password, allowPrint = allowPrint, allowCopy = allowCopy, allowEdit = allowEdit)
+          }
         }
+        ensureActive()
+        progressFraction = 1f
+      } catch (e: CancellationException) {
+        // Cancel: no partial or finished protected file is kept.
+        withContext(kotlinx.coroutines.NonCancellable) { try { out.delete() } catch (_: Exception) {} }
+        toastCancelled(ctx, scope)
+        throw e
+      } finally {
+        isProcessing = false
+        progressStatus = ""
+        progressFraction = null
+        protectJob = null
+      }
+      if (ok) {
+        if (!patched) {
+          Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_protect_permissions_failed"), Toast.LENGTH_LONG).show()
+        }
+        singleSave(out)
+      } else {
+        Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_encrypt_failed"), Toast.LENGTH_SHORT).show()
       }
     }
   }
@@ -2386,34 +2530,58 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
     }
     isProcessing = true
     unlockError = null
-    scope.launch {
+    progressFraction = null // unknown while the file is copied and checked
+    progressStatus = LocaleHelper.t(ctx, "unlock_progress_prepare")
+    protectJob = scope.launch {
       val tmp = File(ctx.cacheDir, "unlock_in_${System.currentTimeMillis()}.pdf")
       val out = PdfEngine.outFile(ctx, "${unlockName}_unlocked_${System.currentTimeMillis()}.pdf")
-      // H6: no whole-file read — the input is only copied to a temp
-      // file (streamed), then PdfProtector.unlockPdf works on a
-      // read-only memory-mapped buffer. The legacy unlockProtectedPdf
-      // fallback (3x full-file copies) is deleted.
-      val result: String? = withContext(Dispatchers.IO) {
-        try {
-          ctx.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(tmp).use { o -> input.copyTo(o) }
+      var result: String? = null
+      try {
+        // H6: no whole-file read — the input is only copied to a temp
+        // file (streamed), then PdfProtector.unlockPdf works on a
+        // read-only memory-mapped buffer. The legacy unlockProtectedPdf
+        // fallback (3x full-file copies) is deleted.
+        result = withContext(Dispatchers.IO) {
+          val keepGoing = { coroutineContext[Job]?.isActive != false }
+          try {
+            ctx.contentResolver.openInputStream(uri)?.use { input ->
+              FileOutputStream(tmp).use { o -> input.copyTo(o) }
+            }
+          } catch (_: Exception) { }
+          if (!tmp.exists()) return@withContext LocaleHelper.t(ctx, "unlock_read_failed")
+          if (!PdfProtector.isEncryptedFile(tmp)) return@withContext LocaleHelper.t(ctx, "unlock_not_protected")
+          if (!PdfProtector.verifyPassword(tmp, unlockPassword)) {
+            return@withContext LocaleHelper.t(ctx, "unlock_wrong_password")
           }
-        } catch (_: Exception) { }
-        if (!tmp.exists()) return@withContext LocaleHelper.t(ctx, "unlock_read_failed")
-        if (!PdfProtector.isEncryptedFile(tmp)) return@withContext LocaleHelper.t(ctx, "unlock_not_protected")
-        if (!PdfProtector.verifyPassword(tmp, unlockPassword)) {
-          return@withContext LocaleHelper.t(ctx, "unlock_wrong_password")
+          val ok = try {
+            PdfProtector.unlockPdf(tmp, out, unlockPassword, shouldContinue = keepGoing) { done, total ->
+              progressFraction = (done / total.toFloat()).coerceIn(0f, 1f)
+              progressStatus = LocaleHelper.t(ctx, "unlock_progress_page").replace("{current}", "$done").replace("{total}", "$total")
+            }
+          } catch (_: Exception) { false }
+          if (!ok) {
+            return@withContext LocaleHelper.t(ctx, "unlock_unsupported")
+          }
+          null // success
         }
-        val ok = try { PdfProtector.unlockPdf(tmp, out, unlockPassword) } catch (_: Exception) { false }
-        if (!ok) {
-          return@withContext LocaleHelper.t(ctx, "unlock_unsupported")
-        }
-        null // success
+        ensureActive()
+        progressFraction = 1f
+      } catch (e: CancellationException) {
+        // Cancel: no partial unlocked file is kept (the temp copy is
+        // removed in finally below).
+        withContext(kotlinx.coroutines.NonCancellable) { try { out.delete() } catch (_: Exception) {} }
+        toastCancelled(ctx, scope)
+        throw e
+      } finally {
+        // L14: the unlock temp file is deleted after success, on
+        // failure AND on Cancel; a failed unlock also leaves no partial
+        // output behind.
+        try { tmp.delete() } catch (_: Exception) {}
+        isProcessing = false
+        progressStatus = ""
+        progressFraction = null
+        protectJob = null
       }
-      // L14: the unlock temp file is deleted after success AND on
-      // failure; a failed unlock also leaves no partial output behind.
-      try { tmp.delete() } catch (_: Exception) {}
-      isProcessing = false
       if (result == null) {
         Toast.makeText(ctx, LocaleHelper.t(ctx, "toast_unlocked"), Toast.LENGTH_SHORT).show()
         singleSave(out)
@@ -2515,7 +2683,12 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
           }
         }
         if (isProcessing) {
-          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
+          ProcessingPanel(
+            progressFraction,
+            if (progressStatus.isNotEmpty()) progressStatus else LocaleHelper.t(ctx, "unlock_progress_prepare"),
+            theme,
+            onCancel = { protectJob?.cancel() }
+          )
         }
       } else {
         ToolCard(theme = theme) {
@@ -2657,9 +2830,12 @@ fun ProtectPdfScreen(theme: ChamiTheme, onBack: () -> Unit) {
         }
 
         if (isProcessing) {
-          LinearProgressIndicator(Modifier.fillMaxWidth(), color = theme.primary)
-          Spacer(Modifier.height(Ds.s4))
-          Text(if (progressStatus.isNotEmpty()) progressStatus else LocaleHelper.t(ctx, "protect_encrypting_short"), fontSize = Ds.HINT_SP.sp, color = theme.text)
+          ProcessingPanel(
+            progressFraction,
+            if (progressStatus.isNotEmpty()) progressStatus else LocaleHelper.t(ctx, "protect_encrypting_short"),
+            theme,
+            onCancel = { protectJob?.cancel() }
+          )
         }
       }
     }

@@ -257,11 +257,13 @@ fun DoneScreen(
   // animations are off. The tick (600ms) and confetti (1800ms) keep
   // their spec timings when animations are on, and show their final
   // state instantly (full tick, no confetti) when animations are off.
+  // PHASE 6: Particles behind the Done screen. The enter fade stays on the
+  // outer layer exactly as before (it used to sit on the Column that drew
+  // the background); the tick and confetti are drawn over the dots.
+  ParticlesBackdrop(theme.bg, modifier = Modifier.toolEnterFade(0, animOn), fade = 0.8f) {
   Column(
     modifier = Modifier
       .fillMaxSize()
-      .toolEnterFade(0, animOn)
-      .background(theme.bg)
       .statusBarsPadding()
       .navigationBarsPadding()
       .padding(horizontal = Ds.s16, vertical = Ds.s16),
@@ -491,6 +493,7 @@ fun DoneScreen(
       Spacer(Modifier.size(Ds.s8))
       Text(LocaleHelper.t(ctx, "done"), fontSize = Ds.BUTTON_SP.sp, fontWeight = FontWeight.SemiBold, color = ChamiColors.darkGreen)
     }
+  }
   }
 }
 
